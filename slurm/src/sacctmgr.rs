@@ -16,8 +16,8 @@ use tokio::sync::Mutex;
 
 use crate::cache;
 use crate::slurm::{
-    clean_account_name, clean_user_name, get_managed_organization, SlurmAccount, SlurmLimit,
-    SlurmUser,
+    clean_account_name, clean_user_name, get_managed_organization, RequeuePolicy, SlurmAccount,
+    SlurmLimit, SlurmUser,
 };
 use crate::slurm::{SlurmJob, SlurmNodes};
 
@@ -1039,6 +1039,9 @@ pub struct ReportTotals {
     requeue_usage: u64,
     requeue_events: u64,
     requeue_wait_seconds: u64,
+    charged_requeue_usage: u64,
+    charged_requeue_events: u64,
+    charged_requeue_wait_seconds: u64,
     /// Set when a record counted as a job in this window had not finished when
     /// we asked, so its runtime is not yet final. Such a window must not be
     /// frozen - see `record_job`.
@@ -1063,6 +1066,13 @@ impl ReportTotals {
 /// always reported. Keeping the two apart is the whole point of requeue
 /// accounting - see `docs/plans/slurm-requeue-accounting-design.md`.
 ///
+/// `policy` then decides which of the superseded attempts are charged anyway.
+/// A charged attempt is accumulated into the main figures with every other job,
+/// exactly as though it had never been requeued, *and* recorded again in the
+/// charged-requeue maps so that it can still be seen - those maps describe
+/// usage that is already in the total, and are never added to it. See
+/// `docs/plans/slurm-requeue-charging-design.md`.
+///
 /// Usage is accumulated for every record overlapping the window, since the
 /// record has already been clipped to it. Job and event *counts*, and the wait
 /// times that go with them, are accumulated only for records that started
@@ -1073,6 +1083,7 @@ pub fn record_job(
     report: &mut DailyProjectUsageReport,
     job: &SlurmJob,
     window_start: &chrono::DateTime<Utc>,
+    policy: RequeuePolicy,
     totals: &mut ReportTotals,
 ) {
     let usage = job.billed_node_seconds();
@@ -1082,6 +1093,75 @@ pub fn record_job(
     // window, so counting a *job* needs this guard or a long job is counted
     // once per window it touches.
     let started_in_window = job.original_start_time() >= window_start;
+
+    if job.is_requeued_attempt() && policy.charges(job.terminal_state()) {
+        // Charged: the attempt counts as usage like any other, and is recorded
+        // in the charged maps alongside rather than instead - those describe a
+        // subset of what has just been added, never an addition to it.
+        let state = job.terminal_state();
+
+        report.add_charged_requeue_usage(job.user(), Usage::new(usage));
+        report.add_charged_requeue_state_usage(state, Usage::new(usage));
+        totals.charged_requeue_usage = totals.charged_requeue_usage.saturating_add(usage);
+
+        report.add_charged_requeue_component_usage(
+            "cpu",
+            job.user(),
+            Usage::new(job.cpu_seconds()),
+        );
+        report.add_charged_requeue_component_usage(
+            "memory",
+            job.user(),
+            Usage::new(job.memory_seconds()),
+        );
+        report.add_charged_requeue_component_usage(
+            "gpu",
+            job.user(),
+            Usage::new(job.gpu_seconds()),
+        );
+        report.add_charged_requeue_component_usage(
+            "billing",
+            job.user(),
+            Usage::new(job.billing_seconds()),
+        );
+
+        // Counted with no window guard, for the reason set out at length on the
+        // absorbed events below: a superseded attempt is classified `Requeued`
+        // in exactly one window, the one holding the requeue itself.
+        report.add_charged_requeue_events(job.user(), state, 1);
+        report.add_charged_requeue_wait_seconds(job.user(), wait_seconds);
+        totals.charged_requeue_events = totals.charged_requeue_events.saturating_add(1);
+        totals.charged_requeue_wait_seconds = totals
+            .charged_requeue_wait_seconds
+            .saturating_add(wait_seconds);
+
+        // A charged attempt held the reservation's nodes exactly as an absorbed
+        // one did, and `reservation_requeue_usage` is the record of what a
+        // reservation's occupancy owed to requeues. It is not a charging
+        // figure, so both kinds belong in it.
+        if job.is_reserved() {
+            report.add_reservation_requeue_usage(job.reservation(), job.user(), Usage::new(usage));
+        }
+
+        // ...and then falls through to the usage accumulation below, which is
+        // what "charged like any other job" means. What it must *not* pick up
+        // is the job count, the expansion factor or the job size: those are
+        // properties of a job, counted once in the window its base attempt
+        // started in, and a superseded attempt is not a second job.
+        report.add_usage(job.user(), Usage::new(usage));
+        totals.usage = totals.usage.saturating_add(usage);
+
+        report.add_component_usage("cpu", job.user(), Usage::new(job.cpu_seconds()));
+        report.add_component_usage("memory", job.user(), Usage::new(job.memory_seconds()));
+        report.add_component_usage("gpu", job.user(), Usage::new(job.gpu_seconds()));
+        report.add_component_usage("billing", job.user(), Usage::new(job.billing_seconds()));
+
+        if job.is_reserved() {
+            report.add_reservation_usage(job.reservation(), job.user(), Usage::new(usage));
+        }
+
+        return;
+    }
 
     if job.is_requeued_attempt() {
         let state = job.terminal_state();
@@ -1253,6 +1333,7 @@ fn report_node_failures(jobs: &[SlurmJob], project: &ProjectMapping) {
 fn check_counter_consistency(
     report: &DailyProjectUsageReport,
     totals: &ReportTotals,
+    policy: RequeuePolicy,
     project: &ProjectMapping,
     day: &greatwestern::grammar::Date,
 ) -> bool {
@@ -1321,6 +1402,47 @@ fn check_counter_consistency(
         );
     }
 
+    if report.num_charged_requeue_events() != totals.charged_requeue_events
+        || report.charged_requeue_wait_seconds() != totals.charged_requeue_wait_seconds
+        || report.total_charged_requeue_usage().seconds() != totals.charged_requeue_usage
+    {
+        consistent = false;
+        tracing::warn!(
+            "Charged requeue inconsistency for project {} on {}: \
+             local counters ({} events, {}s wait, {}s usage) differ from report totals \
+             ({} events, {}s wait, {}s usage). This may indicate a bug.",
+            project.project(),
+            day,
+            totals.charged_requeue_events,
+            totals.charged_requeue_wait_seconds,
+            totals.charged_requeue_usage,
+            report.num_charged_requeue_events(),
+            report.charged_requeue_wait_seconds(),
+            report.total_charged_requeue_usage().seconds()
+        );
+    }
+
+    // A state the report charged for that the policy does not charge for means
+    // the two have come apart - a report built under one policy merged with one
+    // built under another, or the split applied somewhere that did not ask.
+    // Checked here rather than in `is_consistent` because the policy is the
+    // agent's, not the report's: a report travels between agents, and the one
+    // reading it may be configured differently from the one that wrote it.
+    for state in report.charged_requeue_states() {
+        if !policy.charges(&state) {
+            consistent = false;
+            tracing::warn!(
+                "Report for project {} on {} charges requeues in state '{}', which the \
+                 policy '{}' in force here does not charge. This may indicate a bug, or \
+                 a report built under a different policy.",
+                project.project(),
+                day,
+                state,
+                policy
+            );
+        }
+    }
+
     // the per-state maps must account for every event and every second of
     // requeue usage - an unrecognised Slurm state is bucketed, never dropped
     if !report.is_consistent() {
@@ -1364,10 +1486,25 @@ async fn complete_and_cache_if_final(
     daily_report: &mut DailyProjectUsageReport,
     totals: &ReportTotals,
     counters_agree: bool,
+    is_partial: bool,
     project: &ProjectMapping,
     day: &greatwestern::grammar::Date,
     now: &chrono::DateTime<Utc>,
 ) {
+    if is_partial {
+        // some part of the day could not be read at all - see `get_hourly_report`.
+        // What we have is the truth about the hours we did read, and nothing at
+        // all about the rest, so it must not be completed or cached: a cached
+        // day is never re-read, and this one has to be.
+        tracing::warn!(
+            "Not caching the report for project {} on {}: part of the day could not be \
+             read from Slurm, so the report is incomplete.",
+            project.project(),
+            day
+        );
+        return;
+    }
+
     if daily_report.total_usage().seconds() != totals.usage {
         // this points to some error when generating the values...
         tracing::error!(
@@ -1443,6 +1580,18 @@ async fn get_hourly_report(
     let mut daily_report = DailyProjectUsageReport::default();
     let mut totals = ReportTotals::default();
 
+    // Read once for the whole day rather than per record: a day built under two
+    // different policies would be internally inconsistent, and nothing else
+    // here would notice.
+    let policy = cache::get_requeue_policy().await;
+
+    // Hours that Slurm would not answer for. An hour is a small enough piece
+    // that losing one is better than losing the whole run, so a failure here
+    // is skipped rather than propagated - but the day it belongs to is then
+    // only partly known, and must not be completed or cached as if it were
+    // whole.
+    let mut skipped_hours: usize = 0;
+
     // we need to get the report hour by hour from slurm, as users may have
     // run very large numbers of jobs in a day, and sacct may time out
     for hour in day.hours() {
@@ -1457,7 +1606,13 @@ async fn get_hourly_report(
             let hour_start_time = hour.start_time().and_utc();
 
             for job in &hourly_report {
-                record_job(&mut daily_report, job, &hour_start_time, &mut totals);
+                record_job(
+                    &mut daily_report,
+                    job,
+                    &hour_start_time,
+                    policy,
+                    &mut totals,
+                );
             }
 
             continue;
@@ -1512,9 +1667,44 @@ async fn get_hourly_report(
         let response = runner(expires)
             .await?
             .run_json(&cmd, std::time::Duration::from_secs(120))
-            .await?;
+            .await;
 
-        let jobs = SlurmJob::get_consumers(&response, &start_time, &end_time, slurm_nodes)?;
+        // An hour is already the smallest piece we know how to ask for, so
+        // there is nothing left to fall back to: record that this one is
+        // missing and carry on with the rest of the day. This matters most at
+        // the end of a long reporting run, where one hour that `sacct` cannot
+        // answer would otherwise throw away every hour read before it.
+        let jobs = match response {
+            Ok(response) => {
+                match SlurmJob::get_consumers(&response, &start_time, &end_time, slurm_nodes) {
+                    Ok(jobs) => jobs,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Could not read the Slurm records for project {} for {}: {}. \
+                             This hour is missing from the report for {}.",
+                            project.project(),
+                            hour,
+                            e,
+                            day
+                        );
+                        skipped_hours = skipped_hours.saturating_add(1);
+                        continue;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Could not get usage for project {} for {}: {}. \
+                     This hour is missing from the report for {}.",
+                    project.project(),
+                    hour,
+                    e,
+                    day
+                );
+                skipped_hours = skipped_hours.saturating_add(1);
+                continue;
+            }
+        };
 
         tracing::debug!(
             "Got {} jobs for project {} on {}",
@@ -1545,7 +1735,7 @@ async fn get_hourly_report(
         report_node_failures(&jobs, project);
 
         for job in &jobs {
-            record_job(&mut daily_report, job, &start_time, &mut totals);
+            record_job(&mut daily_report, job, &start_time, policy, &mut totals);
         }
     }
 
@@ -1560,13 +1750,25 @@ async fn get_hourly_report(
         totals.requeue_usage
     );
 
+    if skipped_hours > 0 {
+        tracing::warn!(
+            "The report for project {} on {} is missing {} of the day's hours, which \
+             Slurm could not be asked for. Its usage is therefore a lower bound, and \
+             the day will be read again rather than cached.",
+            project.project(),
+            day,
+            skipped_hours
+        );
+    }
+
     // runtime consistency check: local shadow counters must match the report's scalar totals
-    let counters_agree = check_counter_consistency(&daily_report, &totals, project, day);
+    let counters_agree = check_counter_consistency(&daily_report, &totals, policy, project, day);
 
     complete_and_cache_if_final(
         &mut daily_report,
         &totals,
         counters_agree,
+        skipped_hours > 0,
         project,
         day,
         &now,
@@ -1606,6 +1808,7 @@ async fn get_daily_report(
     }
 
     let now = chrono::Utc::now();
+    let policy = cache::get_requeue_policy().await;
     let start_time = day.day().start_time().and_utc();
     let end_time = day.day().end_time().and_utc();
 
@@ -1670,16 +1873,18 @@ async fn get_daily_report(
             report_node_failures(&jobs, project);
 
             for job in &jobs {
-                record_job(&mut daily_report, job, &start_time, &mut totals);
+                record_job(&mut daily_report, job, &start_time, policy, &mut totals);
             }
 
             // runtime consistency check
-            let counters_agree = check_counter_consistency(&daily_report, &totals, project, day);
+            let counters_agree =
+                check_counter_consistency(&daily_report, &totals, policy, project, day);
 
             complete_and_cache_if_final(
                 &mut daily_report,
                 &totals,
                 counters_agree,
+                false,
                 project,
                 day,
                 &now,
@@ -1688,15 +1893,25 @@ async fn get_daily_report(
 
             Ok(daily_report)
         }
-        Err(Error::Timeout(_)) => {
+        Err(e) => {
+            // Any failure here means the same thing: a day was more than this
+            // `sacct` could answer in one go. A wall-clock timeout is only the
+            // politest of the ways that happens - an out-of-memory kill, or a
+            // limit enforced on the scheduler's side, exits non-zero instead,
+            // and output truncated part-way through comes back as JSON that
+            // will not parse. All three used to fall through to an empty
+            // report, which reads exactly like a project that ran nothing.
+            // Asking for the day an hour at a time is the answer to all of
+            // them, and if `sacct` is genuinely broken rather than merely
+            // overloaded, the hourly queries say so just as loudly.
             tracing::warn!(
-                "Timed out getting usage for project {} on {}. Switching to hourly reporting.",
+                "Could not get usage for project {} on {}: {}. Switching to hourly reporting.",
                 project.project(),
-                day
+                day,
+                e
             );
 
-            // we need to switch to getting an hourly report for this date
-            return get_hourly_report(
+            get_hourly_report(
                 expires,
                 project,
                 day,
@@ -1705,19 +1920,7 @@ async fn get_daily_report(
                 cluster,
                 partition_command,
             )
-            .await;
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Could not get usage for project {} on {}: {}",
-                project.project(),
-                day,
-                e
-            );
-
-            // we will return an empty report - this will not be complete
-            // and will not be cached
-            Ok(DailyProjectUsageReport::default())
+            .await
         }
     }
 }
@@ -1810,26 +2013,64 @@ pub async fn get_usage_report(
         report.set_report(&day, &daily_report);
     }
 
+    record_limit_correction(project, &report).await;
+
     Ok(report)
 }
 
-pub async fn get_limit(
-    project: &ProjectMapping,
-    expires: &chrono::DateTime<Utc>,
-) -> Result<Usage, Error> {
-    assert_not_expired(expires)?;
+///
+/// Update the cached requeue correction from a report we have just built.
+///
+/// A report must not write to the cluster: this records what the correction
+/// should be and stops. The hourly applier in `spawn_limit_applier` does the
+/// writing, which keeps a reporting call from turning into a burst of
+/// `sacctmgr modify` and keeps a job's deadline from being spent on one.
+///
+/// Only the current month counts. The caller resets each month's limit and
+/// Slurm's counters together, so a correction that reached back into last month
+/// would inflate a limit against a counter that no longer holds the usage it is
+/// correcting for. A report covering part of the month contributes what it
+/// saw - the cache ratchets, so a partial view can only ever be caught up by a
+/// fuller one.
+///
+async fn record_limit_correction(project: &ProjectMapping, report: &ProjectUsageReport) {
+    let month = current_correction_month();
 
-    let account = SlurmAccount::from_mapping(project)?;
+    let absorbed: Usage = report
+        .dates()
+        .into_iter()
+        .filter(|day| correction_month(day) == month)
+        .map(|day| report.get_report(&day).total_requeue_usage())
+        .sum();
 
-    let account = match get_account(account.name(), expires).await? {
-        Some(account) => account,
-        None => {
-            tracing::warn!("Could not get account {}", account.name());
-            return Err(Error::NotFound(account.name().to_string()));
-        }
+    let Ok(account) = SlurmAccount::from_mapping(project) else {
+        return;
     };
 
-    // check that the limits in slurm match up...
+    let held =
+        cache::record_limit_correction(project.project(), account.name(), &month, absorbed).await;
+
+    tracing::debug!(
+        "Requeue correction for project {} in {}: {} seconds absorbed this report, {} held.",
+        project.project(),
+        month,
+        absorbed.seconds(),
+        held.seconds()
+    );
+}
+
+///
+/// The limit Slurm holds for an account, or `None` if it holds none.
+///
+/// `None` means the account is *unlimited*, which is a different thing from a
+/// limit of zero and must never be corrected into one.
+///
+async fn slurm_limit_for(
+    account: &SlurmAccount,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Option<SlurmLimit>, Error> {
+    let cluster = cache::get_cluster().await?;
+
     let cmd = priority_runner(expires).await?.build_command(
         "SACCTMGR",
         vec![
@@ -1838,7 +2079,7 @@ pub async fn get_limit(
             "association".to_string(),
             "where".to_string(),
             format!("account={}", account.name()),
-            format!("cluster={}", cache::get_cluster().await?),
+            format!("cluster={}", cluster),
         ],
     )?;
 
@@ -1866,20 +2107,257 @@ pub async fn get_limit(
         None => Vec::new(),
     };
 
-    let cluster = cache::get_cluster().await?;
+    Ok(limits
+        .into_iter()
+        .find(|l| l.account() == account.name() && l.cluster() == cluster))
+}
+
+///
+/// How often the applier looks for a correction to write.
+///
+/// An hour is ample. The site's Slurm policy *holds* over-spending jobs rather
+/// than killing them, so the worst a late correction costs is a job held a
+/// little longer, or one that starts with insufficient credit and overspends a
+/// little. Neither is worth a tighter loop against `slurmctld`.
+const LIMIT_APPLIER_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// How long the applier gives itself for one pass.
+const LIMIT_APPLIER_EXPIRY_MINUTES: i64 = 30;
+
+///
+/// Start the background task that writes requeue corrections into Slurm.
+///
+/// Reports compute the correction and stop; this writes it. Separating them
+/// keeps a reporting call from mutating cluster state, and keeps a burst of
+/// `sacctmgr modify` from riding on a nightly sweep of every project.
+///
+/// Call once at startup. The task runs indefinitely.
+///
+pub fn spawn_limit_applier() {
+    tokio::spawn(async {
+        loop {
+            tokio::time::sleep(LIMIT_APPLIER_INTERVAL).await;
+
+            if let Err(e) = apply_limit_corrections().await {
+                tracing::error!("Could not apply requeue limit corrections: {}", e);
+            }
+        }
+    });
+}
+
+///
+/// One pass of the applier: bring every project's `GrpTRESMins` up to its
+/// requested limit plus this month's correction.
+///
+/// Four things it will not do, each of which is a way to lose a project's
+/// allocation:
+///
+/// - **It never lowers a limit.** The base/requeue split is window-local, so a
+///   recomputed month can come out lower; acting on that would hold a project's
+///   jobs for a reclassification. The cache ratchets and so does this.
+/// - **It never creates a limit.** An account with no `GrpTRESMins` is
+///   unlimited, and correcting an unlimited account would cap it.
+/// - **It never corrects a zero.** A requested limit of zero is the caller
+///   stopping the project.
+/// - **It never touches an account OpenPortal does not manage.**
+///
+async fn apply_limit_corrections() -> Result<(), Error> {
+    let month = current_correction_month();
+    let pending = cache::limit_corrections_to_apply(&month).await;
+
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    tracing::info!(
+        "Applying requeue limit corrections for {} project(s) in {}.",
+        pending.len(),
+        month
+    );
+
+    for (project, correction) in pending {
+        let expires = chrono::Utc::now() + chrono::Duration::minutes(LIMIT_APPLIER_EXPIRY_MINUTES);
+
+        // Serialised against everything else that touches this project, so a
+        // correction cannot interleave with a `set_limit` and leave Slurm
+        // holding one figure while the cache records another.
+        let mutex = cache::get_project_mutex(&project).await?;
+        let _guard = mutex.lock().await;
+
+        if let Err(e) = apply_limit_correction(&project, &correction, &expires).await {
+            tracing::error!(
+                "Could not apply the requeue correction for project {}: {}. It will be \
+                 retried on the next pass.",
+                project,
+                e
+            );
+        }
+    }
+
+    Ok(())
+}
+
+async fn apply_limit_correction(
+    project: &greatwestern::grammar::ProjectIdentifier,
+    correction: &cache::LimitCorrection,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<(), Error> {
+    let Some(account) = get_account(correction.account(), expires).await? else {
+        tracing::warn!(
+            "Not correcting the limit for project {}: Slurm has no account {}.",
+            project,
+            correction.account()
+        );
+        return Ok(());
+    };
+
+    if !account.is_managed() {
+        tracing::warn!(
+            "Refusing to correct the limit on Slurm account '{}': it is in organization \
+             '{}', not the OpenPortal-managed '{}'.",
+            account.name(),
+            account.organization(),
+            get_managed_organization()
+        );
+        return Ok(());
+    }
+
+    if account.limit().is_zero() {
+        // Either the caller has stopped this project, or we do not yet know
+        // what it asked for. Neither is a limit to add a correction to, and
+        // both would be made worse by inventing one.
+        tracing::debug!(
+            "Not correcting the limit for account {}: no requested limit is recorded.",
+            account.name()
+        );
+        return Ok(());
+    }
+
+    // An account with no `GrpTRESMins` at all is unlimited. Correcting it would
+    // cap it, which is the opposite of what a correction is for.
+    let holds_a_limit = match slurm_limit_for(&account, expires).await? {
+        Some(slurm_limit) => slurm_limit.has_any_limit(),
+        None => false,
+    };
+
+    if !holds_a_limit {
+        tracing::debug!(
+            "Not correcting the limit for account {}: Slurm holds no limit for it.",
+            account.name()
+        );
+        return Ok(());
+    }
+
+    let applied = corrected_limit(account.limit(), &correction.computed());
+    let already = corrected_limit(account.limit(), &correction.applied());
+
+    if applied.seconds() <= already.seconds() {
+        tracing::debug!(
+            "Requeue correction for account {} would not raise its limit ({} vs {}). \
+             Leaving it alone.",
+            account.name(),
+            applied,
+            already
+        );
+        return Ok(());
+    }
+
+    write_slurm_limit(&account, &applied, expires).await?;
+
+    cache::set_applied_limit_correction(
+        project,
+        account.name(),
+        &current_correction_month(),
+        correction.computed(),
+    )
+    .await;
+
+    tracing::info!(
+        "Raised the Slurm limit for account {} to {} - {} requested plus {} of requeue \
+         usage this month that was absorbed rather than charged.",
+        account.name(),
+        applied,
+        account.limit(),
+        correction.computed()
+    );
+
+    Ok(())
+}
+
+///
+/// The month a correction belongs to, as `YYYY-MM`.
+///
+/// op-slurm does not know when the accounting month turns over - the caller
+/// calculates each month's limit after the previous month has been invoiced,
+/// and resets Slurm's counters with it. All this has to guarantee is that a
+/// correction covers only the current calendar month's jobs; the caller's reset
+/// then lands on a correction that is starting from zero again, and the two
+/// stay in step without either knowing the other's schedule.
+///
+fn correction_month(day: &greatwestern::grammar::Date) -> String {
+    day.to_chrono().format("%Y-%m").to_string()
+}
+
+fn current_correction_month() -> String {
+    correction_month(&greatwestern::grammar::Date::today())
+}
+
+///
+/// The limit to write into Slurm for a project asking for `requested`, given a
+/// correction of `correction`.
+///
+/// Three rules live here, and each of them is a way to lose a project's
+/// allocation if it is got wrong:
+///
+/// - **Zero stays zero.** A requested limit of zero is the caller stopping the
+///   project, and adding a correction to it would hand back an allowance at
+///   precisely the moment the intent was to withdraw one.
+/// - **The correction is rounded up to whole minutes, once.** `GrpTRESMins` is
+///   in minutes and `set_limit` truncates on the way in, so a figure recomputed
+///   and re-truncated on every pass drifts downward a minute per TRES at a
+///   time. Rounding up here means the drift cannot happen and what little is
+///   lost is lost in the project's favour.
+/// - **The addition saturates.** Release builds are `panic = "abort"` with
+///   `overflow-checks = true`, so a bare `+` on figures this size is a process
+///   kill rather than a wrong answer.
+///
+fn corrected_limit(requested: &Usage, correction: &Usage) -> Usage {
+    if requested.is_zero() {
+        return Usage::default();
+    }
+
+    let whole_minutes = correction.seconds().div_ceil(60).saturating_mul(60);
+
+    Usage::new(requested.seconds().saturating_add(whole_minutes))
+}
+
+pub async fn get_limit(
+    project: &ProjectMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Usage, Error> {
+    assert_not_expired(expires)?;
+
+    let account = SlurmAccount::from_mapping(project)?;
+
+    let account = match get_account(account.name(), expires).await? {
+        Some(account) => account,
+        None => {
+            tracing::warn!("Could not get account {}", account.name());
+            return Err(Error::NotFound(account.name().to_string()));
+        }
+    };
 
     let project_limit = account.limit();
 
-    let slurm_limit = match limits
-        .iter()
-        .find(|l| l.account() == account.name() && l.cluster() == cluster)
-    {
+    let slurm_limit = match slurm_limit_for(&account, expires).await? {
         Some(slurm_limit) => slurm_limit,
         None => {
             tracing::warn!("Could not find limit for account {}", account.name());
             return Err(Error::NotFound(account.name().to_string()));
         }
     };
+
+    let slurm_limit = &slurm_limit;
 
     tracing::debug!(
         "Found limit for account {}: {}",
@@ -1969,19 +2447,166 @@ pub async fn get_limit(
         }
     }
 
-    if let Some(actual_slurm_limit) = actual_slurm_limit {
-        // we need to set this to the actual slurm limit
-        let mut account = account.clone();
-        account.set_limit(&actual_slurm_limit);
+    // What Slurm holds is `requested + correction`, not `requested`, so the
+    // account's own limit is the wrong thing to have compared it against and
+    // the wrong thing to overwrite with it. Three values, never two - see
+    // `docs/plans/slurm-requeue-charging-design.md` §4.1.
+    let month = current_correction_month();
+    let correction = cache::get_limit_correction(project.project(), &month).await;
 
-        // now save the account to the cache
-        cache::add_account(&account).await?;
+    let Some(observed) = actual_slurm_limit else {
+        // Slurm holds exactly what we last applied, so the requested limit is
+        // whatever it was.
+        return Ok(*account.limit());
+    };
 
-        tracing::info!("Updated account limit to {}", actual_slurm_limit);
-        return Ok(actual_slurm_limit);
+    let applied = corrected_limit(account.limit(), &correction_or_zero(&correction));
+
+    if observed.seconds() == applied.seconds() {
+        return Ok(*account.limit());
     }
 
+    // A cold cache knows no requested limit - `SlurmAccount::construct` leaves
+    // it at zero, because the limit is never read from the account itself. What
+    // Slurm holds is then the only evidence there is, and it can be decomposed
+    // only once the correction is known.
+    if account.limit().is_zero() {
+        let Some(correction) = correction else {
+            tracing::warn!(
+                "Do not yet know the requeue correction for account {} in {}, so cannot say \
+                 how much of its Slurm limit of {} was asked for. Reporting the Slurm \
+                 figure; a usage report for this month will settle it.",
+                account.name(),
+                month,
+                observed
+            );
+
+            return Ok(observed);
+        };
+
+        let requested = Usage::new(
+            observed
+                .seconds()
+                .saturating_sub(correction.applied().seconds()),
+        );
+
+        let mut account = account.clone();
+        account.set_limit(&requested);
+        cache::add_account(&account).await?;
+
+        tracing::info!(
+            "Recovered the requested limit for account {}: {} of the {} Slurm holds, the \
+             rest being this month's requeue correction.",
+            account.name(),
+            requested,
+            observed
+        );
+
+        return Ok(requested);
+    }
+
+    // op-slurm has sole authority over these accounts, so a `GrpTRESMins` that
+    // disagrees with what we applied is something that changed behind our back.
+    // It is put back, not believed.
+    tracing::error!(
+        "Slurm limit for account {} is {}, not the {} this agent applied ({} requested plus \
+         a {} requeue correction). Something changed it outside OpenPortal. Setting it back.",
+        account.name(),
+        observed,
+        applied,
+        account.limit(),
+        correction_or_zero(&correction)
+    );
+
+    write_slurm_limit(&account, &applied, expires).await?;
+
     Ok(*account.limit())
+}
+
+/// The applied part of a correction, or zero when none is known.
+///
+/// Only ever used where zero is the *safe* reading - deciding what Slurm ought
+/// to be holding right now. Nothing that could lower a limit may use it.
+fn correction_or_zero(correction: &Option<cache::LimitCorrection>) -> Usage {
+    match correction {
+        Some(correction) => correction.applied(),
+        None => Usage::default(),
+    }
+}
+
+///
+/// Write `limit` into the account's `GrpTRESMins`, in every TRES the default
+/// node describes.
+///
+/// This is the one place that talks to `sacctmgr` about limits, so that the
+/// figure Slurm holds and the figure the cache thinks it holds can only ever be
+/// set together. `limit` is the *applied* figure - the requested limit plus the
+/// requeue correction - never the requested one.
+///
+async fn write_slurm_limit(
+    account: &SlurmAccount,
+    limit: &Usage,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<(), Error> {
+    let cluster = cache::get_cluster().await?;
+
+    // calculate the GRES limits in terms of CPU, GPU and Memory
+    let node = cache::get_default_node().await?;
+
+    let mut tres: Vec<String> = Vec::new();
+
+    if node.has_cpus() {
+        tres.push(format!(
+            "cpu={}",
+            (node.cpus() as f64 * limit.minutes()) as u64
+        ));
+    }
+
+    if node.has_gpus() {
+        tres.push(format!(
+            "gres/gpu={}",
+            (node.gpus() as f64 * limit.minutes()) as u64
+        ));
+    }
+
+    if node.has_mem() {
+        tres.push(format!(
+            "mem={}",
+            (node.mem() as f64 * limit.minutes()) as u64
+        ));
+    }
+
+    if node.has_billing() {
+        tres.push(format!(
+            "billing={}",
+            (node.billing() as f64 * limit.minutes()) as u64
+        ));
+    }
+
+    if tres.is_empty() {
+        return Ok(());
+    }
+
+    let cmd = priority_runner(expires).await?.build_command(
+        "SACCTMGR",
+        vec![
+            "--immediate".to_string(),
+            "modify".to_string(),
+            "account".to_string(),
+            account.name().to_string(),
+            "set".to_string(),
+            format!("GrpTRESMins={}", tres.join(",")),
+            "where".to_string(),
+            format!("cluster={}", cluster),
+        ],
+    )?;
+
+    priority_runner(expires)
+        .await?
+        .run(&cmd, DEFAULT_TIMEOUT)
+        .await?;
+
+    Ok(())
 }
 
 pub async fn set_limit(
@@ -2020,66 +2645,43 @@ pub async fn set_limit(
 
             let mut account = account.clone();
 
+            // The account carries the *requested* limit - what the caller asked
+            // for and what `get_limit` gives back. What Slurm is told is that
+            // plus this month's requeue correction.
             account.set_limit(limit);
 
-            let cluster = cache::get_cluster().await?;
+            let month = current_correction_month();
+            let correction = cache::get_limit_correction(project.project(), &month).await;
 
-            // calculate the GRES limits in terms of CPU, GPU and Memory
-            let node = cache::get_default_node().await?;
-
-            let mut tres: Vec<String> = Vec::new();
-
-            if node.has_cpus() {
-                tres.push(format!(
-                    "cpu={}",
-                    (node.cpus() as f64 * limit.minutes()) as u64
-                ));
+            // Unknown is not zero, but a caller setting a limit is an
+            // instruction, not a guess: it is honoured with whatever correction
+            // is known, and the hourly applier adds the rest as soon as a usage
+            // report has computed it. Writing nothing instead would leave a
+            // project running on an old limit the caller has just withdrawn -
+            // which is exactly the case where the caller has zeroed it because
+            // the project overspent.
+            if correction.is_none() && !limit.is_zero() {
+                tracing::warn!(
+                    "Setting the limit for account {} without knowing this month's requeue \
+                     correction - it will be applied once a usage report has computed it.",
+                    account.name()
+                );
             }
 
-            if node.has_gpus() {
-                tres.push(format!(
-                    "gres/gpu={}",
-                    (node.gpus() as f64 * limit.minutes()) as u64
-                ));
-            }
+            let applied = corrected_limit(limit, &correction_or_zero(&correction));
 
-            if node.has_mem() {
-                tres.push(format!(
-                    "mem={}",
-                    (node.mem() as f64 * limit.minutes()) as u64
-                ));
-            }
-
-            if node.has_billing() {
-                tres.push(format!(
-                    "billing={}",
-                    (node.billing() as f64 * limit.minutes()) as u64
-                ));
-            }
-
-            if !tres.is_empty() {
-                let cmd = priority_runner(expires).await?.build_command(
-                    "SACCTMGR",
-                    vec![
-                        "--immediate".to_string(),
-                        "modify".to_string(),
-                        "account".to_string(),
-                        account.name().to_string(),
-                        "set".to_string(),
-                        format!("GrpTRESMins={}", tres.join(",")),
-                        "where".to_string(),
-                        format!("cluster={}", cluster),
-                    ],
-                )?;
-
-                priority_runner(expires)
-                    .await?
-                    .run(&cmd, DEFAULT_TIMEOUT)
-                    .await?;
-            }
+            write_slurm_limit(&account, &applied, expires).await?;
 
             // now we've made the change, save the account to the cache
             cache::add_account(&account).await?;
+
+            cache::set_applied_limit_correction(
+                project.project(),
+                account.name(),
+                &month,
+                Usage::new(applied.seconds().saturating_sub(limit.seconds())),
+            )
+            .await;
 
             Ok(*account.limit())
         }
@@ -2482,17 +3084,51 @@ mod tests {
     use crate::slurm::test_fixture::*;
     use crate::slurm::Attempt;
 
+    /// A project identifier unique to the calling test.
+    ///
+    /// The cache is a process-wide `static`, so tests that write to it would
+    /// otherwise see each other's entries - and `cargo test` runs them in
+    /// parallel, which would make the interference intermittent.
+    fn test_project() -> greatwestern::grammar::ProjectIdentifier {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+
+        let Ok(project) =
+            greatwestern::grammar::ProjectIdentifier::parse(&format!("proj{}.testportal", id))
+        else {
+            unreachable!("this is a well-formed project identifier");
+        };
+
+        project
+    }
+
     /// Build a daily report the way `get_hourly_report` and `get_daily_report`
     /// do, over the records `sacct` would return for one window.
+    ///
+    /// Under `NoCharge`, which is the behaviour that existed before there was a
+    /// charging policy: these cases are about the classification machinery, and
+    /// asserting it against the policy that moves none of it keeps them testing
+    /// one thing. `report_for_policy` is for the cases that are about the
+    /// policy itself.
     fn report_for(
         window: (chrono::DateTime<Utc>, chrono::DateTime<Utc>),
+    ) -> (DailyProjectUsageReport, ReportTotals) {
+        report_for_policy(window, RequeuePolicy::NoCharge)
+    }
+
+    fn report_for_policy(
+        window: (chrono::DateTime<Utc>, chrono::DateTime<Utc>),
+        policy: RequeuePolicy,
     ) -> (DailyProjectUsageReport, ReportTotals) {
         let (start, _) = window;
         let mut report = DailyProjectUsageReport::default();
         let mut totals = ReportTotals::default();
 
         for job in consumers_for(window) {
-            record_job(&mut report, &job, &start, &mut totals);
+            record_job(&mut report, &job, &start, policy, &mut totals);
         }
 
         (report, totals)
@@ -2546,7 +3182,13 @@ mod tests {
         };
 
         for job in &jobs {
-            record_job(&mut report, job, &start, &mut totals);
+            record_job(
+                &mut report,
+                job,
+                &start,
+                RequeuePolicy::NoCharge,
+                &mut totals,
+            );
         }
 
         (report, totals)
@@ -2727,6 +3369,379 @@ mod tests {
                 .map(|(state, _)| report.requeue_usage_in_state(state))
                 .sum::<Usage>(),
             report.total_requeue_usage()
+        );
+    }
+
+    #[test]
+    fn test_a_correction_raises_the_limit_by_whole_minutes() {
+        // `GrpTRESMins` is in minutes and `set_limit` truncates on the way in,
+        // so a correction recomputed on every pass would drift downward a
+        // minute per TRES at a time. Rounded up, once, and what little is lost
+        // is lost in the project's favour.
+        let requested = Usage::new(3600);
+
+        assert_eq!(
+            corrected_limit(&requested, &Usage::new(60)),
+            Usage::new(3660)
+        );
+
+        // 90 seconds is a minute and a half, and becomes two minutes
+        assert_eq!(
+            corrected_limit(&requested, &Usage::new(90)),
+            Usage::new(3720)
+        );
+
+        // a single second still costs a whole minute, upward
+        assert_eq!(
+            corrected_limit(&requested, &Usage::new(1)),
+            Usage::new(3660)
+        );
+
+        assert_eq!(corrected_limit(&requested, &Usage::default()), requested);
+    }
+
+    #[test]
+    fn test_a_correction_is_never_added_to_a_limit_of_zero() {
+        // A requested limit of zero is the caller stopping an overspent
+        // project. Handing back an allowance at that moment is the one thing
+        // this must never do.
+        assert_eq!(
+            corrected_limit(&Usage::default(), &Usage::new(86400)),
+            Usage::default()
+        );
+    }
+
+    #[test]
+    fn test_the_corrected_limit_saturates_rather_than_panicking() {
+        // Release builds are `panic = "abort"` with `overflow-checks = true`,
+        // so an overflow here is a process kill rather than a wrong answer.
+        let huge = Usage::new(u64::MAX);
+
+        assert_eq!(corrected_limit(&huge, &huge), huge);
+        assert_eq!(corrected_limit(&huge, &Usage::new(60)), huge);
+        assert_eq!(corrected_limit(&Usage::new(60), &huge), huge);
+    }
+
+    #[test]
+    fn test_a_correction_never_compounds_over_repeated_cycles() {
+        // The regression test this whole design turns on. `get_limit` used to
+        // adopt whatever Slurm held into the account's own limit - and what
+        // Slurm holds is now deliberately `requested + correction`, so adopting
+        // it would make the next correction add to an already-corrected base
+        // and the limit would ratchet upward on every cycle.
+        //
+        // Modelled here rather than driven through `sacctmgr`: the arithmetic
+        // is the part that compounds.
+        let requested = Usage::new(36000);
+        let correction = Usage::new(1800);
+
+        let applied = corrected_limit(&requested, &correction);
+        assert_eq!(applied, Usage::new(37800));
+
+        // ten more passes over the same month, each recomputing from the
+        // requested limit rather than from what Slurm holds
+        let mut latest = applied;
+
+        for _ in 0..10 {
+            latest = corrected_limit(&requested, &correction);
+            assert_eq!(latest, applied);
+        }
+
+        // and a correction that has grown raises it exactly once, to the new
+        // figure rather than by it
+        let grown = corrected_limit(&requested, &Usage::new(3600));
+        assert_eq!(grown, Usage::new(39600));
+        assert_eq!(latest, applied);
+    }
+
+    #[tokio::test]
+    async fn test_a_correction_is_unknown_until_it_is_computed() {
+        // Unknown is not zero. An agent that has just restarted knows nothing,
+        // and reading that as "no correction needed" would push a limit short
+        // by however much the site has absorbed this month.
+        let project = test_project();
+        let month = "2026-09";
+
+        assert!(cache::get_limit_correction(&project, month).await.is_none());
+
+        cache::record_limit_correction(&project, "testaccount", month, Usage::new(600)).await;
+
+        let correction = cache::get_limit_correction(&project, month)
+            .await
+            .expect("just recorded");
+
+        assert_eq!(correction.computed(), Usage::new(600));
+
+        // nothing has been written into Slurm yet
+        assert_eq!(correction.applied(), Usage::default());
+
+        // and a correction for one month says nothing about another
+        assert!(cache::get_limit_correction(&project, "2026-10")
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_a_correction_only_ever_increases_within_a_month() {
+        // The base/requeue split is window-local, so a recomputed month can
+        // come out lower. Acting on that would lower the Slurm limit and hold a
+        // project's jobs for a reclassification rather than for anything it did.
+        let project = test_project();
+        let month = "2026-11";
+
+        cache::record_limit_correction(&project, "testaccount", month, Usage::new(3600)).await;
+
+        let held =
+            cache::record_limit_correction(&project, "testaccount", month, Usage::new(1800)).await;
+
+        assert_eq!(held, Usage::new(3600));
+
+        let held =
+            cache::record_limit_correction(&project, "testaccount", month, Usage::new(7200)).await;
+
+        assert_eq!(held, Usage::new(7200));
+    }
+
+    #[tokio::test]
+    async fn test_a_new_month_replaces_the_correction_rather_than_growing_it() {
+        // The caller resets the limit and Slurm's counters together at the turn
+        // of the month, so last month's correction is not a smaller correction -
+        // it is the wrong one, and carrying it forward would inflate a limit
+        // against a counter that no longer holds the usage it corrects for.
+        let project = test_project();
+
+        cache::record_limit_correction(&project, "testaccount", "2026-11", Usage::new(7200)).await;
+
+        let held =
+            cache::record_limit_correction(&project, "testaccount", "2026-12", Usage::new(60))
+                .await;
+
+        assert_eq!(held, Usage::new(60));
+        assert!(cache::get_limit_correction(&project, "2026-11")
+            .await
+            .is_none());
+
+        // and the applied figure starts again from nothing
+        let correction = cache::get_limit_correction(&project, "2026-12")
+            .await
+            .expect("just recorded");
+        assert_eq!(correction.applied(), Usage::default());
+    }
+
+    #[tokio::test]
+    async fn test_only_a_correction_ahead_of_what_was_applied_is_pending() {
+        let project = test_project();
+        let month = "2027-01";
+
+        cache::record_limit_correction(&project, "testaccount", month, Usage::new(3600)).await;
+
+        let pending = cache::limit_corrections_to_apply(month).await;
+        assert!(pending.iter().any(|(p, _)| p == &project));
+
+        cache::set_applied_limit_correction(&project, "testaccount", month, Usage::new(3600)).await;
+
+        let pending = cache::limit_corrections_to_apply(month).await;
+        assert!(!pending.iter().any(|(p, _)| p == &project));
+
+        // a month that is not this one is never pending
+        cache::record_limit_correction(&project, "testaccount", month, Usage::new(7200)).await;
+        let pending = cache::limit_corrections_to_apply("2027-02").await;
+        assert!(!pending.iter().any(|(p, _)| p == &project));
+    }
+
+    #[test]
+    fn test_charging_moves_the_user_s_own_requeues_into_the_usage() {
+        // The policy in one assertion: what the site caused stays discarded,
+        // what the user asked for is charged, and the true total is the same
+        // either way - charging moves usage between buckets, it never invents
+        // or loses any.
+        let (absorbed, _) = report_for_policy(day_one(), RequeuePolicy::NoCharge);
+        let (charged, _) = report_for_policy(day_one(), RequeuePolicy::ChargeRequeueStateOnly);
+
+        let requeued_by_user = absorbed.requeue_usage_in_state("REQUEUED");
+        assert!(!requeued_by_user.is_zero(), "the fixture has user requeues");
+
+        assert_eq!(
+            charged.total_usage(),
+            absorbed.total_usage() + requeued_by_user
+        );
+        assert_eq!(
+            charged.total_requeue_usage(),
+            absorbed.total_requeue_usage() - requeued_by_user
+        );
+        assert_eq!(charged.total_charged_requeue_usage(), requeued_by_user);
+
+        assert_eq!(
+            charged.total_usage_including_requeues(),
+            absorbed.total_usage_including_requeues()
+        );
+    }
+
+    #[test]
+    fn test_only_the_bare_requeue_state_is_charged() {
+        // A record that reports both a node failure and a requeue is a node
+        // failure: `terminal_state`'s precedence puts NODE_FAIL first, which is
+        // what makes charging the REQUEUED bucket safe. OTHER - a state a
+        // future Slurm might report - is never charged either.
+        let (report, _) = report_for_policy(day_one(), RequeuePolicy::ChargeRequeueStateOnly);
+
+        assert_eq!(
+            report.charged_requeue_states(),
+            vec!["REQUEUED".to_string()]
+        );
+
+        for state in ["NODE_FAIL", "PREEMPTED", "OTHER"] {
+            assert_eq!(report.charged_requeue_events_in_state(state), 0);
+            assert!(report.charged_requeue_usage_in_state(state).is_zero());
+        }
+
+        // and what was charged is exactly what stopped being absorbed
+        let (absorbed, _) = report_for_policy(day_one(), RequeuePolicy::NoCharge);
+        assert_eq!(
+            report.num_charged_requeue_events(),
+            absorbed.requeue_events_in_state("REQUEUED")
+        );
+        assert_eq!(report.requeue_events_in_state("REQUEUED"), 0);
+    }
+
+    #[test]
+    fn test_a_charged_requeue_is_usage_but_is_not_a_second_job() {
+        // The attempt is charged like any other job, which is about *usage*. A
+        // superseded attempt is not an extra job, did not queue a second time
+        // for the purposes of the mean wait, and must not move the expansion
+        // factor or the mean job size.
+        let (absorbed, _) = report_for_policy(day_one(), RequeuePolicy::NoCharge);
+        let (charged, _) = report_for_policy(day_one(), RequeuePolicy::ChargeRequeueStateOnly);
+
+        assert_eq!(charged.num_jobs(), absorbed.num_jobs());
+        assert_eq!(charged.total_wait_seconds(), absorbed.total_wait_seconds());
+        assert_eq!(
+            charged.total_runtime_seconds(),
+            absorbed.total_runtime_seconds()
+        );
+        assert_eq!(charged.expansion_jobs(), absorbed.expansion_jobs());
+        assert_eq!(
+            charged.total_allocated_cpus(),
+            absorbed.total_allocated_cpus()
+        );
+    }
+
+    #[test]
+    fn test_no_charge_leaves_every_figure_where_it_was() {
+        // The escape hatch has to be exactly the old behaviour, or a site that
+        // sets it is not opting out of anything.
+        //
+        // The figures are the ones this fixture reported before charging
+        // existed, written out rather than derived, so that a change to the
+        // split has to come here and say so. Other tests in this module pin the
+        // same two numbers through `report_for`, but only because that helper
+        // happens to default to this policy - which is not a guarantee, it is a
+        // default someone could change.
+        let (report, totals) = report_for_policy(day_one(), RequeuePolicy::NoCharge);
+
+        assert_eq!(report.total_usage(), Usage::new(28800));
+        assert_eq!(report.total_requeue_usage(), Usage::new(20700));
+        assert_eq!(report.num_jobs(), 9);
+        assert_eq!(report.num_requeue_events(), 7);
+
+        // And the same figures derived from the records rather than recited:
+        // with nothing charged, what is reported is exactly the base attempts
+        // and what is discarded is exactly the superseded ones. This is the
+        // property; the constants above are the witness that it has not moved.
+        let jobs = consumers_for(day_one());
+
+        let summed = |requeued: bool| {
+            Usage::new(
+                jobs.iter()
+                    .filter(|job| job.is_requeued_attempt() == requeued)
+                    .fold(0u64, |total, job| {
+                        total.saturating_add(job.billed_node_seconds())
+                    }),
+            )
+        };
+
+        assert_eq!(report.total_usage(), summed(false));
+        assert_eq!(report.total_requeue_usage(), summed(true));
+
+        assert!(!report.has_charged_requeues());
+        assert!(report.charged_requeue_states().is_empty());
+        assert_eq!(totals.charged_requeue_events, 0);
+        assert_eq!(totals.charged_requeue_usage, 0);
+    }
+
+    #[test]
+    fn test_charging_leaves_the_true_total_and_the_base_attempts_alone() {
+        // The other half of the same guarantee: turning charging *on* must not
+        // move the base attempts either. Only the superseded ones change
+        // bucket, so what a project consumed in total is the same figure under
+        // both policies - which is what makes the switch a charging decision
+        // rather than a change of measurement.
+        let jobs = consumers_for(day_one());
+
+        let base = Usage::new(
+            jobs.iter()
+                .filter(|job| !job.is_requeued_attempt())
+                .fold(0u64, |total, job| {
+                    total.saturating_add(job.billed_node_seconds())
+                }),
+        );
+
+        let (charged, _) = report_for_policy(day_one(), RequeuePolicy::ChargeRequeueStateOnly);
+
+        // the base attempts are untouched: what charging added is exactly the
+        // charged requeues, no more
+        assert_eq!(
+            charged.total_usage(),
+            base + charged.total_charged_requeue_usage()
+        );
+
+        // and the true total is the same 49500 seconds either way
+        assert_eq!(
+            charged.total_usage_including_requeues(),
+            Usage::new(28800 + 20700)
+        );
+    }
+
+    #[test]
+    fn test_a_charged_day_agrees_with_its_own_counters() {
+        // The shadow counters are what the agent uses to decide whether a day
+        // may be cached, so the charged ones have to track the report exactly
+        // as the absorbed ones do.
+        let (report, totals) = report_for_policy(day_one(), RequeuePolicy::ChargeRequeueStateOnly);
+
+        assert_eq!(report.total_usage().seconds(), totals.usage);
+        assert_eq!(
+            report.total_charged_requeue_usage().seconds(),
+            totals.charged_requeue_usage
+        );
+        assert_eq!(
+            report.num_charged_requeue_events(),
+            totals.charged_requeue_events
+        );
+        assert_eq!(
+            report.charged_requeue_wait_seconds(),
+            totals.charged_requeue_wait_seconds
+        );
+        assert!(report.is_consistent());
+    }
+
+    #[test]
+    fn test_the_charged_share_is_of_everything_requeueing_cost() {
+        let (report, _) = report_for_policy(day_one(), RequeuePolicy::ChargeRequeueStateOnly);
+
+        let charged = report.total_charged_requeue_usage().seconds();
+        let all = report.total_requeue_usage_including_charged().seconds();
+
+        assert!(charged > 0 && charged < all, "the fixture has both kinds");
+        assert_eq!(
+            report.charged_requeue_share_per_mille(),
+            Some(charged * 1000 / all)
+        );
+
+        // a day with no requeues at all has no share, which is not zero
+        assert_eq!(
+            DailyProjectUsageReport::default().charged_requeue_share_per_mille(),
+            None
         );
     }
 

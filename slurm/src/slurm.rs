@@ -2152,6 +2152,20 @@ impl SlurmLimit {
     pub fn billing_limit(&self) -> Option<Usage> {
         self.billing_limit
     }
+
+    ///
+    /// Whether Slurm holds any `GrpTRESMins` limit at all for this association.
+    ///
+    /// An association with none is *unlimited*, which is a different thing from
+    /// a limit of zero: the requeue correction must never turn the first into
+    /// the second by adding itself to nothing.
+    ///
+    pub fn has_any_limit(&self) -> bool {
+        self.cpu_limit.is_some()
+            || self.gpu_limit.is_some()
+            || self.mem_limit.is_some()
+            || self.billing_limit.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2617,6 +2631,106 @@ const TERMINAL_STATES: [&str; 14] = [
 
 /// The bucket for a state Slurm reports that `TERMINAL_STATES` does not name.
 const OTHER_TERMINAL_STATE: &str = "OTHER";
+
+/// The terminal state of an attempt the *user* asked to have requeued.
+///
+/// Every other state in `TERMINAL_STATES` names something done to the job -
+/// a node that died, a preemption, a deadline - and `terminal_state()` returns
+/// the first match in that list, which puts all of them ahead of this one. So
+/// an attempt that reports both a node failure and a requeue is a node failure,
+/// and only an attempt with nothing else to say for itself is a bare requeue.
+///
+/// That precedence is what makes `charge_requeue_state_only` safe, and it was
+/// written before there was a policy to serve.
+const USER_REQUEUE_STATE: &str = "REQUEUED";
+
+///
+/// Which requeued attempts a project is charged for.
+///
+/// Slurm records no unambiguous account of *who* asked for a requeue - a user
+/// checkpointing with `scontrol requeue` leaves the same record an
+/// administrator would. What it does record reliably is the other direction:
+/// an attempt lost to the site is classified as `NODE_FAIL`, `PREEMPTED`,
+/// `BOOT_FAIL` and so on, and never as a bare `REQUEUED`. So the policy is
+/// stated negatively, which is the direction the evidence supports.
+///
+/// This is the single place that decides it. The report's charged/absorbed
+/// split and the limit correction that follows from it both ask this same
+/// question, and two copies of the answer is how a report ends up telling a
+/// project it absorbed usage the limit charged it for. See
+/// `docs/plans/slurm-requeue-charging-design.md`.
+///
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum RequeuePolicy {
+    /// Charge an attempt whose terminal state is `REQUEUED`, and nothing else.
+    #[default]
+    ChargeRequeueStateOnly,
+    /// Charge nothing - every requeued attempt is absorbed by the site. The
+    /// behaviour before a charging policy existed.
+    NoCharge,
+}
+
+impl RequeuePolicy {
+    ///
+    /// Whether a superseded attempt ending in `state` is charged to the project.
+    ///
+    /// `OTHER` - the bucket for a state a future Slurm reports that we do not
+    /// recognise - is never charged under any policy. We do not bill for a
+    /// cause we cannot name.
+    ///
+    pub fn charges(&self, state: &str) -> bool {
+        match self {
+            Self::NoCharge => false,
+            Self::ChargeRequeueStateOnly => state == USER_REQUEUE_STATE,
+        }
+    }
+
+    /// The states this policy charges, for reporting what it is set to.
+    pub fn charged_states(&self) -> &'static [&'static str] {
+        match self {
+            Self::NoCharge => &[],
+            Self::ChargeRequeueStateOnly => &[USER_REQUEUE_STATE],
+        }
+    }
+
+    /// The spelling used in the config file, which is also what is logged.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ChargeRequeueStateOnly => "charge_requeue_state_only",
+            Self::NoCharge => "no_charge",
+        }
+    }
+}
+
+impl std::str::FromStr for RequeuePolicy {
+    type Err = Error;
+
+    ///
+    /// An unrecognised value is an error, not a fall back to the default.
+    ///
+    /// A typo in this option decides whether a site bills its users for its own
+    /// node failures. Failing to start is a far better way to find out about it
+    /// than a log line nobody reads.
+    ///
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "charge_requeue_state_only" => Ok(Self::ChargeRequeueStateOnly),
+            "no_charge" => Ok(Self::NoCharge),
+            other => Err(Error::Call(format!(
+                "'{}' is not a requeue policy. Valid values are \
+                 'charge_requeue_state_only' (the default, charging requeues the user \
+                 asked for) and 'no_charge' (absorbing every requeue).",
+                other
+            ))),
+        }
+    }
+}
+
+impl Display for RequeuePolicy {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
 
 /// See `SlurmJob::has_ended`.
 fn finished_by_default() -> bool {
@@ -4185,6 +4299,74 @@ mod tests {
 
     fn consumers() -> Vec<SlurmJob> {
         consumers_for(day_one())
+    }
+
+    #[test]
+    fn test_the_requeue_policy_is_read_from_its_config_spelling() {
+        for (spelling, expected) in [
+            (
+                "charge_requeue_state_only",
+                RequeuePolicy::ChargeRequeueStateOnly,
+            ),
+            ("no_charge", RequeuePolicy::NoCharge),
+            (
+                "  Charge_Requeue_State_Only  ",
+                RequeuePolicy::ChargeRequeueStateOnly,
+            ),
+        ] {
+            assert_eq!(spelling.parse::<RequeuePolicy>().unwrap(), expected);
+        }
+
+        // and round-trips through what it logs
+        for policy in [
+            RequeuePolicy::ChargeRequeueStateOnly,
+            RequeuePolicy::NoCharge,
+        ] {
+            assert_eq!(policy.as_str().parse::<RequeuePolicy>().unwrap(), policy);
+        }
+    }
+
+    #[test]
+    fn test_an_unknown_requeue_policy_is_refused_rather_than_defaulted() {
+        // This option decides whether a site bills its users for its own node
+        // failures. A typo has to stop the agent, not pick a policy for it.
+        let error = "charge_everything".parse::<RequeuePolicy>().unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains("charge_everything"));
+        assert!(message.contains("charge_requeue_state_only"));
+        assert!(message.contains("no_charge"));
+
+        assert!("".parse::<RequeuePolicy>().is_err());
+    }
+
+    #[test]
+    fn test_the_default_policy_charges_only_the_users_own_requeues() {
+        let policy = RequeuePolicy::default();
+
+        assert_eq!(policy, RequeuePolicy::ChargeRequeueStateOnly);
+        assert!(policy.charges("REQUEUED"));
+
+        // everything the site did to the job, and anything we cannot name
+        for state in [
+            "NODE_FAIL",
+            "PREEMPTED",
+            "BOOT_FAIL",
+            "DEADLINE",
+            "OUT_OF_MEMORY",
+            "TIMEOUT",
+            "CANCELLED",
+            "FAILED",
+            "COMPLETED",
+            OTHER_TERMINAL_STATE,
+        ] {
+            assert!(!policy.charges(state), "{} must not be charged", state);
+        }
+
+        // and the escape hatch charges nothing at all
+        for state in TERMINAL_STATES {
+            assert!(!RequeuePolicy::NoCharge.charges(state));
+        }
     }
 
     #[test]

@@ -114,6 +114,31 @@ async fn main() -> Result<()> {
     let parent_account = config.option("parent-account", "root");
     cache::set_parent_account(&parent_account).await?;
 
+    // Which requeued attempts are charged to a project. The default charges the
+    // requeues a user asked for and absorbs the ones the site caused, which is
+    // a change from the behaviour before this option existed - chosen over a
+    // default that every site would have to remember to set, since the cost of
+    // forgetting that one is silently under-billing for ever. Logged either
+    // way, so an upgrade that changes a site's behaviour says so.
+    let requeue_policy: slurm::RequeuePolicy = config
+        .option("requeue-policy", "charge_requeue_state_only")
+        .parse()?;
+
+    cache::set_requeue_policy(requeue_policy).await;
+
+    match requeue_policy.charged_states() {
+        [] => tracing::info!(
+            "Requeue policy '{}': no requeued attempt is charged to a project.",
+            requeue_policy
+        ),
+        states => tracing::info!(
+            "Requeue policy '{}': a requeued attempt is charged to the project when it \
+             ended in {}. Every other requeue is absorbed.",
+            requeue_policy,
+            states.join(" or ")
+        ),
+    }
+
     let slurm_server = config.option("slurm-server", "");
 
     // get the sacct, sacctmgr, scontrol and scancel commands - we may need these even if
@@ -132,6 +157,11 @@ async fn main() -> Result<()> {
         max_slurm_runners,
     )
     .await;
+
+    // Reports compute the requeue correction; this writes it into Slurm, off
+    // the reporting path and on its own schedule. See
+    // `docs/plans/slurm-requeue-charging-design.md`.
+    sacctmgr::spawn_limit_applier();
 
     set_notify_runner::<Hpc>(default_notify_runner).await?;
 

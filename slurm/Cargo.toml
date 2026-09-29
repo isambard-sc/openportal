@@ -20,6 +20,11 @@ path = "src/main.rs"
 name = "get_reservation_report"
 path = "tools/get_reservation_report.rs"
 
+# Likewise: what requeueing cost a project, or the whole cluster.
+[[bin]]
+name = "get_requeue_report"
+path = "tools/get_requeue_report.rs"
+
 [dependencies]
 anyhow = { version="1.0.100", features = ["backtrace"] }
 chrono = { version="0.4.42", features=["serde"] }

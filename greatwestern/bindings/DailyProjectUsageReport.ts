@@ -96,6 +96,40 @@ requeue_states: { [key in string]?: bigint },
  */
 requeue_state_usage: { [key in string]?: Usage }, 
 /**
+ * Usage from superseded attempts that were charged, per local user.
+ */
+charged_requeue_reports: { [key in string]?: Usage }, 
+/**
+ * The same, broken down by resource component.
+ */
+charged_requeue_components: { [key in string]?: { [key in string]?: Usage } }, 
+/**
+ * Per-user count of charged requeue *events*.
+ */
+user_charged_requeue_events: { [key in string]?: bigint }, 
+/**
+ * Scalar total — equals sum of user_charged_requeue_events when populated.
+ */
+num_charged_requeue_events: bigint, 
+/**
+ * Per-user queue wait accumulated by charged superseded attempts.
+ */
+user_charged_requeue_wait_seconds: { [key in string]?: bigint }, 
+/**
+ * Scalar total — equals sum of user_charged_requeue_wait_seconds.
+ */
+charged_requeue_wait_seconds: bigint, 
+/**
+ * Charged requeue events by terminal state. Sums to
+ * `num_charged_requeue_events`.
+ */
+charged_requeue_states: { [key in string]?: bigint }, 
+/**
+ * Charged requeue usage by terminal state. Sums to
+ * `total_charged_requeue_usage()`.
+ */
+charged_requeue_state_usage: { [key in string]?: Usage }, 
+/**
  * Reservation name → local user → usage consumed inside it.
  */
 reservation_reports: { [key in string]?: { [key in string]?: Usage } }, 

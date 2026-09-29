@@ -16,6 +16,7 @@
 //!
 
 pub mod cache;
+pub mod dayquery;
 pub mod sacctmgr;
 pub mod slurm;
 

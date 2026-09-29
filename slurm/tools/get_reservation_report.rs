@@ -36,8 +36,9 @@ use anyhow::{Context, Result};
 use greatwestern::grammar::{Date, DateRange, ProjectIdentifier};
 use greatwestern::usagereport::{DailyProjectUsageReport, ProjectUsageReport, Usage};
 
-use op_slurm::sacctmgr::{record_job, runner, set_commands, ReportTotals};
-use op_slurm::slurm::{SlurmJob, SlurmNode, SlurmNodes};
+use op_slurm::dayquery::{jobs_on_day, DayRecords, JobQuery};
+use op_slurm::sacctmgr::{record_job, set_commands, ReportTotals};
+use op_slurm::slurm::{RequeuePolicy, SlurmJob, SlurmNode, SlurmNodes};
 
 ///
 /// The node this tool is run on, as the agent's `slurm-default-node` option
@@ -49,12 +50,6 @@ use op_slurm::slurm::{SlurmJob, SlurmNode, SlurmNodes};
 /// how wrong this is.
 ///
 const DEFAULT_NODE: &str = r#"{ "cpus": 288, "gpus": 4, "mem": 491520, "billing": 864 }"#;
-
-/// A day's query can return a lot of records on a busy cluster, so this is
-/// generous compared with the agent's own thirty seconds. A tool run by hand
-/// can afford to wait; being told "timed out" is not an answer an operator can
-/// use.
-const QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Projects shown as their own column in the day-by-day tables before the rest
 /// are gathered into `other`. Wide enough to see who the reservation is for,
@@ -74,6 +69,10 @@ struct Options {
     sacct: String,
     cluster: String,
     sacct_filter: bool,
+    /// Which requeued attempts count as usage, matching the agent's option of
+    /// the same name. A report that split them differently from the agent would
+    /// disagree with the agent's own figures for the same jobs.
+    requeue_policy: RequeuePolicy,
 }
 
 const USAGE: &str = "\
@@ -91,6 +90,12 @@ Options:
   --sacct CMD     the sacct command to run (default: sacct). Accepts a
                   composite command, e.g. 'docker exec slurmctld sacct'.
   --cluster NAME  restrict the query to one cluster
+  --requeue-policy P
+                  which requeued attempts count as usage, as the slurm agent's
+                  requeue-policy option gives it: charge_requeue_state_only
+                  (the default) or no_charge. Set it to whatever the agent on
+                  this cluster is configured with, or this report's usage
+                  figures will not match the agent's.
   --sacct-filter  ask sacct to return only this reservation's jobs, instead
                   of reading every job and filtering here. Much less work on
                   a busy cluster, but --reservation is not available on every
@@ -116,6 +121,7 @@ fn parse_args() -> Result<Option<Options>> {
     let mut sacct = "sacct".to_string();
     let mut cluster = String::new();
     let mut sacct_filter = false;
+    let mut requeue_policy = RequeuePolicy::default();
 
     let mut remaining = args.into_iter();
 
@@ -130,6 +136,12 @@ fn parse_args() -> Result<Option<Options>> {
             "--node" => node = value("--node")?,
             "--sacct" => sacct = value("--sacct")?,
             "--cluster" => cluster = value("--cluster")?,
+            "--requeue-policy" => {
+                let requested = value("--requeue-policy")?;
+                requeue_policy = requested
+                    .parse()
+                    .map_err(|e| anyhow::anyhow!("{}. Try --help.", e))?;
+            }
             "--sacct-filter" => sacct_filter = true,
             other if other.starts_with('-') => {
                 anyhow::bail!("Unknown option '{}'. Try --help.", other);
@@ -155,6 +167,7 @@ fn parse_args() -> Result<Option<Options>> {
         sacct,
         cluster,
         sacct_filter,
+        requeue_policy,
     }))
 }
 
@@ -173,7 +186,7 @@ fn project_of_account(account: &str) -> Option<ProjectIdentifier> {
 }
 
 ///
-/// Ask Slurm for every job that ran on one day, for every account.
+/// What to ask `sacct` for, for one day of this report.
 ///
 /// Deliberately not filtered by account: the question is who used a
 /// reservation, and the answer is not known until the records are read.
@@ -185,72 +198,15 @@ fn project_of_account(account: &str) -> Option<ProjectIdentifier> {
 /// Either way the records are filtered again below, so the flag can only change
 /// how much is read, never what is reported.
 ///
-async fn jobs_on_day(
-    day: &Date,
-    nodes: &SlurmNodes,
-    options: &Options,
-    now: &chrono::DateTime<chrono::Utc>,
-) -> Result<Vec<SlurmJob>> {
-    let start_time = day.day().start_time().and_utc();
-    let end_time = day.day().end_time().and_utc();
-
-    if start_time > *now {
-        return Ok(Vec::new());
+fn query_for(options: &Options) -> JobQuery {
+    JobQuery {
+        cluster: options.cluster.clone(),
+        account: String::new(),
+        reservation: match options.sacct_filter {
+            true => options.reservation.clone(),
+            false => String::new(),
+        },
     }
-
-    // never ask for the future - `sacct` is happy to be asked and the clipping
-    // would treat the rest of today as consumed
-    let end_time = end_time.min(*now);
-
-    // a long expiry: this is a one-shot tool with a person waiting on it, not
-    // an agent servicing a job with a deadline
-    let expires = *now + chrono::Duration::hours(1);
-
-    let cluster_arg = match options.cluster.is_empty() {
-        true => String::new(),
-        false => format!("--cluster={}", options.cluster),
-    };
-
-    // Off by default: `--reservation` is not available on every `sacct` this
-    // may meet, and one that quietly means something else would silently change
-    // what the report covers. Where it does work it is worth a great deal on a
-    // busy cluster - the alternative is reading every job on the machine and
-    // discarding nearly all of them. The records kept are filtered here either
-    // way, so turning this on can narrow what is read but can never widen what
-    // is reported.
-    let reservation_arg = match options.sacct_filter {
-        true => format!("--reservation={}", options.reservation),
-        false => String::new(),
-    };
-
-    let cmd = runner(&expires).await?.build_command(
-        "SACCT",
-        vec![
-            "--noconvert".to_string(),
-            "--allocations".to_string(),
-            "--allusers".to_string(),
-            // one record per attempt - without this everything a requeued job
-            // consumed before its final attempt is invisible
-            "--duplicates".to_string(),
-            format!("--starttime={}", start_time.format("%Y-%m-%dT%H:%M:%S")),
-            format!("--endtime={}", end_time.format("%Y-%m-%dT%H:%M:%S")),
-            cluster_arg,
-            reservation_arg,
-            "--json".to_string(),
-        ],
-    )?;
-
-    let response = runner(&expires)
-        .await?
-        .run_json(&cmd, QUERY_TIMEOUT)
-        .await?;
-
-    Ok(SlurmJob::get_consumers(
-        &response,
-        &start_time,
-        &end_time,
-        nodes,
-    )?)
 }
 
 /// What one day of the reservation came to, once the records are in.
@@ -270,6 +226,10 @@ struct Collected {
     /// tables are built from this so they show the period that was reported on
     /// rather than a run of empty rows for a future nobody can have used.
     days: Vec<Date>,
+    /// Days that could not be read whole, and how many of their hours are
+    /// missing. Every figure below is a lower bound while this is not empty,
+    /// so the report says so rather than looking complete.
+    gaps: Vec<(Date, usize)>,
 }
 
 ///
@@ -312,16 +272,27 @@ async fn collect(options: &Options, nodes: &SlurmNodes) -> Result<Collected> {
     for (index, day) in days.iter().enumerate() {
         tracing::info!("Processing day {} of {} ({})", index + 1, total_days, day);
 
-        let jobs = jobs_on_day(day, nodes, options, &now)
-            .await
-            .with_context(|| format!("Could not read Slurm accounting for {}", day))?;
+        let DayRecords {
+            jobs,
+            missing_hours,
+        } = jobs_on_day(day, nodes, &query_for(options), &now).await;
+
+        if missing_hours > 0 {
+            collected.gaps.push((day.clone(), missing_hours));
+        }
 
         let kept = jobs
             .iter()
             .filter(|job| job.reservation().eq_ignore_ascii_case(&options.reservation))
             .count();
 
-        absorb_day(&mut collected, &jobs, &options.reservation, day);
+        absorb_day(
+            &mut collected,
+            &jobs,
+            &options.reservation,
+            day,
+            options.requeue_policy,
+        );
 
         // Both numbers, always: they are how an operator checks whether
         // `--sacct-filter` does what it claims. With it on the two should be
@@ -353,6 +324,21 @@ async fn collect(options: &Options, nodes: &SlurmNodes) -> Result<Collected> {
         collected.projects.len()
     );
 
+    if !collected.gaps.is_empty() {
+        let missing: usize = collected
+            .gaps
+            .iter()
+            .map(|(_, hours)| *hours)
+            .fold(0usize, |total, hours| total.saturating_add(hours));
+
+        tracing::warn!(
+            "{} hour(s) across {} day(s) could not be read from Slurm. Every figure in \
+             this report is therefore a lower bound.",
+            missing,
+            collected.gaps.len()
+        );
+    }
+
     Ok(collected)
 }
 
@@ -363,7 +349,13 @@ async fn collect(options: &Options, nodes: &SlurmNodes) -> Result<Collected> {
 /// Split out from the query so that it can be tested against a recorded `sacct`
 /// response - which is the half worth testing, the other being a subprocess.
 ///
-fn absorb_day(collected: &mut Collected, jobs: &[SlurmJob], reservation: &str, day: &Date) {
+fn absorb_day(
+    collected: &mut Collected,
+    jobs: &[SlurmJob],
+    reservation: &str,
+    day: &Date,
+    policy: RequeuePolicy,
+) {
     collected.days.push(day.clone());
 
     let start_time = day.day().start_time().and_utc();
@@ -392,7 +384,7 @@ fn absorb_day(collected: &mut Collected, jobs: &[SlurmJob], reservation: &str, d
         };
 
         let (report, totals) = days.entry(project).or_default();
-        record_job(report, job, &start_time, totals);
+        record_job(report, job, &start_time, policy, totals);
     }
 
     for (project, (report, totals)) in days {
@@ -586,6 +578,7 @@ fn render(collected: &Collected) -> String {
         );
     }
 
+    let _ = write!(out, "{}", gaps_note(collected));
     let _ = write!(out, "{}", unmanaged_note(collected));
     let _ = writeln!(out, "{}", rule);
 
@@ -724,6 +717,52 @@ fn pooled(rest: &[(&ProjectIdentifier, &ProjectUsageReport)], day: &Date) -> (u6
             jobs.saturating_add(day_report.num_jobs()),
         )
     })
+}
+
+///
+/// What to say about the parts of the period that could not be read.
+///
+/// Slurm refusing an hour is not the same as nobody using the reservation in
+/// it, and a report that quietly conflated the two would understate a project's
+/// share without ever saying so. Naming the days keeps the figures usable: an
+/// operator can see whether the gap falls where it matters, and re-run those
+/// days on a quieter machine.
+///
+fn gaps_note(collected: &Collected) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::new();
+
+    let Some((first, rest)) = collected.gaps.split_first() else {
+        return out;
+    };
+
+    let missing = collected
+        .gaps
+        .iter()
+        .map(|(_, hours)| *hours)
+        .fold(0usize, |total, hours| total.saturating_add(hours));
+
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "INCOMPLETE: {} hour(s) could not be read from Slurm, so every figure below is",
+        missing
+    );
+    let _ = writeln!(
+        out,
+        "a lower bound - what ran in those hours is missing from it entirely."
+    );
+
+    let _ = write!(out, "Affected: {} ({}h)", first.0, first.1);
+
+    for (day, hours) in rest {
+        let _ = write!(out, ", {} ({}h)", day, hours);
+    }
+
+    let _ = writeln!(out);
+
+    out
 }
 
 /// `write!` needs a `fmt::Write`, and a `String` is one - this only exists to
@@ -1034,7 +1073,13 @@ mod tests {
         };
 
         for start in [DAY_ONE, DAY_TWO] {
-            absorb_day(&mut collected, &jobs_for(start), reservation, &day(start));
+            absorb_day(
+                &mut collected,
+                &jobs_for(start),
+                reservation,
+                &day(start),
+                RequeuePolicy::NoCharge,
+            );
         }
 
         collected
@@ -1187,6 +1232,51 @@ mod tests {
 
         // and the account we cannot attribute is declared rather than dropped
         assert!(report.contains("root"));
+    }
+
+    #[test]
+    fn test_a_report_with_a_gap_in_it_says_so_before_any_figures() {
+        // An hour Slurm would not answer for is not an hour nobody used the
+        // reservation in, and the report must not let those two look alike.
+        let mut collected = collected_fixture("interactive");
+        collected.gaps.push((day(DAY_TWO), 3));
+
+        let report = render(&collected);
+
+        assert!(report.contains("INCOMPLETE"));
+        assert!(report.contains("lower bound"));
+        assert!(report.contains("2026-03-02 (3h)"));
+
+        // and it comes before the tables it qualifies, not after them
+        let Some(warning) = report.find("INCOMPLETE") else {
+            unreachable!("the warning was just asserted to be there");
+        };
+        let Some(table) = report.find("Day by day") else {
+            unreachable!("the fixture renders the day-by-day tables");
+        };
+        assert!(warning < table);
+    }
+
+    #[test]
+    fn test_a_report_with_no_gaps_carries_no_caveat_about_them() {
+        let report = render(&collected_fixture("interactive"));
+
+        assert!(!report.contains("INCOMPLETE"));
+        assert!(!report.contains("lower bound"));
+    }
+
+    #[test]
+    fn test_every_day_with_a_gap_is_named() {
+        let mut collected = collected_fixture("interactive");
+        collected.gaps.push((day(DAY_ONE), 1));
+        collected.gaps.push((day(DAY_TWO), 2));
+
+        let report = render(&collected);
+
+        assert!(report.contains("2026-03-01 (1h)"));
+        assert!(report.contains("2026-03-02 (2h)"));
+        // three hours over two days, not two hours or two days' worth
+        assert!(report.contains("3 hour(s)"));
     }
 
     #[test]

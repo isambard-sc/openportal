@@ -1,0 +1,809 @@
+{
+ "jobs": [
+  {
+   "job_id": 100,
+   "user": "alice",
+   "account": "brics.aaaa",
+   "cluster": "testcluster",
+   "nodes": "testnode",
+   "qos": "standard",
+   "restart_cnt": 0,
+   "failed_node": "",
+   "state": {
+    "current": [
+     "COMPLETED"
+    ],
+    "reason": "None"
+   },
+   "time": {
+    "submission": 1772326200,
+    "eligible": 1772326200,
+    "start": 1772326800,
+    "end": 1772330400,
+    "elapsed": 3600
+   },
+   "tres": {
+    "allocated": [
+     {
+      "type": "cpu",
+      "name": "",
+      "count": 288
+     },
+     {
+      "type": "gres",
+      "name": "gpu",
+      "count": 4
+     },
+     {
+      "type": "node",
+      "name": "",
+      "count": 1
+     },
+     {
+      "type": "billing",
+      "name": "",
+      "count": 864
+     }
+    ],
+    "requested": [
+     {
+      "type": "cpu",
+      "name": "",
+      "count": 288
+     },
+     {
+      "type": "gres",
+      "name": "gpu",
+      "count": 4
+     },
+     {
+      "type": "node",
+      "name": "",
+      "count": 1
+     },
+     {
+      "type": "billing",
+      "name": "",
+      "count": 864
+     }
+    ]
+   },
+   "reservation": {
+    "id": 0,
+    "name": ""
+   }
+  },
+  {
+   "job_id": 200,
+   "user": "alice",
+   "account": "brics.aaaa",
+   "cluster": "testcluster",
+   "nodes": "testnode",
+   "qos": "standard",
+   "restart_cnt": 0,
+   "failed_node": "badnode01",
+   "state": {
+    "current": [
+     "NODE_FAIL"
+    ],
+    "reason": "None"
+   },
+   "time": {
+    "submission": 1772329800,
+    "eligible": 1772329800,
+    "start": 1772330400,
+    "end": 1772337600,
+    "elapsed": 7200
+   },
+   "tres": {
+    "allocated": [
+     {
+      "type": "cpu",
+      "name": "",
+      "count": 288
+     },
+     {
+      "type": "gres",
+      "name": "gpu",
+      "count": 4
+     },
+     {
+      "type": "node",
+      "name": "",
+      "count": 1
+     },
+     {
+      "type": "billing",
+      "name": "",
+      "count": 864
+     }
+    ],
+    "requested": [
+     {
+      "type": "cpu",
+      "name": "",
+      "count": 288
+     },
+     {
+      "type": "gres",
+      "name": "gpu",
+      "count": 4
+     },
+     {
+      "type": "node",
+      "name": "",
+      "count": 1
+     },
+     {
+      "type": "billing",
+      "name": "",
+      "count": 864
+     }
+    ]
+   },
+   "reservation": {
+    "id": 0,
+    "name": ""
+   }
+  },
+  {
+   "job_id": 200,
+   "user": "alice",
+   "account": "brics.aaaa",
+   "cluster": "testcluster",
+   "nodes": "testnode",
+   "qos": "standard",
+   "restart_cnt": 1,
+   "failed_node": "",
+   "state": {
+    "current": [
+     "COMPLETED"
+    ],
+    "reason": "None"
+   },
+   "time": {
+    "submission": 1772338800,
+    "eligible": 1772338800,
+    "start": 1772339400,
+    "end": 1772341200,
+    "elapsed": 1800
+   },
+   "tres": {
+    "allocated": [
+     {
+      "type": "cpu",
+      "name": "",
+      "count": 288
+     },
+     {
+      "type": "gres",
+      "name": "gpu",
+      "count": 4
+     },
+     {
+      "type": "node",
+      "name": "",
+      "count": 1
+     },
+     {
+      "type": "billing",
+      "name": "",
+      "count": 864
+     }
+    ],
+    "requested": [
+     {
+      "type": "cpu",
+      "name": "",
+      "count": 288
+     },
+     {
+      "type": "gres",
+      "name": "gpu",
+      "count": 4
+     },
+     {
+      "type": "node",
+      "name": "",
+      "count": 1
+     },
+     {
+      "type": "billing",
+      "name": "",
+      "count": 864
+     }
+    ]
+   },
+   "reservation": {
+    "id": 0,
+    "name": ""
+   }
+  },
+  {
+   "job_id": 300,
+   "user": "bob",
+   "account": "brics.aaaa",
+   "cluster": "testcluster",
+   "nodes": "testnode",
+   "qos": "standard",
+   "restart_cnt": 0,
+   "failed_node": "",
+   "state": {
+    "current": [
+     "PENDING",
+     "REQUEUED"
+    ],
+    "reason": "None"
+   },
+   "time": {
+    "submission": 1772340600,
+    "eligible": 1772340600,
+    "start": 1772341200,
+    "end": 1772352000,
+    "elapsed": 10800
+   },
+   "tres": {
+    "allocated": [
+     {
+      "type": "cpu",
+      "name": "",
+      "count": 288
+     },
+     {
+      "type": "gres",
+      "name": "gpu",
+      "count": 4
+     },
+     {
+      "type": "node",
+      "name": "",
+      "count": 1
+     },
+     {
+      "type": "billing",
+      "name": "",
+      "count": 864
+     }
+    ],
+    "requested": [
+     {
+      "type": "cpu",
+      "name": "",
+      "count": 288
+     },
+     {
+      "type": "gres",
+      "name": "gpu",
+      "count": 4
+     },
+     {
+      "type": "node",
+      "name": "",
+      "count": 1
+     },
+     {
+      "type": "billing",
+      "name": "",
+      "count": 864
+     }
+    ]
+   },
+   "reservation": {
+    "id": 0,
+    "name": ""
+   }
+  },
+  {
+   "job_id": 300,
+   "user": "bob",
+   "account": "brics.aaaa",
+   "cluster": "testcluster",
+   "nodes": "testnode",
+   "qos": "standard",
+   "restart_cnt": 1,
+   "failed_node": "",
+   "state": {
+    "current": [
+     "COMPLETED"
+    ],
+    "reason": "None"
+   },
+   "time": {
+    "submission": 1772353200,
+    "eligible": 1772353200,
+    "start": 1772353800,
+    "end": 1772357400,
+    "elapsed": 3600
+   },
+   "tres": {
+    "allocated": [
+     {
+      "type": "cpu",
+      "name": "",
+      "count": 288
+     },
+     {
+      "type": "gres",
+      "name": "gpu",
+      "count": 4
+     },
+     {
+      "type": "node",
+      "name": "",
+      "count": 1
+     },
+     {
+      "type": "billing",
+      "name": "",
+      "count": 864
+     }
+    ],
+    "requested": [
+     {
+      "type": "cpu",
+      "name": "",
+      "count": 288
+     },
+     {
+      "type": "gres",
+      "name": "gpu",
+      "count": 4
+     },
+     {
+      "type": "node",
+      "name": "",
+      "count": 1
+     },
+     {
+      "type": "billing",
+      "name": "",
+      "count": 864
+     }
+    ]
+   },
+   "reservation": {
+    "id": 0,
+    "name": ""
+   }
+  },
+  {
+   "job_id": 400,
+   "user": "carol",
+   "account": "brics.bbbb",
+   "cluster": "testcluster",
+   "nodes": "testnode",
+   "qos": "standard",
+   "restart_cnt": 0,
+   "failed_node": "badnode01",
+   "state": {
+    "current": [
+     "NODE_FAIL"
+    ],
+    "reason": "None"
+   },
+   "time": {
+    "submission": 1772333400,
+    "eligible": 1772333400,
+    "start": 1772334000,
+    "end": 1772337600,
+    "elapsed": 3600
+   },
+   "tres": {
+    "allocated": [
+     {
+      "type": "cpu",
+      "name": "",
+      "count": 288
+     },
+     {
+      "type": "gres",
+      "name": "gpu",
+      "count": 4
+     },
+     {
+      "type": "node",
+      "name": "",
+      "count": 1
+     },
+     {
+      "type": "billing",
+      "name": "",
+      "count": 864
+     }
+    ],
+    "requested": [
+     {
+      "type": "cpu",
+      "name": "",
+      "count": 288
+     },
+     {
+      "type": "gres",
+      "name": "gpu",
+      "count": 4
+     },
+     {
+      "type": "node",
+      "name": "",
+      "count": 1
+     },
+     {
+      "type": "billing",
+      "name": "",
+      "count": 864
+     }
+    ]
+   },
+   "reservation": {
+    "id": 0,
+    "name": ""
+   }
+  },
+  {
+   "job_id": 400,
+   "user": "carol",
+   "account": "brics.bbbb",
+   "cluster": "testcluster",
+   "nodes": "testnode",
+   "qos": "standard",
+   "restart_cnt": 1,
+   "failed_node": "",
+   "state": {
+    "current": [
+     "COMPLETED"
+    ],
+    "reason": "None"
+   },
+   "time": {
+    "submission": 1772338800,
+    "eligible": 1772338800,
+    "start": 1772339400,
+    "end": 1772341200,
+    "elapsed": 1800
+   },
+   "tres": {
+    "allocated": [
+     {
+      "type": "cpu",
+      "name": "",
+      "count": 288
+     },
+     {
+      "type": "gres",
+      "name": "gpu",
+      "count": 4
+     },
+     {
+      "type": "node",
+      "name": "",
+      "count": 1
+     },
+     {
+      "type": "billing",
+      "name": "",
+      "count": 864
+     }
+    ],
+    "requested": [
+     {
+      "type": "cpu",
+      "name": "",
+      "count": 288
+     },
+     {
+      "type": "gres",
+      "name": "gpu",
+      "count": 4
+     },
+     {
+      "type": "node",
+      "name": "",
+      "count": 1
+     },
+     {
+      "type": "billing",
+      "name": "",
+      "count": 864
+     }
+    ]
+   },
+   "reservation": {
+    "id": 0,
+    "name": ""
+   }
+  },
+  {
+   "job_id": 500,
+   "user": "dan",
+   "account": "brics.cccc",
+   "cluster": "testcluster",
+   "nodes": "testnode",
+   "qos": "standard",
+   "restart_cnt": 0,
+   "failed_node": "",
+   "state": {
+    "current": [
+     "PREEMPTED"
+    ],
+    "reason": "None"
+   },
+   "time": {
+    "submission": 1772344200,
+    "eligible": 1772344200,
+    "start": 1772344800,
+    "end": 1772346600,
+    "elapsed": 1800
+   },
+   "tres": {
+    "allocated": [
+     {
+      "type": "cpu",
+      "name": "",
+      "count": 288
+     },
+     {
+      "type": "gres",
+      "name": "gpu",
+      "count": 4
+     },
+     {
+      "type": "node",
+      "name": "",
+      "count": 1
+     },
+     {
+      "type": "billing",
+      "name": "",
+      "count": 864
+     }
+    ],
+    "requested": [
+     {
+      "type": "cpu",
+      "name": "",
+      "count": 288
+     },
+     {
+      "type": "gres",
+      "name": "gpu",
+      "count": 4
+     },
+     {
+      "type": "node",
+      "name": "",
+      "count": 1
+     },
+     {
+      "type": "billing",
+      "name": "",
+      "count": 864
+     }
+    ]
+   },
+   "reservation": {
+    "id": 0,
+    "name": ""
+   }
+  },
+  {
+   "job_id": 500,
+   "user": "dan",
+   "account": "brics.cccc",
+   "cluster": "testcluster",
+   "nodes": "testnode",
+   "qos": "standard",
+   "restart_cnt": 1,
+   "failed_node": "",
+   "state": {
+    "current": [
+     "COMPLETED"
+    ],
+    "reason": "None"
+   },
+   "time": {
+    "submission": 1772347800,
+    "eligible": 1772347800,
+    "start": 1772348400,
+    "end": 1772349300,
+    "elapsed": 900
+   },
+   "tres": {
+    "allocated": [
+     {
+      "type": "cpu",
+      "name": "",
+      "count": 288
+     },
+     {
+      "type": "gres",
+      "name": "gpu",
+      "count": 4
+     },
+     {
+      "type": "node",
+      "name": "",
+      "count": 1
+     },
+     {
+      "type": "billing",
+      "name": "",
+      "count": 864
+     }
+    ],
+    "requested": [
+     {
+      "type": "cpu",
+      "name": "",
+      "count": 288
+     },
+     {
+      "type": "gres",
+      "name": "gpu",
+      "count": 4
+     },
+     {
+      "type": "node",
+      "name": "",
+      "count": 1
+     },
+     {
+      "type": "billing",
+      "name": "",
+      "count": 864
+     }
+    ]
+   },
+   "reservation": {
+    "id": 0,
+    "name": ""
+   }
+  },
+  {
+   "job_id": 600,
+   "user": "root",
+   "account": "root",
+   "cluster": "testcluster",
+   "nodes": "testnode",
+   "qos": "standard",
+   "restart_cnt": 0,
+   "failed_node": "",
+   "state": {
+    "current": [
+     "PENDING",
+     "REQUEUED"
+    ],
+    "reason": "None"
+   },
+   "time": {
+    "submission": 1772355000,
+    "eligible": 1772355000,
+    "start": 1772355600,
+    "end": 1772359200,
+    "elapsed": 3600
+   },
+   "tres": {
+    "allocated": [
+     {
+      "type": "cpu",
+      "name": "",
+      "count": 288
+     },
+     {
+      "type": "gres",
+      "name": "gpu",
+      "count": 4
+     },
+     {
+      "type": "node",
+      "name": "",
+      "count": 1
+     },
+     {
+      "type": "billing",
+      "name": "",
+      "count": 864
+     }
+    ],
+    "requested": [
+     {
+      "type": "cpu",
+      "name": "",
+      "count": 288
+     },
+     {
+      "type": "gres",
+      "name": "gpu",
+      "count": 4
+     },
+     {
+      "type": "node",
+      "name": "",
+      "count": 1
+     },
+     {
+      "type": "billing",
+      "name": "",
+      "count": 864
+     }
+    ]
+   },
+   "reservation": {
+    "id": 0,
+    "name": ""
+   }
+  },
+  {
+   "job_id": 600,
+   "user": "root",
+   "account": "root",
+   "cluster": "testcluster",
+   "nodes": "testnode",
+   "qos": "standard",
+   "restart_cnt": 1,
+   "failed_node": "",
+   "state": {
+    "current": [
+     "COMPLETED"
+    ],
+    "reason": "None"
+   },
+   "time": {
+    "submission": 1772360400,
+    "eligible": 1772360400,
+    "start": 1772361000,
+    "end": 1772361600,
+    "elapsed": 600
+   },
+   "tres": {
+    "allocated": [
+     {
+      "type": "cpu",
+      "name": "",
+      "count": 288
+     },
+     {
+      "type": "gres",
+      "name": "gpu",
+      "count": 4
+     },
+     {
+      "type": "node",
+      "name": "",
+      "count": 1
+     },
+     {
+      "type": "billing",
+      "name": "",
+      "count": 864
+     }
+    ],
+    "requested": [
+     {
+      "type": "cpu",
+      "name": "",
+      "count": 288
+     },
+     {
+      "type": "gres",
+      "name": "gpu",
+      "count": 4
+     },
+     {
+      "type": "node",
+      "name": "",
+      "count": 1
+     },
+     {
+      "type": "billing",
+      "name": "",
+      "count": 864
+     }
+    ]
+   },
+   "reservation": {
+    "id": 0,
+    "name": ""
+   }
+  }
+ ]
+}

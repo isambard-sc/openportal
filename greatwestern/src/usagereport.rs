@@ -609,10 +609,13 @@ pub struct DailyProjectUsageReport {
     // attempts consumed lands in the fields below instead.
     //
     // `total_usage() + total_requeue_usage()` is therefore a project's true
-    // consumption, and `total_usage()` alone is what we have always reported.
-    // Which of the two a project should be charged for is a policy question,
-    // which is why both are carried. See
-    // `docs/plans/slurm-requeue-accounting-design.md`.
+    // consumption. The split between them is where the charging policy lands:
+    // a superseded attempt the policy charges for is accumulated above with
+    // every other job, and only the attempts the site absorbs are recorded
+    // here. So these fields mean "the consumption we chose not to charge for",
+    // and the charged ones are mirrored in the block below so that they can
+    // still be counted. See `docs/plans/slurm-requeue-accounting-design.md` and
+    // `docs/plans/slurm-requeue-charging-design.md`.
     //
     // All are `serde(default)`, so a report from an instance that predates them
     // deserialises as "no requeues seen" rather than failing.
@@ -642,6 +645,53 @@ pub struct DailyProjectUsageReport {
     /// `total_requeue_usage()`.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     requeue_state_usage: HashMap<String, Usage>,
+
+    // ---- Charged requeues ---------------------------------------------------
+    //
+    // The requeues a project is charged for, which the fields above no longer
+    // hold: a superseded attempt whose terminal state the charging policy
+    // charges is accumulated into `reports` and `components` with every other
+    // job, exactly as though it had never been requeued, and is recorded again
+    // here purely so that it can still be *seen*.
+    //
+    // So these maps describe usage that is already inside `total_usage()`, and
+    // they are the one part of this report that is not disjoint from the rest.
+    // `total_charged_requeue_usage() <= total_usage()` is therefore a bound
+    // rather than an equality, and nothing may add them together. They exist to
+    // answer "how much of this project's requeueing did it pay for, and how
+    // much did the site absorb", which is a question the totals alone cannot
+    // answer once the two are charged differently. See
+    // `docs/plans/slurm-requeue-charging-design.md`.
+    //
+    // All are `serde(default)`: a report from an instance that predates the
+    // charging policy deserialises with them empty, which reads correctly as
+    // "nothing was charged", because under that instance nothing was.
+    /// Usage from superseded attempts that were charged, per local user.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    charged_requeue_reports: HashMap<String, Usage>,
+    /// The same, broken down by resource component.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    charged_requeue_components: HashMap<String, HashMap<String, Usage>>,
+    /// Per-user count of charged requeue *events*.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    user_charged_requeue_events: HashMap<String, u64>,
+    /// Scalar total — equals sum of user_charged_requeue_events when populated.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    num_charged_requeue_events: u64,
+    /// Per-user queue wait accumulated by charged superseded attempts.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    user_charged_requeue_wait_seconds: HashMap<String, u64>,
+    /// Scalar total — equals sum of user_charged_requeue_wait_seconds.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    charged_requeue_wait_seconds: u64,
+    /// Charged requeue events by terminal state. Sums to
+    /// `num_charged_requeue_events`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    charged_requeue_states: HashMap<String, u64>,
+    /// Charged requeue usage by terminal state. Sums to
+    /// `total_charged_requeue_usage()`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    charged_requeue_state_usage: HashMap<String, Usage>,
 
     // ---- Reservations ------------------------------------------------------
     //
@@ -1322,6 +1372,63 @@ impl DailyProjectUsageReport {
             }
         }
 
+        // The charged maps check the same way against their own scalars...
+        if !self.user_charged_requeue_events.is_empty() {
+            let event_sum = sum_counters(&self.user_charged_requeue_events);
+            if event_sum != self.num_charged_requeue_events {
+                return false;
+            }
+        }
+
+        if !self.user_charged_requeue_wait_seconds.is_empty() {
+            let wait_sum = sum_counters(&self.user_charged_requeue_wait_seconds);
+            if wait_sum != self.charged_requeue_wait_seconds {
+                return false;
+            }
+        }
+
+        if !self.charged_requeue_states.is_empty() {
+            let state_sum = sum_counters(&self.charged_requeue_states);
+            if state_sum != self.num_charged_requeue_events {
+                return false;
+            }
+        }
+
+        if !self.charged_requeue_state_usage.is_empty() {
+            let state_usage: Usage = self.charged_requeue_state_usage.values().cloned().sum();
+            if state_usage != self.total_charged_requeue_usage() {
+                return false;
+            }
+        }
+
+        // ...but against the report's own usage they are a *bound*, not an
+        // equality: a charged requeue's usage was accumulated into `reports`
+        // with every other job, so it is part of the total rather than
+        // something to add to it. Exceeding the total would mean it had been
+        // counted somewhere it should not have been.
+        //
+        // The one second of slack per user is truncation, exactly as for the
+        // reservation bound below: dividing the report floors each map's
+        // entries independently, so a figure summed from few entries can land
+        // above one summed from many.
+        if self.total_charged_requeue_usage().seconds()
+            > self
+                .total_usage()
+                .seconds()
+                .saturating_add(self.charged_requeue_reports.len() as u64)
+        {
+            return false;
+        }
+
+        // Entry by entry, for the same reason the reservation check is: a
+        // surplus for one user must not be able to hide under a deficit for
+        // another.
+        for (user, charged) in &self.charged_requeue_reports {
+            if charged.seconds() > self.usage(user).seconds().saturating_add(1) {
+                return false;
+            }
+        }
+
         // Reservations account for a subset of the day's consumption, not all of
         // it, so this is a bound rather than an equality - but usage inside
         // reservations exceeding everything consumed would mean a record had
@@ -1444,6 +1551,15 @@ impl DailyProjectUsageReport {
         report.num_requeue_events = self.num_requeue_events;
         report.user_requeue_wait_seconds = self.user_requeue_wait_seconds.clone();
         report.requeue_wait_seconds = self.requeue_wait_seconds;
+
+        if let Some(reports) = self.charged_requeue_components.get(component) {
+            report.charged_requeue_reports = reports.clone();
+        }
+
+        report.user_charged_requeue_events = self.user_charged_requeue_events.clone();
+        report.num_charged_requeue_events = self.num_charged_requeue_events;
+        report.user_charged_requeue_wait_seconds = self.user_charged_requeue_wait_seconds.clone();
+        report.charged_requeue_wait_seconds = self.charged_requeue_wait_seconds;
 
         // The per-state maps are deliberately not copied. They account for the
         // whole report's requeue events and usage, and there is no way to
@@ -1616,6 +1732,161 @@ impl DailyProjectUsageReport {
     /// True if anything about a requeue was recorded for this day.
     pub fn has_requeues(&self) -> bool {
         self.num_requeue_events > 0 || !self.total_requeue_usage().is_zero()
+    }
+
+    // ---- Charged requeues ---------------------------------------------------
+    //
+    // Every figure here describes usage that is *already* counted in `reports`
+    // and `components`. Nothing may add it to a total; it is only ever compared
+    // against one. See `docs/plans/slurm-requeue-charging-design.md`.
+
+    /// Usage this user consumed on superseded attempts that were charged.
+    pub fn charged_requeue_usage(&self, local_user: &str) -> Usage {
+        self.charged_requeue_reports
+            .get(local_user)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Total usage from superseded attempts that were charged. A subset of
+    /// `total_usage()`, never an addition to it.
+    pub fn total_charged_requeue_usage(&self) -> Usage {
+        self.charged_requeue_reports.values().cloned().sum()
+    }
+
+    /// All the usage lost to a requeue, charged or not - the figure that
+    /// answers "how much did requeueing cost this project", before the question
+    /// of who pays for it.
+    pub fn total_requeue_usage_including_charged(&self) -> Usage {
+        self.total_requeue_usage() + self.total_charged_requeue_usage()
+    }
+
+    pub fn add_charged_requeue_usage(&mut self, local_user: &str, usage: Usage) {
+        *self
+            .charged_requeue_reports
+            .entry(local_user.to_string())
+            .or_default() += usage;
+    }
+
+    pub fn add_charged_requeue_component_usage(
+        &mut self,
+        component: &str,
+        local_user: &str,
+        usage: Usage,
+    ) {
+        if usage.is_zero() {
+            return;
+        }
+
+        let component_reports = self
+            .charged_requeue_components
+            .entry(component.to_string())
+            .or_default();
+
+        *component_reports.entry(local_user.to_string()).or_default() += usage;
+    }
+
+    /// Record `count` charged requeue events, exactly as `add_requeue_events`
+    /// records absorbed ones.
+    pub fn add_charged_requeue_events(&mut self, user: &str, state: &str, count: u64) {
+        accumulate(&mut self.user_charged_requeue_events, user, count);
+        self.num_charged_requeue_events = self.num_charged_requeue_events.saturating_add(count);
+        accumulate(&mut self.charged_requeue_states, state, count);
+    }
+
+    pub fn add_charged_requeue_state_usage(&mut self, state: &str, usage: Usage) {
+        if usage.is_zero() {
+            return;
+        }
+
+        *self
+            .charged_requeue_state_usage
+            .entry(state.to_string())
+            .or_default() += usage;
+    }
+
+    pub fn add_charged_requeue_wait_seconds(&mut self, user: &str, seconds: u64) {
+        accumulate(&mut self.user_charged_requeue_wait_seconds, user, seconds);
+        self.charged_requeue_wait_seconds =
+            self.charged_requeue_wait_seconds.saturating_add(seconds);
+    }
+
+    /// The number of charged requeue *events* - a job requeued four times and
+    /// charged each time contributes four.
+    pub fn num_charged_requeue_events(&self) -> u64 {
+        self.num_charged_requeue_events
+    }
+
+    pub fn charged_requeue_events_for_user(&self, user: &str) -> u64 {
+        self.user_charged_requeue_events
+            .get(user)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Queue wait discarded by a requeue the project was charged for.
+    pub fn charged_requeue_wait_seconds(&self) -> u64 {
+        self.charged_requeue_wait_seconds
+    }
+
+    pub fn charged_requeue_wait_seconds_for_user(&self, user: &str) -> u64 {
+        self.user_charged_requeue_wait_seconds
+            .get(user)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn charged_requeue_events_in_state(&self, state: &str) -> u64 {
+        self.charged_requeue_states.get(state).copied().unwrap_or(0)
+    }
+
+    pub fn charged_requeue_usage_in_state(&self, state: &str) -> Usage {
+        self.charged_requeue_state_usage
+            .get(state)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The states this report charged for, which is the charging policy as it
+    /// was actually applied rather than as it was configured.
+    pub fn charged_requeue_states(&self) -> Vec<String> {
+        let mut states: Vec<String> = self
+            .charged_requeue_states
+            .keys()
+            .chain(self.charged_requeue_state_usage.keys())
+            .cloned()
+            .collect();
+
+        states.sort();
+        states.dedup();
+        states
+    }
+
+    /// True if any requeue was charged for on this day.
+    pub fn has_charged_requeues(&self) -> bool {
+        self.num_charged_requeue_events > 0 || !self.total_charged_requeue_usage().is_zero()
+    }
+
+    /// The share of this day's requeued consumption that the project was
+    /// charged for, in thousandths - the figure an operator wants when asking
+    /// how much of the requeueing was the site's own doing.
+    ///
+    /// Thousandths rather than a float for the reason given on the expansion
+    /// factor: these reports are merged out of `HashMap`s in arbitrary order,
+    /// and float addition is not associative. `None` when nothing was requeued
+    /// at all, which is not the same as nothing having been charged.
+    pub fn charged_requeue_share_per_mille(&self) -> Option<u64> {
+        let total = self.total_requeue_usage_including_charged().seconds();
+
+        match total {
+            0 => None,
+            total => Some(
+                self.total_charged_requeue_usage()
+                    .seconds()
+                    .saturating_mul(1000)
+                    / total,
+            ),
+        }
     }
 
     /// The local users who lost work to a requeue, or whose jobs were requeued.
@@ -1853,6 +2124,14 @@ impl DailyProjectUsageReport {
         for usage in self.requeue_state_usage.values_mut() {
             *usage *= factor;
         }
+        // The charged maps describe a subset of `reports`, so they must scale
+        // with it or the share they represent changes with the currency.
+        for usage in self.charged_requeue_reports.values_mut() {
+            *usage *= factor;
+        }
+        for usage in self.charged_requeue_state_usage.values_mut() {
+            *usage *= factor;
+        }
         for reports in self.reservation_reports.values_mut() {
             for usage in reports.values_mut() {
                 *usage *= factor;
@@ -1878,6 +2157,11 @@ impl DailyProjectUsageReport {
                 *usage *= factor;
             }
         }
+        for component_reports in self.charged_requeue_components.values_mut() {
+            for usage in component_reports.values_mut() {
+                *usage *= factor;
+            }
+        }
     }
 
     /// `scale_totals`, dividing. Spelled out rather than multiplying by a
@@ -1891,6 +2175,12 @@ impl DailyProjectUsageReport {
             *usage /= divisor;
         }
         for usage in self.requeue_state_usage.values_mut() {
+            *usage /= divisor;
+        }
+        for usage in self.charged_requeue_reports.values_mut() {
+            *usage /= divisor;
+        }
+        for usage in self.charged_requeue_state_usage.values_mut() {
             *usage /= divisor;
         }
         for reports in self.reservation_reports.values_mut() {
@@ -1913,6 +2203,11 @@ impl DailyProjectUsageReport {
             }
         }
         for component_reports in self.requeue_components.values_mut() {
+            for usage in component_reports.values_mut() {
+                *usage /= divisor;
+            }
+        }
+        for component_reports in self.charged_requeue_components.values_mut() {
             for usage in component_reports.values_mut() {
                 *usage /= divisor;
             }
@@ -1963,6 +2258,25 @@ impl DailyProjectUsageReport {
             remap_counters(std::mem::take(&mut self.user_requeue_events), string_map);
         self.user_requeue_wait_seconds = remap_counters(
             std::mem::take(&mut self.user_requeue_wait_seconds),
+            string_map,
+        );
+
+        // The charged maps are keyed by user in the same way, and by Slurm
+        // state, which is not a user name and is left alone.
+        self.charged_requeue_reports = remap_usages(
+            std::mem::take(&mut self.charged_requeue_reports),
+            string_map,
+        );
+        self.charged_requeue_components = remap_nested_usages(
+            std::mem::take(&mut self.charged_requeue_components),
+            string_map,
+        );
+        self.user_charged_requeue_events = remap_counters(
+            std::mem::take(&mut self.user_charged_requeue_events),
+            string_map,
+        );
+        self.user_charged_requeue_wait_seconds = remap_counters(
+            std::mem::take(&mut self.user_charged_requeue_wait_seconds),
             string_map,
         );
 
@@ -2063,6 +2377,37 @@ impl std::ops::Add<DailyProjectUsageReport> for DailyProjectUsageReport {
         new_report.requeue_wait_seconds = self
             .requeue_wait_seconds
             .saturating_add(other.requeue_wait_seconds);
+
+        for (user, usage) in other.charged_requeue_reports {
+            new_report.add_charged_requeue_usage(&user, usage);
+        }
+        for (component, reports) in other.charged_requeue_components {
+            for (user, usage) in reports {
+                new_report.add_charged_requeue_component_usage(&component, &user, usage);
+            }
+        }
+        for (user, count) in &other.user_charged_requeue_events {
+            accumulate(&mut new_report.user_charged_requeue_events, user, *count);
+        }
+        for (user, secs) in &other.user_charged_requeue_wait_seconds {
+            accumulate(
+                &mut new_report.user_charged_requeue_wait_seconds,
+                user,
+                *secs,
+            );
+        }
+        for (state, count) in &other.charged_requeue_states {
+            accumulate(&mut new_report.charged_requeue_states, state, *count);
+        }
+        for (state, usage) in other.charged_requeue_state_usage {
+            new_report.add_charged_requeue_state_usage(&state, usage);
+        }
+        new_report.num_charged_requeue_events = self
+            .num_charged_requeue_events
+            .saturating_add(other.num_charged_requeue_events);
+        new_report.charged_requeue_wait_seconds = self
+            .charged_requeue_wait_seconds
+            .saturating_add(other.charged_requeue_wait_seconds);
 
         for (reservation, reports) in other.reservation_reports {
             for (user, usage) in reports {
@@ -2166,6 +2511,33 @@ impl std::ops::AddAssign<DailyProjectUsageReport> for DailyProjectUsageReport {
         self.requeue_wait_seconds = self
             .requeue_wait_seconds
             .saturating_add(other.requeue_wait_seconds);
+
+        for (user, usage) in other.charged_requeue_reports {
+            self.add_charged_requeue_usage(&user, usage);
+        }
+        for (component, reports) in other.charged_requeue_components {
+            for (user, usage) in reports {
+                self.add_charged_requeue_component_usage(&component, &user, usage);
+            }
+        }
+        for (user, count) in &other.user_charged_requeue_events {
+            accumulate(&mut self.user_charged_requeue_events, user, *count);
+        }
+        for (user, secs) in &other.user_charged_requeue_wait_seconds {
+            accumulate(&mut self.user_charged_requeue_wait_seconds, user, *secs);
+        }
+        for (state, count) in &other.charged_requeue_states {
+            accumulate(&mut self.charged_requeue_states, state, *count);
+        }
+        for (state, usage) in other.charged_requeue_state_usage {
+            self.add_charged_requeue_state_usage(&state, usage);
+        }
+        self.num_charged_requeue_events = self
+            .num_charged_requeue_events
+            .saturating_add(other.num_charged_requeue_events);
+        self.charged_requeue_wait_seconds = self
+            .charged_requeue_wait_seconds
+            .saturating_add(other.charged_requeue_wait_seconds);
 
         for (reservation, reports) in other.reservation_reports {
             for (user, usage) in reports {
@@ -3185,9 +3557,98 @@ impl ProjectUsageReport {
             .sum()
     }
 
-    /// True if anything about a requeue was recorded for any day.
+    /// True if anything about a requeue was recorded for any day, charged or
+    /// absorbed.
     pub fn has_requeues(&self) -> bool {
-        self.reports.values().any(|report| report.has_requeues())
+        self.reports
+            .values()
+            .any(|report| report.has_requeues() || report.has_charged_requeues())
+    }
+
+    // ---- Charged requeues ---------------------------------------------------
+
+    /// Usage from superseded attempts that this project was charged for. A
+    /// subset of `total_usage()`, never an addition to it.
+    pub fn total_charged_requeue_usage(&self) -> Usage {
+        self.reports
+            .values()
+            .map(|r| r.total_charged_requeue_usage())
+            .sum()
+    }
+
+    /// Everything requeueing cost this project, before the question of who
+    /// pays: the charged attempts plus the absorbed ones.
+    pub fn total_requeue_usage_including_charged(&self) -> Usage {
+        self.total_requeue_usage() + self.total_charged_requeue_usage()
+    }
+
+    pub fn num_charged_requeue_events(&self) -> u64 {
+        self.reports.values().fold(0u64, |total, r| {
+            total.saturating_add(r.num_charged_requeue_events())
+        })
+    }
+
+    pub fn charged_requeue_wait_seconds(&self) -> u64 {
+        self.reports.values().fold(0u64, |total, r| {
+            total.saturating_add(r.charged_requeue_wait_seconds())
+        })
+    }
+
+    pub fn has_charged_requeues(&self) -> bool {
+        self.reports
+            .values()
+            .any(|report| report.has_charged_requeues())
+    }
+
+    /// The share of this project's requeued consumption that it was charged
+    /// for, in thousandths. `None` when nothing was requeued at all.
+    pub fn charged_requeue_share_per_mille(&self) -> Option<u64> {
+        let total = self.total_requeue_usage_including_charged().seconds();
+
+        match total {
+            0 => None,
+            total => Some(
+                self.total_charged_requeue_usage()
+                    .seconds()
+                    .saturating_mul(1000)
+                    / total,
+            ),
+        }
+    }
+
+    /// Charged requeue events and usage per state, worst first - the same shape
+    /// as `requeue_state_summary`, for the half that was charged.
+    pub fn charged_requeue_state_summary(&self) -> Vec<(String, u64, Usage)> {
+        let mut events: HashMap<String, u64> = HashMap::new();
+        let mut usage: HashMap<String, Usage> = HashMap::new();
+
+        for report in self.reports.values() {
+            for state in report.charged_requeue_states() {
+                accumulate(
+                    &mut events,
+                    &state,
+                    report.charged_requeue_events_in_state(&state),
+                );
+                *usage.entry(state.clone()).or_default() +=
+                    report.charged_requeue_usage_in_state(&state);
+            }
+        }
+
+        let mut summary: Vec<(String, u64, Usage)> = events
+            .keys()
+            .chain(usage.keys())
+            .cloned()
+            .collect::<std::collections::BTreeSet<String>>()
+            .into_iter()
+            .map(|state| {
+                let state_events = events.get(&state).copied().unwrap_or(0);
+                let state_usage = usage.get(&state).cloned().unwrap_or_default();
+                (state, state_events, state_usage)
+            })
+            .collect();
+
+        summary.sort_by(|a, b| b.2.seconds().cmp(&a.2.seconds()).then(a.0.cmp(&b.0)));
+        summary
     }
 
     // ---- Reservations ------------------------------------------------------
@@ -3760,6 +4221,7 @@ impl ProjectUsageReport {
         let reported = self.total_usage();
         let discarded = self.total_requeue_usage();
         let truth = self.total_usage_including_requeues();
+        let charged = self.total_charged_requeue_usage();
 
         let percent = |part: &Usage| match truth.seconds() {
             0 => 0.0,
@@ -3768,12 +4230,12 @@ impl ProjectUsageReport {
 
         let _ = writeln!(
             out,
-            "Reported usage (final attempt of each job) : {:>14}",
+            "Reported usage (charged to the project)    : {:>14}",
             reported.in_hours().to_string()
         );
         let _ = writeln!(
             out,
-            "Discarded by requeues                      : {:>14}  ({:.1}%)",
+            "Discarded by requeues (not charged)        : {:>14}  ({:.1}%)",
             discarded.in_hours().to_string(),
             percent(&discarded)
         );
@@ -3782,21 +4244,53 @@ impl ProjectUsageReport {
             "True consumption (Slurm's view)            : {:>14}",
             truth.in_hours().to_string()
         );
+
+        // The charged share is a slice of the line above it rather than a line
+        // of its own in the same column of arithmetic, so it is set apart: it
+        // must never be read as a fourth figure to be added to the other three.
+        if self.has_charged_requeues() {
+            let _ = writeln!(out);
+            let _ = writeln!(
+                out,
+                "Of the usage charged, {} came from requeued attempts the project asked",
+                charged.in_hours()
+            );
+
+            match self.charged_requeue_share_per_mille() {
+                Some(share) => {
+                    let _ = writeln!(
+                        out,
+                        "for - {:.1}% of everything requeueing cost it; the site absorbed the rest.",
+                        share as f64 / 10.0
+                    );
+                }
+                None => {
+                    let _ = writeln!(out, "for.");
+                }
+            }
+        }
+
         let _ = writeln!(out);
 
         let events = self.num_requeue_events();
+        let charged_events = self.num_charged_requeue_events();
         let _ = writeln!(
             out,
-            "{} requeue {} | queue wait discarded: {} in total, {} per requeue",
+            "{} absorbed requeue {}, {} charged",
             events,
             if events == 1 { "event" } else { "events" },
+            charged_events
+        );
+        let _ = writeln!(
+            out,
+            "Queue wait discarded: {} in total, {} per absorbed requeue",
             Usage::new(self.requeue_wait_seconds()).in_hours(),
             Usage::new(self.average_requeue_wait_seconds()).in_hours()
         );
 
         // ---- by interrupting state
         let _ = writeln!(out);
-        let _ = writeln!(out, "Work was interrupted by:");
+        let _ = writeln!(out, "Work was interrupted by, and absorbed by the site:");
 
         for (state, state_events, state_usage) in self.requeue_state_summary() {
             let _ = writeln!(
@@ -3808,6 +4302,23 @@ impl ProjectUsageReport {
                 state_usage.in_hours().to_string(),
                 percent(&state_usage)
             );
+        }
+
+        if self.has_charged_requeues() {
+            let _ = writeln!(out);
+            let _ = writeln!(out, "Interrupted and charged to the project:");
+
+            for (state, state_events, state_usage) in self.charged_requeue_state_summary() {
+                let _ = writeln!(
+                    out,
+                    "  {:<16} {:>4} {:<7} {:>14}  ({:.1}%)",
+                    state,
+                    state_events,
+                    if state_events == 1 { "event" } else { "events" },
+                    state_usage.in_hours().to_string(),
+                    percent(&state_usage)
+                );
+            }
         }
 
         // ---- by day
@@ -5125,7 +5636,12 @@ mod tests {
         let requeues = report.requeue_report();
         assert!(requeues.contains("NODE_FAIL"), "{}", requeues);
         assert!(requeues.contains("REQUEUED"), "{}", requeues);
-        assert!(requeues.contains("12 requeue events"), "{}", requeues);
+        // the month predates charging, so every one of its requeues is absorbed
+        assert!(
+            requeues.contains("12 absorbed requeue events, 0 charged"),
+            "{}",
+            requeues
+        );
 
         let reservations = report.reservation_report();
         assert!(reservations.contains("interactive"), "{}", reservations);
@@ -6365,8 +6881,8 @@ mod tests {
         let dump = report.requeue_report();
 
         // the three figures a charging decision turns on
-        assert!(dump.contains("Reported usage (final attempt of each job)"));
-        assert!(dump.contains("Discarded by requeues"));
+        assert!(dump.contains("Reported usage (charged to the project)"));
+        assert!(dump.contains("Discarded by requeues (not charged)"));
         assert!(dump.contains("True consumption (Slurm's view)"));
 
         // 8100 of 6000 + 8100 seconds discarded
@@ -6379,7 +6895,7 @@ mod tests {
         // the breakdown that separates the site's fault from the project's
         let by_state = dump
             .lines()
-            .skip_while(|line| !line.starts_with("Work was interrupted by:"))
+            .skip_while(|line| !line.starts_with("Work was interrupted by, and absorbed"))
             .take(3)
             .collect::<Vec<&str>>()
             .join("\n");
@@ -6724,6 +7240,131 @@ mod tests {
         // and the component's own usage is still the component's, not the
         // whole report's
         assert_eq!(cpu.total_usage(), Usage::new(3600));
+    }
+
+    /// A day with both kinds of requeue: `alice` lost work to a node failure
+    /// the site absorbed, and asked for a requeue of her own that was charged.
+    /// The charged usage is *inside* `add_usage`, exactly as `record_job`
+    /// accumulates it.
+    fn report_with_charged_requeues() -> DailyProjectUsageReport {
+        let mut report = report_with_requeues();
+
+        report.add_usage("alice", Usage::new(3000));
+        report.add_component_usage("cpu", "alice", Usage::new(6000));
+
+        report.add_charged_requeue_usage("alice", Usage::new(3000));
+        report.add_charged_requeue_state_usage("REQUEUED", Usage::new(3000));
+        report.add_charged_requeue_component_usage("cpu", "alice", Usage::new(6000));
+        report.add_charged_requeue_events("alice", "REQUEUED", 1);
+        report.add_charged_requeue_wait_seconds("alice", 90);
+
+        report
+    }
+
+    #[test]
+    fn test_charged_requeues_are_a_subset_of_the_usage_not_an_addition_to_it() {
+        let report = report_with_charged_requeues();
+
+        // alice consumed 1800 of her own plus 3000 charged back to her
+        assert_eq!(report.usage("alice"), Usage::new(4800));
+        assert_eq!(report.charged_requeue_usage("alice"), Usage::new(3000));
+        assert_eq!(report.total_charged_requeue_usage(), Usage::new(3000));
+
+        // the true total counts the charged usage once, through `total_usage`
+        assert_eq!(
+            report.total_usage_including_requeues(),
+            report.total_usage() + report.total_requeue_usage()
+        );
+
+        // and everything requeueing cost is both kinds together
+        assert_eq!(
+            report.total_requeue_usage_including_charged(),
+            Usage::new(3000 + 7200 + 900)
+        );
+        assert!(report.is_consistent());
+    }
+
+    #[test]
+    fn test_a_report_charging_more_than_it_consumed_is_inconsistent() {
+        // The bound that says the charged maps describe a subset: charging more
+        // than the user consumed means the same usage was recorded twice.
+        let mut report = DailyProjectUsageReport::default();
+        report.add_usage("alice", Usage::new(600));
+        report.add_charged_requeue_usage("alice", Usage::new(6000));
+
+        assert!(!report.is_consistent());
+
+        // a per-user surplus must not hide under another user's deficit
+        let mut report = DailyProjectUsageReport::default();
+        report.add_usage("alice", Usage::new(600));
+        report.add_usage("bob", Usage::new(6000));
+        report.add_charged_requeue_usage("alice", Usage::new(6000));
+
+        assert!(!report.is_consistent());
+
+        // and the per-state map has to account for what was charged
+        let mut report = report_with_charged_requeues();
+        report.add_charged_requeue_state_usage("REQUEUED", Usage::new(60));
+
+        assert!(!report.is_consistent());
+    }
+
+    #[test]
+    fn test_charged_requeue_figures_survive_merging_and_scaling() {
+        let mut merged = report_with_charged_requeues();
+        merged += report_with_charged_requeues();
+
+        assert_eq!(merged.total_charged_requeue_usage(), Usage::new(6000));
+        assert_eq!(merged.num_charged_requeue_events(), 2);
+        assert_eq!(merged.charged_requeue_wait_seconds(), 180);
+        assert_eq!(
+            merged.charged_requeue_usage_in_state("REQUEUED"),
+            Usage::new(6000)
+        );
+        assert!(merged.is_consistent());
+
+        // the same through the consuming merge, which is a separate code path
+        let added = report_with_charged_requeues() + report_with_charged_requeues();
+        assert_eq!(added.total_charged_requeue_usage(), Usage::new(6000));
+        assert_eq!(added.num_charged_requeue_events(), 2);
+        assert!(added.is_consistent());
+
+        // Scaled with the usage it is a subset of, never apart from it - a
+        // charged share that stayed in seconds while the total went to credits
+        // would be a subset of nothing.
+        let halved = report_with_charged_requeues() / 2.0;
+        assert_eq!(halved.total_charged_requeue_usage(), Usage::new(1500));
+        assert_eq!(halved.usage("alice"), Usage::new(2400));
+        assert!(halved.is_consistent());
+
+        // and the event count is not usage, so scaling leaves it alone
+        assert_eq!(halved.num_charged_requeue_events(), 1);
+    }
+
+    #[test]
+    fn test_renaming_local_users_moves_their_charged_figures_too() {
+        let mut report = report_with_charged_requeues();
+        let mut renames = HashMap::new();
+        renames.insert("alice".to_string(), "alice2".to_string());
+        report.remap_local_users(&renames);
+
+        assert_eq!(report.charged_requeue_usage("alice2"), Usage::new(3000));
+        assert_eq!(report.charged_requeue_usage("alice"), Usage::default());
+        assert_eq!(report.charged_requeue_events_for_user("alice2"), 1);
+        assert_eq!(report.charged_requeue_wait_seconds_for_user("alice2"), 90);
+        assert!(report.is_consistent());
+    }
+
+    #[test]
+    fn test_a_legacy_report_with_no_charged_figures_is_consistent() {
+        // Every charged field is `serde(default)`, so a report from an instance
+        // that predates the charging policy arrives with them empty - which
+        // reads correctly as "nothing was charged", because nothing was.
+        let report = report_with_requeues();
+
+        assert!(!report.has_charged_requeues());
+        assert_eq!(report.charged_requeue_share_per_mille(), Some(0));
+        assert!(report.is_consistent());
     }
 
     #[test]

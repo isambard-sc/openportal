@@ -3,19 +3,60 @@
 
 use anyhow::Result;
 use greatwestern::grammar::{Date, Hour, ProjectIdentifier, UserIdentifier};
-use greatwestern::usagereport::DailyProjectUsageReport;
+use greatwestern::usagereport::{DailyProjectUsageReport, Usage};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::Arc;
 use templemeads::Error;
 use tokio::sync::{Mutex, RwLock};
 
-use crate::slurm::{SlurmAccount, SlurmJob, SlurmNode, SlurmNodes, SlurmUser};
+use crate::slurm::{RequeuePolicy, SlurmAccount, SlurmJob, SlurmNode, SlurmNodes, SlurmUser};
 
 #[derive(Debug, Clone, Default)]
 struct UsageDatabase {
     reports: HashMap<Date, DailyProjectUsageReport>,
     hourly_reports: HashMap<Date, HashMap<Hour, Vec<SlurmJob>>>,
+}
+
+///
+/// What a project's Slurm limit has to be corrected by, and how much of that
+/// correction has actually been written.
+///
+/// Slurm enforces `GrpTRESMins` against its own accumulated usage, which counts
+/// every requeued attempt - including the ones the charging policy absorbs. Our
+/// reports do not count those, so the limit the portal asks for has to be
+/// raised by them or the project is held against an allocation it was never
+/// given the chance to spend. See `docs/plans/slurm-requeue-charging-design.md`.
+///
+#[derive(Debug, Clone, Default)]
+pub struct LimitCorrection {
+    /// The Slurm account the correction is for. Held here because the applier
+    /// works from these entries alone and has no mapping to resolve.
+    account: String,
+    /// The month this correction belongs to, as `YYYY-MM`. Empty means nothing
+    /// has been computed, which is *unknown* and must never be read as zero.
+    month: String,
+    /// Absorbed requeue usage computed for that month. Ratcheted upward: the
+    /// base/requeue split is window-local, so a recomputed month can come out
+    /// lower, and acting on that would hold a project's jobs for a
+    /// reclassification rather than for anything it did.
+    computed: Usage,
+    /// How much of `computed` is in `GrpTRESMins` now.
+    applied: Usage,
+}
+
+impl LimitCorrection {
+    pub fn account(&self) -> &str {
+        &self.account
+    }
+
+    pub fn computed(&self) -> Usage {
+        self.computed
+    }
+
+    pub fn applied(&self) -> Usage {
+        self.applied
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -26,7 +67,13 @@ struct Database {
     accounts: HashMap<String, SlurmAccount>,
     users: HashMap<String, SlurmUser>,
     nodes: Option<SlurmNodes>,
+    /// Which requeued attempts are charged to a project. Set once at startup
+    /// from the `requeue-policy` option; the default is the one in
+    /// `RequeuePolicy`, so a cache that was never told still charges the way
+    /// the agent is documented to.
+    requeue_policy: RequeuePolicy,
     reports: HashMap<ProjectIdentifier, UsageDatabase>,
+    limit_corrections: HashMap<ProjectIdentifier, LimitCorrection>,
     user_mutexes: HashMap<UserIdentifier, Arc<Mutex<()>>>,
     project_mutexes: HashMap<ProjectIdentifier, Arc<Mutex<()>>>,
 }
@@ -76,6 +123,15 @@ fn enforce_cache_bounds(cache: &mut Database) {
         &mut cache.reports,
         MAX_CACHED_REPORTS,
         "Slurm usage-report project",
+    );
+    // Evicting one of these loses a correction, which reads as *unknown*
+    // rather than as zero - the applier then leaves that project's limit alone
+    // until a usage report recomputes it, which is the same path a restart
+    // takes. Sized with the report map, since they are keyed alike.
+    evict_arbitrary_until(
+        &mut cache.limit_corrections,
+        MAX_CACHED_REPORTS,
+        "Slurm limit correction",
     );
 
     // Bound each project's own history, oldest first.
@@ -336,6 +392,139 @@ pub async fn set_node(name: &str, node: &SlurmNode) -> Result<(), Error> {
     }
 
     Ok(())
+}
+
+///
+/// Record the absorbed requeue usage computed for `month`, and return the value
+/// now held.
+///
+/// Ratchets: a recomputed month that comes out lower leaves the held figure
+/// alone and says so, because lowering it would lower the Slurm limit. A
+/// different month replaces the entry outright - the portal resets the limit
+/// and Slurm's counters together at the turn of the month, so a correction for
+/// the month before is not a smaller correction, it is the wrong one.
+///
+pub async fn record_limit_correction(
+    project: &ProjectIdentifier,
+    account: &str,
+    month: &str,
+    absorbed: Usage,
+) -> Usage {
+    let mut cache = CACHE.write().await;
+    enforce_cache_bounds(&mut cache);
+
+    let entry = cache
+        .limit_corrections
+        .entry(project.clone())
+        .or_insert_with(LimitCorrection::default);
+
+    entry.account = account.to_string();
+
+    if entry.month != month {
+        *entry = LimitCorrection {
+            account: account.to_string(),
+            month: month.to_string(),
+            computed: absorbed,
+            applied: Usage::default(),
+        };
+
+        return absorbed;
+    }
+
+    if absorbed.seconds() > entry.computed.seconds() {
+        entry.computed = absorbed;
+    } else if absorbed.seconds() < entry.computed.seconds() {
+        tracing::warn!(
+            "Recomputed requeue correction for project '{}' in {} is {} seconds, below the \
+             {} seconds already held. Keeping the larger figure: lowering it would lower \
+             the project's Slurm limit for a reclassification rather than for anything it did.",
+            project,
+            month,
+            absorbed.seconds(),
+            entry.computed.seconds()
+        );
+    }
+
+    entry.computed
+}
+
+///
+/// The correction held for `project` in `month`, or `None` if none has been
+/// computed for that month.
+///
+/// `None` is *unknown*, never zero. An agent that has just restarted knows
+/// nothing, and treating that as "no correction needed" would push a limit
+/// short by however much the site has absorbed this month.
+///
+pub async fn get_limit_correction(
+    project: &ProjectIdentifier,
+    month: &str,
+) -> Option<LimitCorrection> {
+    let cache = CACHE.read().await;
+
+    match cache.limit_corrections.get(project) {
+        Some(correction) if correction.month == month => Some(correction.clone()),
+        _ => None,
+    }
+}
+
+/// Record how much of the correction is now in `GrpTRESMins`.
+pub async fn set_applied_limit_correction(
+    project: &ProjectIdentifier,
+    account: &str,
+    month: &str,
+    applied: Usage,
+) {
+    let mut cache = CACHE.write().await;
+    enforce_cache_bounds(&mut cache);
+
+    let entry = cache
+        .limit_corrections
+        .entry(project.clone())
+        .or_insert_with(LimitCorrection::default);
+
+    entry.account = account.to_string();
+
+    if entry.month != month {
+        entry.month = month.to_string();
+        entry.computed = applied;
+    }
+
+    entry.applied = applied;
+}
+
+///
+/// The projects whose computed correction is ahead of what has been applied,
+/// with the figure to apply - what the background applier works through.
+///
+pub async fn limit_corrections_to_apply(month: &str) -> Vec<(ProjectIdentifier, LimitCorrection)> {
+    let cache = CACHE.read().await;
+
+    cache
+        .limit_corrections
+        .iter()
+        .filter(|(_, correction)| correction.month == month)
+        .filter(|(_, correction)| correction.computed.seconds() > correction.applied.seconds())
+        .filter(|(_, correction)| !correction.account.is_empty())
+        .map(|(project, correction)| (project.clone(), correction.clone()))
+        .collect()
+}
+
+pub async fn set_requeue_policy(policy: RequeuePolicy) {
+    let mut cache = CACHE.write().await;
+    cache.requeue_policy = policy;
+}
+
+///
+/// Which requeued attempts are charged to a project.
+///
+/// Infallible, and deliberately so: every caller is in the middle of building a
+/// usage report, and there is no sensible way for one to handle "I could not
+/// find out what the policy is". An unset cache returns the default, which is
+/// the same answer a freshly configured agent would give.
+///
+pub async fn get_requeue_policy() -> RequeuePolicy {
+    CACHE.read().await.requeue_policy
 }
 
 pub async fn get_default_node() -> Result<SlurmNode, Error> {

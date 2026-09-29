@@ -135,6 +135,15 @@ on another:
      this app     ◄──  site_bridge       ◄──  site           (the site portal)
 ```
 
+The arrows are the direction an award request *travels*. The connection
+between the two portals is made the other way round: **`site` dials out to
+`allocator`**. That is the arrangement to copy for a real deployment, because
+it means only the awards portal has to accept connections from the internet.
+A site is a client of it, so it needs no inbound port at all and can keep its
+whole OpenPortal deployment behind its own firewall. Nothing is lost by it: one
+websocket carries traffic both ways, so the awards portal still sends its
+requests down the connection the site opened.
+
 Both bridges get a config file for the `openportal` module, so you can drive
 either end: `allocator_bridge` to *make* requests of the site, `site_bridge` to
 see what this portal's own bridge holds. Everything binds to `127.0.0.1` on

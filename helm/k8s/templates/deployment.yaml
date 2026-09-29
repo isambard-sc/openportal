@@ -17,6 +17,9 @@ spec:
       labels:
         {{- include "op-k8s.labels" . | indent 8 }}
     spec:
+      {{- if .Values.serviceAccountName }}
+      serviceAccountName: {{ .Values.serviceAccountName | quote }}
+      {{- end }}
       containers:
         - name: op-k8s
           image: "{{ print .Values.image.registry "/" }}{{ required "image_name must be set" .Values.image.name }}:{{ default .Chart.AppVersion .Values.image.tag }}"

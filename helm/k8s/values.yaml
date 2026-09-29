@@ -9,5 +9,14 @@ image:
 log_level: info
 log_format: json
 secret_name: k8s-config
+# Required for in-cluster auth (op-k8s deployed inside the cluster it
+# manages) to actually work - not just detect as "in-cluster", but have the
+# RBAC to do anything. Leaving this unset attaches the namespace's `default`
+# ServiceAccount instead, which has no Project/ProjectUser/ProjectUserUsage
+# permissions, so every API call 403s even though the agent starts fine.
+# Set it to the ServiceAccount you already bound that RBAC to (e.g.
+# "platform-api"). Only safe to leave unset if op-k8s is using the external
+# k8s-api-server/k8s-ca-bundle/k8s-token config instead.
+serviceAccountName: ""
 port: 80
 health_port: 8080

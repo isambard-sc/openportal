@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: © 2026 David John <David.John@bristol.ac.uk>
+# SPDX-License-Identifier: MIT
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: op-k8s
+spec:
+  ports:
+    - protocol: TCP
+      port: {{ .Values.port }}
+      name: agent
+      targetPort: {{ .Values.port }}
+    - protocol: TCP
+      port: {{ .Values.health_port }}
+      name: health
+      targetPort: {{ .Values.health_port }}
+  selector:
+    app.kubernetes.io/name: op-k8s

@@ -32,13 +32,72 @@ const FIELD_MANAGER: &str = "op-k8s";
 /// Connect to the Kubernetes cluster's API server, and remember the
 /// resulting client for the lifetime of this process.
 ///
-pub async fn connect(api_server: &str, ca_bundle: &str, token: SecretString) -> Result<(), Error> {
+/// Tries the pod's own in-cluster ServiceAccount first (the standard
+/// `KUBERNETES_SERVICE_HOST`/`_PORT` env vars plus the token/CA kubelet
+/// mounts at `/var/run/secrets/kubernetes.io/serviceaccount/` - present when
+/// this agent runs as a workload on the cluster it manages). That token is
+/// re-read from disk per request rather than cached, so it picks up
+/// kubelet's rotation automatically - unlike the static, external token
+/// below, it never goes stale.
+///
+/// Falls back to the explicit `api_server`/`ca_bundle`/`token` (all three
+/// required together) when not running in-cluster - e.g. this agent running
+/// outside the cluster it manages, authenticating with a manually-extracted
+/// service account token.
+///
+pub async fn connect(
+    api_server: Option<&str>,
+    ca_bundle: Option<&str>,
+    token: Option<SecretString>,
+) -> Result<(), Error> {
     // This agent's kube client needs a process-wide rustls crypto provider
     // installed before paddington's own event loop starts (this call happens
     // first in `main`). `Err` just means one is already installed - see the
     // matching comment in `paddington::eventloop::run`.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    let config = match kube::Config::incluster() {
+        Ok(config) => {
+            tracing::info!("Running in-cluster - using this pod's own ServiceAccount credentials");
+            config
+        }
+        Err(e) => {
+            tracing::debug!(
+                "Not running in-cluster ({}) - falling back to explicit configuration",
+                e
+            );
+
+            let (api_server, ca_bundle, token) = match (api_server, ca_bundle, token) {
+                (Some(api_server), Some(ca_bundle), Some(token)) => (api_server, ca_bundle, token),
+                _ => {
+                    return Err(Error::InvalidConfig(
+                        "Not running in-cluster, and k8s-api-server/k8s-ca-bundle/k8s-token \
+                         are not all set. Either run this agent inside the cluster it \
+                         manages, or set all three of those options."
+                            .to_string(),
+                    ));
+                }
+            };
+
+            build_external_config(api_server, ca_bundle, token).await?
+        }
+    };
+
+    let client = Client::try_from(config)
+        .with_context(|| "Could not build a Kubernetes client from the config")?;
+
+    CLIENT
+        .set(client)
+        .map_err(|_| Error::Bug("Kubernetes client has already been connected".to_string()))?;
+
+    Ok(())
+}
+
+async fn build_external_config(
+    api_server: &str,
+    ca_bundle: &str,
+    token: SecretString,
+) -> Result<Config, Error> {
     let kubeconfig = Kubeconfig::from_yaml(&format!(
         r#"
 apiVersion: v1
@@ -72,14 +131,7 @@ users:
         ..Default::default()
     };
 
-    let client = Client::try_from(config)
-        .with_context(|| "Could not build a Kubernetes client from the config")?;
-
-    CLIENT
-        .set(client)
-        .map_err(|_| Error::Bug("Kubernetes client has already been connected".to_string()))?;
-
-    Ok(())
+    Ok(config)
 }
 
 fn client() -> Result<Client, Error> {

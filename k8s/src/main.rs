@@ -73,41 +73,28 @@ async fn main() -> Result<()> {
         }
     };
 
-    // get the extra options needed to connect to this cluster's API server
+    // These are only needed when NOT running in-cluster - `client::connect`
+    // tries the pod's own ServiceAccount first and only falls back to these
+    // if that fails. See `k8s/src/client.rs`.
     let api_server = config.option("k8s-api-server", "");
-
-    if api_server.is_empty() {
-        return Err(anyhow::anyhow!(
-            "No Kubernetes API server provided. Set this in the k8s-api-server option, \
-             e.g. https://10.129.136.24:6443"
-                .to_owned(),
-        ));
-    }
-
-    let ca_bundle = config.option("k8s-ca-bundle", "ENTER_CA_BUNDLE_HERE");
-
-    if ca_bundle == "ENTER_CA_BUNDLE_HERE" {
-        return Err(anyhow::anyhow!(
-            "No Kubernetes CA bundle provided. Set this in the k8s-ca-bundle option \
-             to the PEM-encoded CA certificate(s) for this cluster's API server."
-                .to_owned(),
-        ));
-    }
-
-    let token = match config.secret("k8s-token") {
-        Some(token) => token,
-        None => {
-            return Err(anyhow::anyhow!(
-                "No Kubernetes service account token provided. Set this in the k8s-token \
-                 option."
-                    .to_owned(),
-            ));
-        }
+    let api_server = if api_server.is_empty() {
+        None
+    } else {
+        Some(api_server)
     };
 
-    client::connect(&api_server, &ca_bundle, token).await?;
+    let ca_bundle = config.option("k8s-ca-bundle", "ENTER_CA_BUNDLE_HERE");
+    let ca_bundle = if ca_bundle.is_empty() || ca_bundle == "ENTER_CA_BUNDLE_HERE" {
+        None
+    } else {
+        Some(ca_bundle)
+    };
 
-    tracing::info!("Connected to the Kubernetes API server at {}", api_server);
+    let token = config.secret("k8s-token");
+
+    client::connect(api_server.as_deref(), ca_bundle.as_deref(), token).await?;
+
+    tracing::info!("Connected to the Kubernetes API server");
 
     let db_url = match config.secret("k8s-db-url") {
         Some(db_url) => db_url,

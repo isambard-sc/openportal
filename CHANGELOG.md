@@ -6,6 +6,100 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- **Requeue charging.** A requeued attempt the user asked for is now charged like
+  any other usage; one the site caused is not. The rule is stated negatively,
+  because that is the direction the accounting data supports: Slurm records no
+  unambiguous account of who issued a `scontrol requeue`, but every fault the site
+  causes lands in its own terminal state (`NODE_FAIL`, `PREEMPTED`, `BOOT_FAIL`,
+  ...) and never in a bare `REQUEUED`. So the bare `REQUEUED` bucket is charged
+  and everything else - including any state a future Slurm reports that we cannot
+  name - is absorbed. See
+  [`docs/plans/slurm-requeue-charging-design.md`](docs/plans/slurm-requeue-charging-design.md).
+
+  Chosen by a new `op-slurm` option, which is the single place the decision is
+  made:
+
+  ```toml
+  requeue-policy = "charge_requeue_state_only"   # the default
+  requeue-policy = "no_charge"                   # absorb every requeue, as before
+  ```
+
+  An unrecognised value stops the agent rather than falling back to a default,
+  and the policy in force is logged at startup either way.
+- **Charged and absorbed requeues are reported separately.**
+  `DailyProjectUsageReport` gains a `charged_requeue_*` family of fields -
+  per user, per component, per state, events and wait - mirroring the existing
+  `requeue_*` ones, so a report can say how much of a project's requeueing it
+  paid for and how much the site absorbed. They describe usage already inside
+  `total_usage()`, so they are a subset of it rather than an addition to it, and
+  the consistency checks treat them as a bound. All are `#[serde(default)]`.
+- **The Slurm limit is corrected for the requeue usage the site absorbs.** Slurm
+  enforces `GrpTRESMins` against its own accumulated usage, which counts every
+  attempt - including the ones we no longer charge for - so the limit the portal
+  asks for is now raised by this month's absorbed requeue usage. `op-slurm` keeps
+  the requested limit, the correction and the applied limit as three separate
+  values; usage reports compute the correction and an hourly background task
+  writes it. The correction only ever increases within a month, is treated as
+  unknown rather than zero until it has been computed, is never added to a limit
+  of zero, and is never applied to an account Slurm holds no limit for.
+- **`get_requeue_report`** ([slurm/tools/](slurm/tools/)): an operator tool for
+  what requeueing cost one project, or the whole cluster.
+
+  ```
+  get_requeue_report myproject.brics this_month
+  get_requeue_report --cluster-wide yesterday
+  get_requeue_report --cluster-wide --by-failures last_week
+  ```
+
+  A project's report is the agent's own `requeue_report()`. Cluster-wide, it
+  reads every job on the machine and gives the charged/absorbed split, the worst
+  affected projects, a day-by-day line so an incident reads as an incident, and
+  the nodes Slurm blamed for losing work - ranked by hours lost or, with
+  `--by-failures`, by how often each failed. It has been run cluster-wide over a
+  full month on a production machine.
+- **`get_reservation_report --requeue-policy`**, so the tool splits requeued
+  attempts the same way as the agent on the cluster it is run against.
+
+### Changed
+
+- **Charging `REQUEUED` attempts changes `total_usage()`** under the new default
+  policy: it becomes the base attempts plus the charged requeues, where it was
+  the base attempts alone. Projects that checkpoint with `scontrol requeue` will
+  see their reported usage rise to match what Slurm has always counted against
+  them. `total_usage_including_requeues()` - the true total - is unchanged, as
+  is everything under `requeue-policy = "no_charge"`. Deploy at the start of an
+  accounting month so that no invoice spans the two conventions.
+- **`get_limit` no longer adopts a Slurm limit that disagrees with the cache.**
+  `op-slurm` has sole authority over the accounts it manages, and Slurm now
+  deliberately holds the requested limit plus the requeue correction, so
+  adopting what it holds would make the next correction compound on an
+  already-corrected base. A `GrpTRESMins` that differs from what `op-slurm`
+  applied is now logged at `error` and set back.
+- **`requeue_report()`** now says which of the discarded usage was charged to
+  the project and which the site absorbed, and lists the two by state
+  separately.
+- **The site portal examples now have the site dial the awards portal**, rather
+  than the other way round. Only the awards portal has to accept connections
+  from the internet; a site stays a client and can keep its whole deployment
+  behind its own firewall. The Python and Java examples share the same harness,
+  so both change.
+
+### Fixed
+
+- **A failed `sacct` day query now falls back to hourly queries however it
+  fails.** `op-slurm` only switched to hourly reporting on a wall-clock timeout,
+  so an `sacct` killed for running out of memory, stopped by a limit on the
+  scheduler's side, or cut off part-way through its JSON produced an empty,
+  uncached report - indistinguishable from a project that ran nothing. Any
+  failure now triggers the hourly fallback.
+- **An hour `sacct` cannot answer no longer loses the whole day.** It is
+  skipped and counted, and a day with a gap is never cached, so it is read again
+  on the next pass. `get_reservation_report` had no hourly fallback at all and
+  aborted the run on the first failed day; it now narrows the same way and prints
+  an `INCOMPLETE` notice naming the days and hours it could not read.
+
 ## [0.93.0] - 2026-09-04
 
 ### Added

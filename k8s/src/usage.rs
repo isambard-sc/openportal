@@ -7,6 +7,10 @@
 //! `ProjectUsageReport`/`DailyProjectUsageReport` structures `op-slurm`
 //! answers `get_local_usage_report` with.
 //!
+//! `node_hours` is already the combined figure: `nodehours-tracker` folds
+//! CPU, GPU, memory and pod-slot consumption (each as a fraction of what a
+//! node offers) into it, so this agent does no per-resource arithmetic.
+//!
 //! This agent only ever reads from this table (a read-only DB role), and
 //! nothing here writes to it or to the `Project`/`ProjectUser` CRs - usage
 //! history is expected to outlive the user/project it was recorded against,

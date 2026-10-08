@@ -401,8 +401,10 @@ Each peer-pair shares two 32-byte pre-shared keys stored in their configuration:
 | `inner_key` | Encrypts the inner (message content) envelope |
 | `outer_key` | Encrypts the outer (routing) envelope |
 
-Per-connection session keys are derived from these pre-shared keys during the
-handshake (see §4).
+Each connection uses its own fresh, randomly generated session keys. They are
+not derived from the pre-shared keys: they are sent to the peer during the
+handshake, sealed under the pre-shared keys (see §4), and from then on the
+pre-shared keys are not used on that connection again.
 
 **Source file:** `paddington/src/crypto.rs`
 
@@ -414,11 +416,15 @@ hex-encoded.
 
 ### 3.3 Key Derivation
 
-Session sub-keys are derived from a base key using **HKDF-SHA512**:
+Per-message keys are derived from a base key using **HKDF-SHA512**:
 
 ```
 derived_key = HKDF-SHA512(ikm=base_key, salt=salt, info=info)
 ```
+
+`base_key` is the connection's current key for that envelope: the pre-shared
+`inner_key` or `outer_key` for the handshake messages, and the connection's
+session keys for every message after it.
 
 The `info` value is a 32-byte context string that binds the derived key to a
 specific message. Both sender and receiver independently derive the same key

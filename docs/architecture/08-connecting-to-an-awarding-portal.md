@@ -258,3 +258,7 @@ python example.py start --app java   # or the Java one
 It binds to `127.0.0.1` only and its configs are unencrypted: it is for learning,
 not for deployment. Its README walks through all ten steps, including updates,
 removal and finalised reports.
+
+---
+
+[← 7. Running OpenPortal](07-running-openportal.md) · [Contents](README.md) · [op-freeipa →](agents/op-freeipa.md)

@@ -94,3 +94,7 @@ always agree with it:
 
 [Agent configuration](../../specifications/agent-configuration.md) is the
 reference for every option.
+
+---
+
+[← op-freeipa](op-freeipa.md) · [Contents](../README.md)

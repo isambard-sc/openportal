@@ -123,3 +123,7 @@ One caveat: the agents on a path that *do* parse greatwestern - portal, platform
 and instance - need a version that knows a new instruction before they can
 forward it. Portal software follows the same rule from the other side: an
 instruction it does not implement is answered as unsupported, not ignored.
+
+---
+
+[← 5. templemeads](05-templemeads.md) · [Contents](README.md) · [7. Running OpenPortal →](07-running-openportal.md)

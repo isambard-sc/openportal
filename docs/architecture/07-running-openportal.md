@@ -46,3 +46,7 @@ setting each agent up and peering it.
 The one exception is the vocabulary itself: an agent that has to *parse* a new
 instruction in order to forward it needs a version that knows that instruction.
 See [greatwestern](06-greatwestern.md#adding-new-instructions).
+
+---
+
+[← 6. greatwestern](06-greatwestern.md) · [Contents](README.md) · [8. Connecting to an awarding portal →](08-connecting-to-an-awarding-portal.md)

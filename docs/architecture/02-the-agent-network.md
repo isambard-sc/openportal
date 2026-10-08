@@ -225,3 +225,7 @@ to know very little.
 | **Its own identifiers** - `alice.demo.site` | Accounts, quotas, limits and storage volumes, and how usage is measured |
 
 A new kind of resource at a site is a new destination, not new portal code.
+
+---
+
+[← 1. Why OpenPortal](01-why-openportal.md) · [Contents](README.md) · [3. Portal to portal →](03-portal-to-portal.md)

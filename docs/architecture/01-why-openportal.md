@@ -71,3 +71,7 @@ everything.
 
 [The agent network](02-the-agent-network.md) shows what that looks like in
 practice.
+
+---
+
+[Contents](README.md) · [2. The agent network →](02-the-agent-network.md)

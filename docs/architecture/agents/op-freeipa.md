@@ -84,3 +84,7 @@ server goes away.
 
 [Agent configuration](../../specifications/agent-configuration.md) is the
 reference for every option.
+
+---
+
+[← 8. Connecting to an awarding portal](../08-connecting-to-an-awarding-portal.md) · [Contents](../README.md) · [op-slurm →](op-slurm.md)

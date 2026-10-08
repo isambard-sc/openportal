@@ -128,3 +128,7 @@ everybody once.
 [Connecting to an awarding portal](08-connecting-to-an-awarding-portal.md) walks
 through setting all of this up, and the
 [site portal example](../../python/examples/site_portal) runs it on your laptop.
+
+---
+
+[← 2. The agent network](02-the-agent-network.md) · [Contents](README.md) · [4. paddington →](04-paddington.md)

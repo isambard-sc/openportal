@@ -173,3 +173,7 @@ greatwestern defines fifteen events: users, projects and awards that have been
 added, removed or changed; users and projects that have been blocked or
 unblocked; and awards that have been accepted or rejected. See
 [the notification protocol](../specifications/notification-protocol.md).
+
+---
+
+[← 4. paddington](04-paddington.md) · [Contents](README.md) · [6. greatwestern →](06-greatwestern.md)

@@ -216,3 +216,7 @@ The thick links are the only connections that cross a network boundary, and each
 is a single, allowlisted, encrypted WebSocket. There are no VPNs, tunnels or
 routes between the networks - and a command sent from the internet still reaches
 `slurm` on the cluster without a hole through any boundary.
+
+---
+
+[← 3. Portal to portal](03-portal-to-portal.md) · [Contents](README.md) · [5. templemeads →](05-templemeads.md)

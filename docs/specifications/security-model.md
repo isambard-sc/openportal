@@ -73,17 +73,31 @@ encryption (see §5).
 
 ### 2.4 Key Derivation for Wire Messages
 
-Pre-shared keys are **never used directly** to encrypt wire messages. Before
-each message, per-message session sub-keys are derived via **HKDF-SHA512**:
+No key is ever **used directly** to encrypt a wire message. Before each
+message, a per-message key is derived for each envelope via **HKDF-SHA512**:
 
 ```
-session_key = HKDF-SHA512(ikm=pre_shared_key, salt=session_salt, info=random_info)
+message_key = HKDF-SHA512(ikm=connection_key, salt=connection_salt, info=random_info)
 ```
 
-A fresh random 32-byte `info` value is generated for each message, ensuring
-that no two messages are encrypted with the same key even if the session salt is
-reused. See [wire-protocol.md](wire-protocol.md) §3 for the full wire frame
-format.
+`connection_key` is whichever key the connection currently holds for that
+envelope, and it changes once per connection:
+
+- **During the handshake** it is the link's pre-shared `inner_key` or
+  `outer_key`. The handshake is the only thing the pre-shared keys ever
+  encrypt.
+- **After the handshake** it is that connection's session key (§2.5): the client
+  generates the session outer key and the server the session inner key, each
+  sent to the other sealed inside the handshake. Every later message's keys are
+  derived from these.
+
+So the pre-shared keys alone cannot decrypt anything after a connection's
+handshake: that also needs the session keys carried inside it.
+
+A fresh random 32-byte `info` value is generated for each message, and sent with
+it, ensuring that no two messages are encrypted with the same key even if the
+salt is reused. See [wire-protocol.md](wire-protocol.md) §3 for the full wire
+frame format.
 
 ### 2.5 Session Keys — and the Deliberate Absence of Forward Secrecy
 

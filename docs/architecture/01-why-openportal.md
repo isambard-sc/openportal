@@ -45,8 +45,9 @@ flowchart LR
     agent -->|"polls, with an API token"| portal
 ```
 
-It works, and it is how OpenPortal's own first deployment looked. But it has
-three properties that get worse as a site grows:
+It works, and when OpenPortal was started it was how site agents for user
+portals typically operated. But it has three properties that get worse as a
+site grows:
 
 - **Many keys in one place.** One process can read and change everything it
   touches. Compromise it and you have all of it.

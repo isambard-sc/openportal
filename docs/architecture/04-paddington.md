@@ -119,6 +119,24 @@ obtains that link's pre-shared keys can decrypt it - so rotate keys to bound the
 exposure. [The security model](../specifications/security-model.md) sets this
 out in full.
 
+In practice that is a tall order, because each layer of keys only unlocks the
+next:
+
+1. **The pre-shared keys cannot be learned from the wire.** They never cross
+   it - they are exchanged out-of-band - and the only thing they ever encrypt is
+   a completely random session key. With nothing predictable to compare against,
+   no amount of recorded traffic helps recover them.
+2. **The pre-shared keys alone decrypt nothing but the handshake.** Everything
+   after it is encrypted under that connection's session keys, which are only
+   ever sent once, sealed inside the handshake.
+3. **The session keys are needed to derive each message's own key.**
+
+So decrypting old traffic needs the pre-shared keys *and* a recording of that
+connection's handshake, saved from the moment it happened. Handshakes are rare:
+one per connection, made when an agent starts or reconnects - not a fresh
+connection for every request, as many HTTP clients make. A recording of the messages without its handshake stays
+unreadable even to someone who later holds the pre-shared keys.
+
 ## The shape of the network
 
 - **Neighbours only.** Every link has its own key pair, and an agent cannot

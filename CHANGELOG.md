@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.94.0] - 2026-10-08
+
 ### Added
 
 - **Requeue charging.** A requeued attempt the user asked for is now charged like
@@ -2635,6 +2637,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.94.0]: https://github.com/isambard-sc/openportal/releases/tag/0.94.0
 [0.93.0]: https://github.com/isambard-sc/openportal/releases/tag/0.93.0
 [0.92.0]: https://github.com/isambard-sc/openportal/releases/tag/0.92.0
 [0.91.0]: https://github.com/isambard-sc/openportal/releases/tag/0.91.0

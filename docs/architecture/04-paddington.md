@@ -67,8 +67,21 @@ must pass** before a single message is processed.
 
 Spoofing an address gets you nothing without the keys. Stealing one link's keys
 gets you nothing unless you also connect from the right place, in the right zone,
-as the right name. The server also refuses a second connection from an agent
-that is already connected.
+as the right name.
+
+### One peer, one active connection
+
+A link is served to exactly one connection at a time. A second connection under
+an identity that is already connected is not served alongside the first: it is
+held as a *standby*, and promoted automatically if the active one fails. That is
+how client-side [high availability](../specifications/highavailability.md)
+works - run several replicas of an agent, and one is active while the rest wait.
+
+This is not a security control. A standby has passed all four checks, so it holds
+the same keys and is trusted exactly as fully as the active connection - it even
+receives job-board updates while it waits, so that it can take over cleanly. What
+it does give you is a link whose other end is always one peer, rather than an
+API that serves however many clients present a valid credential.
 
 ## On the wire
 

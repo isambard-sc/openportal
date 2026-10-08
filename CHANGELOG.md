@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- **How OpenPortal works** ([docs/architecture/](docs/architecture/README.md)):
+  a guided tour that sits between the short tour in the README and the
+  specifications. It explains why OpenPortal is built as it is, and how a
+  deployment is shaped - including that what is shared between clusters is a
+  matter of which agents are introduced to which, not of code. It then walks
+  through the three layers, what running OpenPortal involves, and a site
+  operator's steps for connecting to an awarding portal. It also has pages on
+  `op-freeipa` and `op-slurm`, the two agents that hold the most privileged
+  credentials. Diagrams are in Mermaid, so they render on GitHub and change
+  alongside the text. Linked from the README and both docs indexes.
+
 ## [0.94.0] - 2026-10-08
 
 ### Added

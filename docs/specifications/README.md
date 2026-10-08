@@ -11,7 +11,10 @@ its components. The documents are ordered from the highest level of abstraction
 encrypted on the wire).
 
 For a narrative introduction to OpenPortal — its design philosophy, agent
-types, and worked examples — see the [docs overview](../README.md).
+types, and worked examples — see the [docs overview](../README.md), and for a
+guided tour of how the pieces behave together, see
+[How OpenPortal works](../architecture/README.md). Each page of that guide links
+to the specification here that covers its topic in full.
 
 `templemeads` (Job/Notification transport, wire protocol, security model,
 bridge API, agent configuration) is generic over a `Domain` — the compile-time

@@ -40,6 +40,11 @@ audit tracing of all actions, and a complete trust hierarchy that ensures
 that only the correct Agents can perform the correct actions based on
 messages received from trusted sources.
 
+For a guided tour of the design - why it is shaped this way, with diagrams of an
+example deployment's agent network - see
+[How OpenPortal works](architecture/README.md). This page is the summary of
+the crates and agents, and the starting point for the examples.
+
 ## Design
 
 OpenPortal is a collection of Agents, each of which are implemented in their

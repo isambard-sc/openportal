@@ -18,6 +18,11 @@ deployment has agents running at both the portal side and the infrastructure
 side, coordinating to carry out tasks such as account creation, project
 management, filesystem provisioning, and usage reporting.
 
+**New to OpenPortal?** [How OpenPortal works](docs/architecture/README.md) is a
+guided tour: why it exists, how a deployment is shaped, how the three layers fit
+together, and what running it looks like. Start there, then come back to the
+summary below or go on to the [specifications](docs/specifications).
+
 ## How it works
 
 ### The agent network
@@ -167,9 +172,10 @@ Targeting a different kind of infrastructure means writing a Domain in place of
 `greatwestern` and reusing `paddington` and `templemeads` unchanged. See
 [Writing your own Domain](docs/specifications/writing-a-domain.md).
 
-For a full description of the design, the agent types, and worked examples, see
-the [docs](docs) directory. For formal protocol and API specifications, see
-[docs/specifications](docs/specifications).
+For the reasoning behind this design and a tour of how it behaves, see
+[How OpenPortal works](docs/architecture/README.md). For the agent types and
+worked examples, see the [docs](docs) directory. For formal protocol and API
+specifications, see [docs/specifications](docs/specifications).
 
 ## Agent types
 

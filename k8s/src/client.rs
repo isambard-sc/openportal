@@ -240,9 +240,8 @@ pub async fn set_project_node_hours(
 }
 
 /// Switches the `Project` between the shared host cluster and its own
-/// vcluster. A vcluster always gets the llmisvc add-ons for now. Only works
-/// on clusters whose RGD carries the vcluster overlay (phase-1-dev) - on any
-/// other the API server rejects `tenancy.mode` as an unknown field.
+/// vcluster. Only works on clusters whose RGD carries the vcluster overlay
+/// (phase-1-dev) - on any other the API server rejects `tenancy.mode` as an unknown field.
 pub async fn set_project_tenancy(mapping: &ProjectMapping, mode: TenancyMode) -> Result<(), Error> {
     let patch = match mode {
         TenancyMode::Shared => serde_json::json!({
@@ -258,7 +257,7 @@ pub async fn set_project_tenancy(mapping: &ProjectMapping, mode: TenancyMode) ->
                     "mode": mode,
                     "vcluster": {
                         "addons": {
-                            "llmisvc": true,
+                            "llmisvc": false,
                         }
                     }
                 }

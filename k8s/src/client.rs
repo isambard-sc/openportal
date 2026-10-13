@@ -19,7 +19,9 @@ use once_cell::sync::OnceCell;
 use secrecy::SecretString;
 use templemeads::Error;
 
-use crate::resources::{project_user_name, Project, ProjectSpec, ProjectUser, ProjectUserSpec};
+use crate::resources::{
+    project_user_name, Project, ProjectSpec, ProjectUser, ProjectUserSpec, TenancyMode,
+};
 
 static CLIENT: OnceCell<Client> = OnceCell::new();
 
@@ -230,6 +232,50 @@ pub async fn set_project_node_hours(
         .with_context(|| {
             format!(
                 "Could not set the node-hour budget for Project {}",
+                mapping.local_group()
+            )
+        })?;
+
+    Ok(())
+}
+
+/// Switches the `Project` between the shared host cluster and its own
+/// vcluster. A vcluster always gets the llmisvc add-ons for now. Only works
+/// on clusters whose RGD carries the vcluster overlay (phase-1-dev) - on any
+/// other the API server rejects `tenancy.mode` as an unknown field.
+pub async fn set_project_tenancy(mapping: &ProjectMapping, mode: TenancyMode) -> Result<(), Error> {
+    let patch = match mode {
+        TenancyMode::Shared => serde_json::json!({
+            "spec": {
+                "tenancy": {
+                    "mode": mode,
+                }
+            }
+        }),
+        TenancyMode::VCluster => serde_json::json!({
+            "spec": {
+                "tenancy": {
+                    "mode": mode,
+                    "vcluster": {
+                        "addons": {
+                            "llmisvc": true,
+                        }
+                    }
+                }
+            }
+        }),
+    };
+
+    projects_api()?
+        .patch(
+            mapping.local_group(),
+            &PatchParams::apply(FIELD_MANAGER),
+            &Patch::Merge(&patch),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "Could not set the tenancy mode for Project {}",
                 mapping.local_group()
             )
         })?;

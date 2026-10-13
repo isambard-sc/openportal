@@ -1052,6 +1052,29 @@ Returns: `Usage` (seconds)
 
 ---
 
+### Tenancy Instructions
+
+#### `set_tenancy`
+
+Set how a project's users are given access to the platform: `shared` (a
+namespace on the shared Kubernetes cluster) or `vcluster` (a virtual cluster of
+the project's own). Only supported by clusters whose scheduler agent is
+`op-k8s`; any other scheduler rejects it.
+
+```
+set_tenancy <project_id> <shared|vcluster>
+```
+
+#### `set_local_tenancy`
+
+Set the tenancy of a locally mapped project.
+
+```
+set_local_tenancy <project_mapping> <shared|vcluster>
+```
+
+---
+
 ### Storage Quota Instructions — Portal Level
 
 These instructions operate on projects/users identified by OpenPortal identifiers.
@@ -1304,6 +1327,8 @@ Returns: `Destinations`
 | `get_limit` | `<project_id>` | `Usage` | Get compute limit for project |
 | `set_local_limit` | `<project_mapping> <seconds>` | — | Set local compute limit |
 | `get_local_limit` | `<project_mapping>` | `Usage` | Get local compute limit |
+| `set_tenancy` | `<project_id> <shared\|vcluster>` | — | Set project tenancy (op-k8s only) |
+| `set_local_tenancy` | `<project_mapping> <shared\|vcluster>` | — | Set local project tenancy (op-k8s only) |
 | `set_project_quota` | `<project_id> <volume> <limit>` | — | Set project storage quota |
 | `get_project_quota` | `<project_id> <volume>` | `Quota` | Get project storage quota |
 | `clear_project_quota` | `<project_id> <volume>` | — | Clear project storage quota |

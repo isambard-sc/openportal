@@ -7,11 +7,14 @@ mod client;
 mod resources;
 mod usage;
 
+use resources::TenancyMode;
+
 use greatwestern::grammar::Instruction::{
     AddLocalProject, AddLocalUser, GetLocalLimit, GetLocalUsageReport, IsLocalProjectAdded,
     IsLocalProjectRemoved, IsLocalUserAdded, IsLocalUserRemoved, RemoveLocalProject,
-    RemoveLocalUser, SetLocalLimit,
+    RemoveLocalUser, SetLocalLimit, SetLocalTenancy,
 };
+use greatwestern::tenancy::Tenancy;
 use greatwestern::usagereport::Usage;
 use greatwestern::Hpc;
 use templemeads::agent::scheduler::{process_args, run, Defaults};
@@ -159,6 +162,14 @@ async fn main() -> Result<()> {
                     let node_hours = limit.hours().max(0.0) as u64;
                     client::set_project_node_hours(&mapping, node_hours).await?;
                     job.completed(Usage::new(node_hours.saturating_mul(SECONDS_PER_HOUR)))
+                }
+                SetLocalTenancy(mapping, tenancy) => {
+                    let mode = match tenancy {
+                        Tenancy::Shared => TenancyMode::Shared,
+                        Tenancy::VCluster => TenancyMode::VCluster,
+                    };
+                    client::set_project_tenancy(&mapping, mode).await?;
+                    job.completed_none()
                 }
                 GetLocalUsageReport(mapping, dates) => {
                     let report = usage::get_usage_report(&mapping, &dates).await?;

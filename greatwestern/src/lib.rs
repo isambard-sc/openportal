@@ -18,6 +18,7 @@ mod job_bindings;
 pub mod notification;
 pub mod storage;
 pub mod storagereport;
+pub mod tenancy;
 pub mod usagereport;
 
 // Needed only so ts-rs's "uuid-impl" feature (which implements TS for

@@ -11,13 +11,14 @@ use greatwestern::grammar::Instruction::{
     GetStorageReports, GetUsageReport, GetUsageReports, GetUserDirs, GetUserMapping, GetUserQuota,
     GetUserQuotas, GetUsers, IsBlockedProject, IsBlockedUser, IsProjectAdded, IsProjectRemoved,
     IsProtectedUser, IsUserAdded, IsUserRemoved, RemoveProject, RemoveUser, SetLimit,
-    SetProjectQuota, SetUserQuota, UnblockProject, UnblockUser,
+    SetProjectQuota, SetTenancy, SetUserQuota, UnblockProject, UnblockUser,
 };
 use greatwestern::grammar::{
     DateRange, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
 };
 use greatwestern::storage::{Quota, Volume};
 use greatwestern::storagereport::{ProjectStorageReport, StorageReport};
+use greatwestern::tenancy::Tenancy;
 use greatwestern::usagereport::{ProjectUsageReport, Usage, UsageReport};
 use greatwestern::{Hpc, NotificationEvent};
 use templemeads::agent;
@@ -321,6 +322,10 @@ async fn main() -> Result<()> {
                 SetLimit(project, limit) => {
                     let limit = set_project_limit(me.name(), &project, limit).await?;
                     job.completed(limit)
+                }
+                SetTenancy(project, tenancy) => {
+                    set_project_tenancy(me.name(), &project, tenancy).await?;
+                    job.completed_none()
                 }
                 GetProjectQuota(project, volume) => {
                     let quota = get_project_quota(me.name(), &project, &volume).await?;
@@ -1604,6 +1609,48 @@ pub async fn set_project_limit(
     };
 
     Ok(limit)
+}
+
+/// Only schedulers with more than one form of tenancy (op-k8s) accept
+/// this - any other rejects `set_local_tenancy` as an invalid instruction.
+async fn set_project_tenancy(
+    me: &str,
+    project: &ProjectIdentifier,
+    tenancy: Tenancy,
+) -> Result<(), Error> {
+    // get the mapping for this project
+    let mapping = get_project_mapping(me, project).await?;
+
+    // find the scheduler agent
+    let scheduler = match agent::scheduler(AGENT_WAIT_TIME).await {
+        Some(scheduler) => scheduler,
+        None => {
+            tracing::error!("No scheduler agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no scheduler agent".to_string(),
+            ));
+        }
+    };
+
+    // ask the scheduler to set the project tenancy
+    let job = Job::parse(
+        &format!(
+            "{}.{} set_local_tenancy {} {}",
+            me,
+            scheduler.name(),
+            mapping,
+            tenancy
+        ),
+        false,
+    )?;
+
+    let job = job.put(&scheduler).await?;
+
+    wait_for_step(
+        job,
+        &format!("setting the tenancy of project {} to {}", project, tenancy),
+    )
+    .await
 }
 
 async fn clear_project_quota(

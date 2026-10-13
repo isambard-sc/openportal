@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::storage::{QuotaLimit, Volume};
+use crate::tenancy::Tenancy;
 use crate::usagereport::Usage;
 use templemeads::destination::{Destination, Destinations};
 use templemeads::named::NamedType;
@@ -2980,6 +2981,9 @@ pub enum Instruction {
     /// An instruction to set the limit of a local project
     SetLocalLimit(ProjectMapping, Usage),
 
+    /// An instruction to set the tenancy of a local project
+    SetLocalTenancy(ProjectMapping, Tenancy),
+
     /// An instruction to clear the quota of a local project on a volume
     ClearLocalProjectQuota(ProjectMapping, Volume),
 
@@ -3046,6 +3050,10 @@ pub enum Instruction {
 
     /// An instruction to get the usage limit for a project
     GetLimit(ProjectIdentifier),
+
+    /// An instruction to set how a project's users are given access to
+    /// the platform (e.g. a shared Kubernetes cluster or their own vcluster)
+    SetTenancy(ProjectIdentifier, Tenancy),
 
     /// An instruction to clear a storage quota for a project on a volume
     ClearProjectQuota(ProjectIdentifier, Volume),
@@ -3730,6 +3738,41 @@ impl Instruction {
                     }
                 }
             }
+            "set_local_tenancy" => {
+                if parts.len() < 3 {
+                    tracing::error!("set_local_tenancy failed to parse: {}", &rest(1));
+                    return Err(Error::Parse(format!(
+                        "set_local_tenancy failed to parse: {}",
+                        rest(1)
+                    )));
+                }
+
+                match ProjectMapping::parse(arg(1)) {
+                    Ok(mapping) => match Tenancy::parse(arg(2)) {
+                        Ok(tenancy) => Ok(Instruction::SetLocalTenancy(mapping, tenancy)),
+                        Err(e) => {
+                            tracing::error!(
+                                "set_local_tenancy failed to parse '{}': {}",
+                                &rest(1),
+                                e
+                            );
+                            Err(Error::Parse(format!(
+                                "set_local_tenancy failed to parse '{}': {}",
+                                rest(1),
+                                e
+                            )))
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!("set_local_tenancy failed to parse '{}': {}", &rest(1), e);
+                        Err(Error::Parse(format!(
+                            "set_local_tenancy failed to parse '{}': {}",
+                            rest(1),
+                            e
+                        )))
+                    }
+                }
+            }
             "get_local_limit" => {
                 if parts.len() < 2 {
                     tracing::error!("get_local_limit failed to parse: {}", &rest(1));
@@ -3776,6 +3819,37 @@ impl Instruction {
                         tracing::error!("set_limit failed to parse '{}': {}", &rest(1), e);
                         Err(Error::Parse(format!(
                             "set_limit failed to parse '{}': {}",
+                            rest(1),
+                            e
+                        )))
+                    }
+                }
+            }
+            "set_tenancy" => {
+                if parts.len() < 3 {
+                    tracing::error!("set_tenancy failed to parse: {}", &rest(1));
+                    return Err(Error::Parse(format!(
+                        "set_tenancy failed to parse: {}",
+                        rest(1)
+                    )));
+                }
+
+                match ProjectIdentifier::parse(arg(1)) {
+                    Ok(project) => match Tenancy::parse(arg(2)) {
+                        Ok(tenancy) => Ok(Instruction::SetTenancy(project, tenancy)),
+                        Err(e) => {
+                            tracing::error!("set_tenancy failed to parse '{}': {}", &rest(1), e);
+                            Err(Error::Parse(format!(
+                                "set_tenancy failed to parse '{}': {}",
+                                rest(1),
+                                e
+                            )))
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!("set_tenancy failed to parse '{}': {}", &rest(1), e);
+                        Err(Error::Parse(format!(
+                            "set_tenancy failed to parse '{}': {}",
                             rest(1),
                             e
                         )))
@@ -4619,6 +4693,7 @@ impl Instruction {
             Instruction::GetLocalUsageReport(_, _) => "get_local_usage_report".to_string(),
             Instruction::GetLocalLimit(_) => "get_local_limit".to_string(),
             Instruction::SetLocalLimit(_, _) => "set_local_limit".to_string(),
+            Instruction::SetLocalTenancy(_, _) => "set_local_tenancy".to_string(),
             Instruction::GetLocalProjectQuota(_, _) => "get_local_project_quota".to_string(),
             Instruction::ClearLocalProjectQuota(_, _) => "clear_local_project_quota".to_string(),
             Instruction::SetLocalProjectQuota(_, _, _) => "set_local_project_quota".to_string(),
@@ -4637,6 +4712,7 @@ impl Instruction {
             Instruction::GetUsageReport(_, _) => "get_usage_report".to_string(),
             Instruction::GetUsageReports(_, _) => "get_usage_reports".to_string(),
             Instruction::SetLimit(_, _) => "set_limit".to_string(),
+            Instruction::SetTenancy(_, _) => "set_tenancy".to_string(),
             Instruction::GetLimit(_) => "get_limit".to_string(),
             Instruction::GetProjectQuota(_, _) => "get_project_quota".to_string(),
             Instruction::SetProjectQuota(_, _, _) => "set_project_quota".to_string(),
@@ -4706,6 +4782,9 @@ impl Instruction {
             Instruction::SetLocalLimit(mapping, usage) => {
                 vec![mapping.to_string(), usage.seconds().to_string()]
             }
+            Instruction::SetLocalTenancy(mapping, tenancy) => {
+                vec![mapping.to_string(), tenancy.to_string()]
+            }
             Instruction::GetLocalProjectQuota(mapping, volume) => {
                 vec![mapping.to_string(), volume.to_string()]
             }
@@ -4749,6 +4828,9 @@ impl Instruction {
             }
             Instruction::SetLimit(project, usage) => {
                 vec![project.to_string(), usage.seconds().to_string()]
+            }
+            Instruction::SetTenancy(project, tenancy) => {
+                vec![project.to_string(), tenancy.to_string()]
             }
             Instruction::GetLimit(project) => vec![project.to_string()],
             Instruction::GetProjectQuota(project, volume) => {
@@ -4855,6 +4937,12 @@ impl std::fmt::Display for Instruction {
             }
             Instruction::SetLimit(project, usage) => {
                 write!(f, "set_limit {} {}", project, usage.seconds())
+            }
+            Instruction::SetLocalTenancy(mapping, tenancy) => {
+                write!(f, "set_local_tenancy {} {}", mapping, tenancy)
+            }
+            Instruction::SetTenancy(project, tenancy) => {
+                write!(f, "set_tenancy {} {}", project, tenancy)
             }
             Instruction::GetLocalProjectQuota(mapping, volume) => {
                 write!(f, "get_local_project_quota {} {}", mapping, volume)
@@ -5018,6 +5106,8 @@ pub fn owning_portal(instruction: &Instruction) -> Option<PortalIdentifier> {
         Instruction::SetLocalLimit(project, _) => Some(project.project().clone()),
         Instruction::GetLimit(project) => Some(project),
         Instruction::SetLimit(project, _) => Some(project),
+        Instruction::SetTenancy(project, _) => Some(project),
+        Instruction::SetLocalTenancy(project, _) => Some(project.project().clone()),
         Instruction::GetProjectDirs(project) => Some(project),
         Instruction::GetLocalProjectDirs(project) => Some(project.project().clone()),
         Instruction::GetProjectQuota(project, _) => Some(project),
@@ -5163,6 +5253,28 @@ mod tests {
             }
             other => unreachable!("expected SetLocalLimit, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_tenancy_instructions_round_trip() {
+        let project = ProjectIdentifier::parse("proj.portal")
+            .unwrap_or_else(|e| unreachable!("project: {:?}", e));
+        let mapping = ProjectMapping::new(&project, "portal.proj")
+            .unwrap_or_else(|e| unreachable!("mapping: {:?}", e));
+
+        for instruction in [
+            Instruction::SetTenancy(project.clone(), Tenancy::VCluster),
+            Instruction::SetTenancy(project.clone(), Tenancy::Shared),
+            Instruction::SetLocalTenancy(mapping.clone(), Tenancy::VCluster),
+            Instruction::SetLocalTenancy(mapping.clone(), Tenancy::Shared),
+        ] {
+            let reparsed = Instruction::parse(&instruction.to_string())
+                .unwrap_or_else(|e| unreachable!("reparse {}: {:?}", instruction, e));
+            assert_eq!(instruction, reparsed);
+        }
+
+        assert!(Instruction::parse("set_tenancy proj.portal dedicated").is_err());
+        assert!(Instruction::parse("set_local_tenancy proj.portal:portal.proj").is_err());
     }
 
     #[test]
@@ -5379,6 +5491,8 @@ mod tests {
             Instruction::SetLocalLimit(project_mapping.clone(), usage),
             Instruction::GetLimit(project.clone()),
             Instruction::SetLimit(project.clone(), usage),
+            Instruction::SetTenancy(project.clone(), Tenancy::VCluster),
+            Instruction::SetLocalTenancy(project_mapping.clone(), Tenancy::VCluster),
             Instruction::GetProjectDirs(project.clone()),
             Instruction::GetLocalProjectDirs(project_mapping.clone()),
             Instruction::GetProjectQuota(project.clone(), volume.clone()),
@@ -5495,6 +5609,8 @@ mod tests {
             "set_limit",
             "get_local_limit",
             "set_local_limit",
+            "set_tenancy",
+            "set_local_tenancy",
             "block_user",
             "unblock_user",
             "is_blocked_user",

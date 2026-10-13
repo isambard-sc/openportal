@@ -43,7 +43,7 @@ pub struct ProjectSpec {
     pub sso_group_suffix: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub sync_user_services: Option<ProjectSyncUserServices>,
+    pub tenancy: Option<ProjectTenancy>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
@@ -57,11 +57,53 @@ pub struct ProjectBudget {
     pub node_hours: u64,
 }
 
+/// How the project's users get Kubernetes. `mode` and `vcluster` only exist
+/// in the schema on clusters running the vcluster overlay of the RGD (just
+/// phase-1-dev for now) - elsewhere every project is `shared`.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, JsonSchema)]
+pub struct ProjectTenancy {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<TenancyMode>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared: Option<ProjectTenancyShared>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vcluster: Option<ProjectTenancyVCluster>,
+}
+
+/// `Shared`: the project namespace on the host cluster. `VCluster`: a
+/// vcluster of the project's own, installed in that namespace.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TenancyMode {
+    #[default]
+    Shared,
+    VCluster,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, JsonSchema)]
+pub struct ProjectTenancyShared {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync: Option<ProjectTenancySharedSync>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct ProjectSyncUserServices {
+pub struct ProjectTenancySharedSync {
     pub workflow_templates: bool,
     pub resource_claim_templates: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, JsonSchema)]
+pub struct ProjectTenancyVCluster {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addons: Option<ProjectTenancyVClusterAddons>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+pub struct ProjectTenancyVClusterAddons {
+    pub llmisvc: bool,
 }
 
 /// Generic KRO-composed status: conditions plus whatever KRO reports as the

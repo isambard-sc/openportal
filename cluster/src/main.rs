@@ -5,20 +5,21 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 use greatwestern::grammar::Instruction::{
-    AddProject, AddUser, BlockProject, BlockUser, ClearProjectQuota, ClearUserQuota, GetHomeDir,
-    GetLimit, GetLocalHomeDir, GetLocalProjectDirs, GetLocalUserDirs, GetProjectDirs,
-    GetProjectMapping, GetProjectQuota, GetProjectQuotas, GetProjects, GetStorageReport,
-    GetStorageReports, GetUsageReport, GetUsageReports, GetUserDirs, GetUserMapping, GetUserQuota,
-    GetUserQuotas, GetUsers, IsBlockedProject, IsBlockedUser, IsProjectAdded, IsProjectRemoved,
-    IsProtectedUser, IsUserAdded, IsUserRemoved, RemoveProject, RemoveUser, SetLimit,
-    SetProjectQuota, SetTenancy, SetUserQuota, UnblockProject, UnblockUser,
+    AddProject, AddTenancyAddon, AddUser, BlockProject, BlockUser, ClearProjectQuota,
+    ClearUserQuota, GetHomeDir, GetLimit, GetLocalHomeDir, GetLocalProjectDirs, GetLocalUserDirs,
+    GetProjectDirs, GetProjectMapping, GetProjectQuota, GetProjectQuotas, GetProjects,
+    GetStorageReport, GetStorageReports, GetUsageReport, GetUsageReports, GetUserDirs,
+    GetUserMapping, GetUserQuota, GetUserQuotas, GetUsers, IsBlockedProject, IsBlockedUser,
+    IsProjectAdded, IsProjectRemoved, IsProtectedUser, IsUserAdded, IsUserRemoved, RemoveProject,
+    RemoveTenancyAddon, RemoveUser, SetLimit, SetProjectQuota, SetTenancy, SetUserQuota,
+    UnblockProject, UnblockUser,
 };
 use greatwestern::grammar::{
     DateRange, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
 };
 use greatwestern::storage::{Quota, Volume};
 use greatwestern::storagereport::{ProjectStorageReport, StorageReport};
-use greatwestern::tenancy::Tenancy;
+use greatwestern::tenancy::{Tenancy, TenancyAddon};
 use greatwestern::usagereport::{ProjectUsageReport, Usage, UsageReport};
 use greatwestern::{Hpc, NotificationEvent};
 use templemeads::agent;
@@ -325,6 +326,14 @@ async fn main() -> Result<()> {
                 }
                 SetTenancy(project, tenancy) => {
                     set_project_tenancy(me.name(), &project, tenancy).await?;
+                    job.completed_none()
+                }
+                AddTenancyAddon(project, addon) => {
+                    set_project_tenancy_addon(me.name(), &project, addon, true).await?;
+                    job.completed_none()
+                }
+                RemoveTenancyAddon(project, addon) => {
+                    set_project_tenancy_addon(me.name(), &project, addon, false).await?;
                     job.completed_none()
                 }
                 GetProjectQuota(project, volume) => {
@@ -1651,6 +1660,57 @@ async fn set_project_tenancy(
         &format!("setting the tenancy of project {} to {}", project, tenancy),
     )
     .await
+}
+
+/// Adds (`enabled`) or removes the add-on. As `set_project_tenancy` - only
+/// op-k8s accepts this.
+async fn set_project_tenancy_addon(
+    me: &str,
+    project: &ProjectIdentifier,
+    addon: TenancyAddon,
+    enabled: bool,
+) -> Result<(), Error> {
+    let (command, what) = match enabled {
+        true => (
+            "add_local_tenancy_addon",
+            format!("adding the {} add-on to project {}", addon, project),
+        ),
+        false => (
+            "remove_local_tenancy_addon",
+            format!("removing the {} add-on from project {}", addon, project),
+        ),
+    };
+
+    // get the mapping for this project
+    let mapping = get_project_mapping(me, project).await?;
+
+    // find the scheduler agent
+    let scheduler = match agent::scheduler(AGENT_WAIT_TIME).await {
+        Some(scheduler) => scheduler,
+        None => {
+            tracing::error!("No scheduler agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no scheduler agent".to_string(),
+            ));
+        }
+    };
+
+    // ask the scheduler to add / remove the add-on
+    let job = Job::parse(
+        &format!(
+            "{}.{} {} {} {}",
+            me,
+            scheduler.name(),
+            command,
+            mapping,
+            addon
+        ),
+        false,
+    )?;
+
+    let job = job.put(&scheduler).await?;
+
+    wait_for_step(job, &what).await
 }
 
 async fn clear_project_quota(

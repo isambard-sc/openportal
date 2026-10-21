@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::storage::{QuotaLimit, Volume};
-use crate::tenancy::Tenancy;
+use crate::tenancy::{Tenancy, TenancyAddon};
 use crate::usagereport::Usage;
 use templemeads::destination::{Destination, Destinations};
 use templemeads::named::NamedType;
@@ -2984,6 +2984,12 @@ pub enum Instruction {
     /// An instruction to set the tenancy of a local project
     SetLocalTenancy(ProjectMapping, Tenancy),
 
+    /// An instruction to add an add-on to the tenancy of a local project
+    AddLocalTenancyAddon(ProjectMapping, TenancyAddon),
+
+    /// An instruction to remove an add-on from the tenancy of a local project
+    RemoveLocalTenancyAddon(ProjectMapping, TenancyAddon),
+
     /// An instruction to clear the quota of a local project on a volume
     ClearLocalProjectQuota(ProjectMapping, Volume),
 
@@ -3054,6 +3060,14 @@ pub enum Instruction {
     /// An instruction to set how a project's users are given access to
     /// the platform (e.g. a shared Kubernetes cluster or their own vcluster)
     SetTenancy(ProjectIdentifier, Tenancy),
+
+    /// An instruction to add a platform-managed add-on (e.g. JupyterHub)
+    /// to a project's tenancy
+    AddTenancyAddon(ProjectIdentifier, TenancyAddon),
+
+    /// An instruction to remove a platform-managed add-on from a project's
+    /// tenancy
+    RemoveTenancyAddon(ProjectIdentifier, TenancyAddon),
 
     /// An instruction to clear a storage quota for a project on a volume
     ClearProjectQuota(ProjectIdentifier, Volume),
@@ -3773,6 +3787,84 @@ impl Instruction {
                     }
                 }
             }
+            "remove_local_tenancy_addon" => {
+                if parts.len() < 3 {
+                    tracing::error!("remove_local_tenancy_addon failed to parse: {}", &rest(1));
+                    return Err(Error::Parse(format!(
+                        "remove_local_tenancy_addon failed to parse: {}",
+                        rest(1)
+                    )));
+                }
+
+                match ProjectMapping::parse(arg(1)) {
+                    Ok(mapping) => match TenancyAddon::parse(arg(2)) {
+                        Ok(addon) => Ok(Instruction::RemoveLocalTenancyAddon(mapping, addon)),
+                        Err(e) => {
+                            tracing::error!(
+                                "remove_local_tenancy_addon failed to parse '{}': {}",
+                                &rest(1),
+                                e
+                            );
+                            Err(Error::Parse(format!(
+                                "remove_local_tenancy_addon failed to parse '{}': {}",
+                                rest(1),
+                                e
+                            )))
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "remove_local_tenancy_addon failed to parse '{}': {}",
+                            &rest(1),
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "remove_local_tenancy_addon failed to parse '{}': {}",
+                            rest(1),
+                            e
+                        )))
+                    }
+                }
+            }
+            "add_local_tenancy_addon" => {
+                if parts.len() < 3 {
+                    tracing::error!("add_local_tenancy_addon failed to parse: {}", &rest(1));
+                    return Err(Error::Parse(format!(
+                        "add_local_tenancy_addon failed to parse: {}",
+                        rest(1)
+                    )));
+                }
+
+                match ProjectMapping::parse(arg(1)) {
+                    Ok(mapping) => match TenancyAddon::parse(arg(2)) {
+                        Ok(addon) => Ok(Instruction::AddLocalTenancyAddon(mapping, addon)),
+                        Err(e) => {
+                            tracing::error!(
+                                "add_local_tenancy_addon failed to parse '{}': {}",
+                                &rest(1),
+                                e
+                            );
+                            Err(Error::Parse(format!(
+                                "add_local_tenancy_addon failed to parse '{}': {}",
+                                rest(1),
+                                e
+                            )))
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "add_local_tenancy_addon failed to parse '{}': {}",
+                            &rest(1),
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "add_local_tenancy_addon failed to parse '{}': {}",
+                            rest(1),
+                            e
+                        )))
+                    }
+                }
+            }
             "get_local_limit" => {
                 if parts.len() < 2 {
                     tracing::error!("get_local_limit failed to parse: {}", &rest(1));
@@ -3850,6 +3942,80 @@ impl Instruction {
                         tracing::error!("set_tenancy failed to parse '{}': {}", &rest(1), e);
                         Err(Error::Parse(format!(
                             "set_tenancy failed to parse '{}': {}",
+                            rest(1),
+                            e
+                        )))
+                    }
+                }
+            }
+            "remove_tenancy_addon" => {
+                if parts.len() < 3 {
+                    tracing::error!("remove_tenancy_addon failed to parse: {}", &rest(1));
+                    return Err(Error::Parse(format!(
+                        "remove_tenancy_addon failed to parse: {}",
+                        rest(1)
+                    )));
+                }
+
+                match ProjectIdentifier::parse(arg(1)) {
+                    Ok(project) => match TenancyAddon::parse(arg(2)) {
+                        Ok(addon) => Ok(Instruction::RemoveTenancyAddon(project, addon)),
+                        Err(e) => {
+                            tracing::error!(
+                                "remove_tenancy_addon failed to parse '{}': {}",
+                                &rest(1),
+                                e
+                            );
+                            Err(Error::Parse(format!(
+                                "remove_tenancy_addon failed to parse '{}': {}",
+                                rest(1),
+                                e
+                            )))
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "remove_tenancy_addon failed to parse '{}': {}",
+                            &rest(1),
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "remove_tenancy_addon failed to parse '{}': {}",
+                            rest(1),
+                            e
+                        )))
+                    }
+                }
+            }
+            "add_tenancy_addon" => {
+                if parts.len() < 3 {
+                    tracing::error!("add_tenancy_addon failed to parse: {}", &rest(1));
+                    return Err(Error::Parse(format!(
+                        "add_tenancy_addon failed to parse: {}",
+                        rest(1)
+                    )));
+                }
+
+                match ProjectIdentifier::parse(arg(1)) {
+                    Ok(project) => match TenancyAddon::parse(arg(2)) {
+                        Ok(addon) => Ok(Instruction::AddTenancyAddon(project, addon)),
+                        Err(e) => {
+                            tracing::error!(
+                                "add_tenancy_addon failed to parse '{}': {}",
+                                &rest(1),
+                                e
+                            );
+                            Err(Error::Parse(format!(
+                                "add_tenancy_addon failed to parse '{}': {}",
+                                rest(1),
+                                e
+                            )))
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!("add_tenancy_addon failed to parse '{}': {}", &rest(1), e);
+                        Err(Error::Parse(format!(
+                            "add_tenancy_addon failed to parse '{}': {}",
                             rest(1),
                             e
                         )))
@@ -4694,6 +4860,8 @@ impl Instruction {
             Instruction::GetLocalLimit(_) => "get_local_limit".to_string(),
             Instruction::SetLocalLimit(_, _) => "set_local_limit".to_string(),
             Instruction::SetLocalTenancy(_, _) => "set_local_tenancy".to_string(),
+            Instruction::AddLocalTenancyAddon(_, _) => "add_local_tenancy_addon".to_string(),
+            Instruction::RemoveLocalTenancyAddon(_, _) => "remove_local_tenancy_addon".to_string(),
             Instruction::GetLocalProjectQuota(_, _) => "get_local_project_quota".to_string(),
             Instruction::ClearLocalProjectQuota(_, _) => "clear_local_project_quota".to_string(),
             Instruction::SetLocalProjectQuota(_, _, _) => "set_local_project_quota".to_string(),
@@ -4713,6 +4881,8 @@ impl Instruction {
             Instruction::GetUsageReports(_, _) => "get_usage_reports".to_string(),
             Instruction::SetLimit(_, _) => "set_limit".to_string(),
             Instruction::SetTenancy(_, _) => "set_tenancy".to_string(),
+            Instruction::AddTenancyAddon(_, _) => "add_tenancy_addon".to_string(),
+            Instruction::RemoveTenancyAddon(_, _) => "remove_tenancy_addon".to_string(),
             Instruction::GetLimit(_) => "get_limit".to_string(),
             Instruction::GetProjectQuota(_, _) => "get_project_quota".to_string(),
             Instruction::SetProjectQuota(_, _, _) => "set_project_quota".to_string(),
@@ -4785,6 +4955,12 @@ impl Instruction {
             Instruction::SetLocalTenancy(mapping, tenancy) => {
                 vec![mapping.to_string(), tenancy.to_string()]
             }
+            Instruction::AddLocalTenancyAddon(mapping, addon) => {
+                vec![mapping.to_string(), addon.to_string()]
+            }
+            Instruction::RemoveLocalTenancyAddon(mapping, addon) => {
+                vec![mapping.to_string(), addon.to_string()]
+            }
             Instruction::GetLocalProjectQuota(mapping, volume) => {
                 vec![mapping.to_string(), volume.to_string()]
             }
@@ -4831,6 +5007,12 @@ impl Instruction {
             }
             Instruction::SetTenancy(project, tenancy) => {
                 vec![project.to_string(), tenancy.to_string()]
+            }
+            Instruction::AddTenancyAddon(project, addon) => {
+                vec![project.to_string(), addon.to_string()]
+            }
+            Instruction::RemoveTenancyAddon(project, addon) => {
+                vec![project.to_string(), addon.to_string()]
             }
             Instruction::GetLimit(project) => vec![project.to_string()],
             Instruction::GetProjectQuota(project, volume) => {
@@ -4943,6 +5125,18 @@ impl std::fmt::Display for Instruction {
             }
             Instruction::SetTenancy(project, tenancy) => {
                 write!(f, "set_tenancy {} {}", project, tenancy)
+            }
+            Instruction::AddLocalTenancyAddon(mapping, addon) => {
+                write!(f, "add_local_tenancy_addon {} {}", mapping, addon)
+            }
+            Instruction::AddTenancyAddon(project, addon) => {
+                write!(f, "add_tenancy_addon {} {}", project, addon)
+            }
+            Instruction::RemoveLocalTenancyAddon(mapping, addon) => {
+                write!(f, "remove_local_tenancy_addon {} {}", mapping, addon)
+            }
+            Instruction::RemoveTenancyAddon(project, addon) => {
+                write!(f, "remove_tenancy_addon {} {}", project, addon)
             }
             Instruction::GetLocalProjectQuota(mapping, volume) => {
                 write!(f, "get_local_project_quota {} {}", mapping, volume)
@@ -5108,6 +5302,10 @@ pub fn owning_portal(instruction: &Instruction) -> Option<PortalIdentifier> {
         Instruction::SetLimit(project, _) => Some(project),
         Instruction::SetTenancy(project, _) => Some(project),
         Instruction::SetLocalTenancy(project, _) => Some(project.project().clone()),
+        Instruction::AddTenancyAddon(project, _) => Some(project),
+        Instruction::AddLocalTenancyAddon(project, _) => Some(project.project().clone()),
+        Instruction::RemoveTenancyAddon(project, _) => Some(project),
+        Instruction::RemoveLocalTenancyAddon(project, _) => Some(project.project().clone()),
         Instruction::GetProjectDirs(project) => Some(project),
         Instruction::GetLocalProjectDirs(project) => Some(project.project().clone()),
         Instruction::GetProjectQuota(project, _) => Some(project),
@@ -5267,6 +5465,12 @@ mod tests {
             Instruction::SetTenancy(project.clone(), Tenancy::Shared),
             Instruction::SetLocalTenancy(mapping.clone(), Tenancy::VCluster),
             Instruction::SetLocalTenancy(mapping.clone(), Tenancy::Shared),
+            Instruction::AddTenancyAddon(project.clone(), TenancyAddon::LlmIsvc),
+            Instruction::AddTenancyAddon(project.clone(), TenancyAddon::JupyterHub),
+            Instruction::AddLocalTenancyAddon(mapping.clone(), TenancyAddon::LlmIsvc),
+            Instruction::AddLocalTenancyAddon(mapping.clone(), TenancyAddon::JupyterHub),
+            Instruction::RemoveTenancyAddon(project.clone(), TenancyAddon::LlmIsvc),
+            Instruction::RemoveLocalTenancyAddon(mapping.clone(), TenancyAddon::JupyterHub),
         ] {
             let reparsed = Instruction::parse(&instruction.to_string())
                 .unwrap_or_else(|e| unreachable!("reparse {}: {:?}", instruction, e));
@@ -5275,6 +5479,10 @@ mod tests {
 
         assert!(Instruction::parse("set_tenancy proj.portal dedicated").is_err());
         assert!(Instruction::parse("set_local_tenancy proj.portal:portal.proj").is_err());
+        assert!(Instruction::parse("add_tenancy_addon proj.portal gateway").is_err());
+        assert!(Instruction::parse("add_local_tenancy_addon proj.portal:portal.proj").is_err());
+        assert!(Instruction::parse("remove_tenancy_addon proj.portal gateway").is_err());
+        assert!(Instruction::parse("remove_local_tenancy_addon proj.portal:portal.proj").is_err());
     }
 
     #[test]
@@ -5493,6 +5701,10 @@ mod tests {
             Instruction::SetLimit(project.clone(), usage),
             Instruction::SetTenancy(project.clone(), Tenancy::VCluster),
             Instruction::SetLocalTenancy(project_mapping.clone(), Tenancy::VCluster),
+            Instruction::AddTenancyAddon(project.clone(), TenancyAddon::JupyterHub),
+            Instruction::AddLocalTenancyAddon(project_mapping.clone(), TenancyAddon::JupyterHub),
+            Instruction::RemoveTenancyAddon(project.clone(), TenancyAddon::JupyterHub),
+            Instruction::RemoveLocalTenancyAddon(project_mapping.clone(), TenancyAddon::JupyterHub),
             Instruction::GetProjectDirs(project.clone()),
             Instruction::GetLocalProjectDirs(project_mapping.clone()),
             Instruction::GetProjectQuota(project.clone(), volume.clone()),
@@ -5611,6 +5823,10 @@ mod tests {
             "set_local_limit",
             "set_tenancy",
             "set_local_tenancy",
+            "add_tenancy_addon",
+            "add_local_tenancy_addon",
+            "remove_tenancy_addon",
+            "remove_local_tenancy_addon",
             "block_user",
             "unblock_user",
             "is_blocked_user",

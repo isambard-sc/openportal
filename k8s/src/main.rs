@@ -10,9 +10,9 @@ mod usage;
 use resources::TenancyMode;
 
 use greatwestern::grammar::Instruction::{
-    AddLocalProject, AddLocalUser, GetLocalLimit, GetLocalUsageReport, IsLocalProjectAdded,
-    IsLocalProjectRemoved, IsLocalUserAdded, IsLocalUserRemoved, RemoveLocalProject,
-    RemoveLocalUser, SetLocalLimit, SetLocalTenancy,
+    AddLocalProject, AddLocalTenancyAddon, AddLocalUser, GetLocalLimit, GetLocalUsageReport,
+    IsLocalProjectAdded, IsLocalProjectRemoved, IsLocalUserAdded, IsLocalUserRemoved,
+    RemoveLocalProject, RemoveLocalTenancyAddon, RemoveLocalUser, SetLocalLimit, SetLocalTenancy,
 };
 use greatwestern::tenancy::Tenancy;
 use greatwestern::usagereport::Usage;
@@ -169,6 +169,14 @@ async fn main() -> Result<()> {
                         Tenancy::VCluster => TenancyMode::VCluster,
                     };
                     client::set_project_tenancy(&mapping, mode).await?;
+                    job.completed_none()
+                }
+                AddLocalTenancyAddon(mapping, addon) => {
+                    client::set_project_tenancy_addon(&mapping, addon, true).await?;
+                    job.completed_none()
+                }
+                RemoveLocalTenancyAddon(mapping, addon) => {
+                    client::set_project_tenancy_addon(&mapping, addon, false).await?;
                     job.completed_none()
                 }
                 GetLocalUsageReport(mapping, dates) => {

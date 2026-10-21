@@ -1073,6 +1073,46 @@ Set the tenancy of a locally mapped project.
 set_local_tenancy <project_mapping> <shared|vcluster>
 ```
 
+Switching tenancy does not change which add-ons are enabled.
+
+#### `add_tenancy_addon`
+
+Enable a platform-managed add-on for a project: `llmisvc` (the LLM inference
+service stack) or `jupyterhub` (a JupyterHub with browser login). Add-ons are
+installed inside the project's vcluster, so they only take effect while its
+tenancy is `vcluster`; one added to a `shared` project is kept and takes effect
+if the project later switches. Idempotent. Only supported by clusters whose
+scheduler agent is `op-k8s`.
+
+```
+add_tenancy_addon <project_id> <llmisvc|jupyterhub>
+```
+
+#### `add_local_tenancy_addon`
+
+Enable an add-on for a locally mapped project.
+
+```
+add_local_tenancy_addon <project_mapping> <llmisvc|jupyterhub>
+```
+
+#### `remove_tenancy_addon`
+
+Disable a project's add-on, uninstalling it from the vcluster. Idempotent.
+Only supported by clusters whose scheduler agent is `op-k8s`.
+
+```
+remove_tenancy_addon <project_id> <llmisvc|jupyterhub>
+```
+
+#### `remove_local_tenancy_addon`
+
+Disable an add-on for a locally mapped project.
+
+```
+remove_local_tenancy_addon <project_mapping> <llmisvc|jupyterhub>
+```
+
 ---
 
 ### Storage Quota Instructions — Portal Level
@@ -1329,6 +1369,10 @@ Returns: `Destinations`
 | `get_local_limit` | `<project_mapping>` | `Usage` | Get local compute limit |
 | `set_tenancy` | `<project_id> <shared\|vcluster>` | — | Set project tenancy (op-k8s only) |
 | `set_local_tenancy` | `<project_mapping> <shared\|vcluster>` | — | Set local project tenancy (op-k8s only) |
+| `add_tenancy_addon` | `<project_id> <llmisvc\|jupyterhub>` | — | Enable a vcluster add-on for project (op-k8s only) |
+| `add_local_tenancy_addon` | `<project_mapping> <llmisvc\|jupyterhub>` | — | Enable a local vcluster add-on (op-k8s only) |
+| `remove_tenancy_addon` | `<project_id> <llmisvc\|jupyterhub>` | — | Disable a vcluster add-on for project (op-k8s only) |
+| `remove_local_tenancy_addon` | `<project_mapping> <llmisvc\|jupyterhub>` | — | Disable a local vcluster add-on (op-k8s only) |
 | `set_project_quota` | `<project_id> <volume> <limit>` | — | Set project storage quota |
 | `get_project_quota` | `<project_id> <volume>` | `Quota` | Get project storage quota |
 | `clear_project_quota` | `<project_id> <volume>` | — | Clear project storage quota |

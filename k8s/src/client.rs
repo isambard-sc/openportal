@@ -12,6 +12,7 @@ use anyhow::Context;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use greatwestern::grammar::{ProjectMapping, UserMapping};
+use greatwestern::tenancy::TenancyAddon;
 use kube::api::{Api, DeleteParams, Patch, PatchParams};
 use kube::config::{AuthInfo, Kubeconfig};
 use kube::{Client, Config};
@@ -242,28 +243,18 @@ pub async fn set_project_node_hours(
 /// Switches the `Project` between the shared host cluster and its own
 /// vcluster. Only works on clusters whose RGD carries the vcluster overlay
 /// (phase-1-dev) - on any other the API server rejects `tenancy.mode` as an unknown field.
+///
+/// Leaves `tenancy.vcluster.addons` alone, so add-ons added with
+/// `set_project_tenancy_addon` survive a switch in either direction, and
+/// can be added before the switch to `VCluster` as well as after.
 pub async fn set_project_tenancy(mapping: &ProjectMapping, mode: TenancyMode) -> Result<(), Error> {
-    let patch = match mode {
-        TenancyMode::Shared => serde_json::json!({
-            "spec": {
-                "tenancy": {
-                    "mode": mode,
-                }
+    let patch = serde_json::json!({
+        "spec": {
+            "tenancy": {
+                "mode": mode,
             }
-        }),
-        TenancyMode::VCluster => serde_json::json!({
-            "spec": {
-                "tenancy": {
-                    "mode": mode,
-                    "vcluster": {
-                        "addons": {
-                            "llmisvc": false,
-                        }
-                    }
-                }
-            }
-        }),
-    };
+        }
+    });
 
     projects_api()?
         .patch(
@@ -275,6 +266,50 @@ pub async fn set_project_tenancy(mapping: &ProjectMapping, mode: TenancyMode) ->
         .with_context(|| {
             format!(
                 "Could not set the tenancy mode for Project {}",
+                mapping.local_group()
+            )
+        })?;
+
+    Ok(())
+}
+
+/// Turns one of the `Project`'s vcluster add-ons on (`enabled`) or off.
+/// Idempotent, and only takes effect while the project's tenancy is
+/// `VCluster` - the RGD ignores `tenancy.vcluster` on a `Shared` project.
+pub async fn set_project_tenancy_addon(
+    mapping: &ProjectMapping,
+    addon: TenancyAddon,
+    enabled: bool,
+) -> Result<(), Error> {
+    let field = match addon {
+        TenancyAddon::LlmIsvc => "llmisvc",
+        TenancyAddon::JupyterHub => "jupyterhub",
+    };
+
+    let patch = serde_json::json!({
+        "spec": {
+            "tenancy": {
+                "vcluster": {
+                    "addons": {
+                        field: enabled,
+                    }
+                }
+            }
+        }
+    });
+
+    projects_api()?
+        .patch(
+            mapping.local_group(),
+            &PatchParams::apply(FIELD_MANAGER),
+            &Patch::Merge(&patch),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "Could not set the {} add-on to {} on Project {}",
+                field,
+                enabled,
                 mapping.local_group()
             )
         })?;

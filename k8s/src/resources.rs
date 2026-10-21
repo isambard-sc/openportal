@@ -101,9 +101,13 @@ pub struct ProjectTenancyVCluster {
     pub addons: Option<ProjectTenancyVClusterAddons>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, JsonSchema)]
 pub struct ProjectTenancyVClusterAddons {
-    pub llmisvc: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub llmisvc: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jupyterhub: Option<bool>,
 }
 
 /// Generic KRO-composed status: conditions plus whatever KRO reports as the

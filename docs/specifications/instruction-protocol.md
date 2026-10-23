@@ -301,7 +301,8 @@ enabling partial updates. This type is also accepted under the legacy name
   "notes":              [ { "timestamp": "<RFC 3339>", "author": "<string>", "text": "<string>" } ],
   "earliest_approve":   "<RFC 3339 UTC>",
   "membership_control": "<open|members_only|roles_only|locked>",
-  "allowed_domains":    ["<domain_pattern>", ...]
+  "allowed_domains":    ["<domain_pattern>", ...],
+  "spend_profile":      [ { "from": "<YYYY-MM-DD>", "minimum": "<size> <units>" }, ... ]
 }
 ```
 
@@ -361,6 +362,20 @@ Use `"No allocation"` or `"none"` to represent no allocation.
 **`allowed_domains`**: each entry is either an exact domain (`"example.com"`) or
 a single-level wildcard (`"*.example.com"`). `null` means all domains are
 permitted; `[]` means no domains are permitted.
+
+**`spend_profile`**: the least that should be spent over each period of the
+award, as dated absolute minimums. By convention between the portals, each entry
+applies from its `from` date up to, but not including, the next entry's, and the
+last until `end_date`; the minimums need not add up to the allocation.
+OpenPortal **carries this, and does not interpret it** - shortfalls, carry-over
+and units are for the two portals to agree. It checks only that every `from` is
+a valid date, every `minimum` a valid allocation, and that no two entries share
+a date (refused); entries are held sorted by date. Omitted when absent, which
+means no profile; `[]` explicitly removes one. On `merge` / `update_award` a
+profile present in the incoming object replaces the held one wholesale. An agent
+that predates the field drops it when re-serialising an award, so ask
+`is_feature_supported award_spend_profiles` before relying on one. See
+`docs/plans/award-spend-profiles-and-feature-discovery-design.md`.
 
 ---
 
@@ -1248,6 +1263,44 @@ Returns: `Destinations`
 
 ---
 
+### Feature Discovery Instructions
+
+How one portal asks another what it supports. Both are addressed to an
+**offering** and answered by the portal software behind it, through its bridge -
+`op-portal` only routes them - so the answer can differ from one offering to the
+next. See `docs/plans/award-spend-profiles-and-feature-discovery-design.md`.
+
+A feature name is an opaque string, not an enum: 1-64 characters of lowercase
+ASCII letters, digits, `_`, `-` and `.`, starting with a letter. A name outside
+that shape is refused, not normalised. The well-known names are listed in the
+[site portal API](site-portal-api.md#44-what-a-portal-supports).
+
+#### `is_feature_supported`
+
+Ask whether the portal behind an offering supports the named feature.
+
+```
+is_feature_supported <feature>
+```
+
+Returns: `bool`
+
+#### `get_supported_features`
+
+Ask the portal behind an offering for every feature it supports.
+
+```
+get_supported_features
+```
+
+Returns: `Vec<String>`
+
+An agent too old to know either instruction fails to parse it, and a portal
+that does not implement them answers `OpenPortalUnsupportedCommandError`; both
+mean "not supported". A timeout means "unknown" - ask again later.
+
+---
+
 ## Complete Instruction Reference
 
 | Command | Arguments | Returns | Description |
@@ -1324,6 +1377,8 @@ Returns: `Destinations`
 | `add_offerings` | `<destinations>` | — | Add new offerings |
 | `remove_offerings` | `<destinations>` | — | Remove offerings |
 | `get_offerings` | *(none)* | `Destinations` | Get current offerings |
+| `is_feature_supported` | `<feature>` | `bool` | Ask whether the portal behind an offering supports a feature |
+| `get_supported_features` | *(none)* | `Vec<String>` | Ask the portal behind an offering for every feature it supports |
 
 ---
 
@@ -1365,6 +1420,9 @@ create_project myproject.waldur {"name":"My Project","template":"cpu-cluster","a
 
 # Sync available cluster offerings
 sync_offerings [portal.provider.cluster_a, portal.provider.cluster_b]
+
+# Ask whether the site behind an offering acts on award spend profiles
+submit allocator.site.cluster1 is_feature_supported award_spend_profiles
 
 # Set a local project quota with a mapped name
 set_local_project_quota myproject.waldur:hpc_myproject scratch 2TB

@@ -1013,6 +1013,49 @@ def get_storage_reports(job: openportal.Job) -> openportal.StorageReport:
 
 
 # --------------------------------------------------------------------------
+# Feature discovery
+# --------------------------------------------------------------------------
+
+#: The optional features this portal supports, by name.
+#:
+#: **Empty, deliberately.** A feature named here is a promise about this
+#: portal's business logic, not about what it can store. This example carries
+#: `AwardDetails.spend_profile` intact - it is in the stored details, so
+#: `get_award` hands it back - but it does nothing *with* it: no warnings, no
+#: forfeiting what was not spent. So it does not claim `award_spend_profiles`,
+#: and an awarding portal that asks will know to agree another way, such as
+#: sending the award in parts.
+#:
+#: Names are opaque, lowercase strings agreed between the portals; the well-known
+#: ones are listed in the site portal API (§4.4). Add one here only once this
+#: portal does what the name promises - on every offering, since this example
+#: gives every offering the same answer. A portal whose resources differ answers
+#: per offering instead, via `_offering_of(job)`.
+SUPPORTED_FEATURES: frozenset[str] = frozenset()
+
+
+def is_feature_supported(job: openportal.Job) -> bool:
+    """
+    `is_feature_supported <feature>` → `bool`
+
+    `False` for anything not in `SUPPORTED_FEATURES` - including names this
+    portal has never heard of, which is the point: an awarding portal can ask
+    about a feature defined after this code was written, and get a correct "no".
+    """
+    return job.instruction.arguments[0] in SUPPORTED_FEATURES
+
+
+def get_supported_features(job: openportal.Job) -> list[str]:
+    """
+    `get_supported_features` → `Vec<String>`
+
+    The same set `is_feature_supported` answers from, so the two can never
+    disagree. Sorted, so the answer is stable from one call to the next.
+    """
+    return sorted(SUPPORTED_FEATURES)
+
+
+# --------------------------------------------------------------------------
 # Dispatch
 # --------------------------------------------------------------------------
 
@@ -1052,6 +1095,9 @@ HANDLERS = {
     "get_usage_reports": get_usage_reports,
     "get_storage_report": get_storage_report,
     "get_storage_reports": get_storage_reports,
+    # What this portal supports.
+    "is_feature_supported": is_feature_supported,
+    "get_supported_features": get_supported_features,
 }
 
 

@@ -423,6 +423,53 @@ class TypesTest {
     }
 
     @Test
+    void a_spend_profile_is_carried_sorted_and_omitted_when_absent() {
+        AwardDetails award = AwardDetails.fromJson("""
+                {"allocation": "1000 NHR",
+                 "spend_profile": [
+                   {"from": "2027-07-01", "minimum": "300 NHR"},
+                   {"from": "2027-01-01", "minimum": "100 NHR"}
+                 ]}""");
+
+        assertEquals(
+                List.of(SpendProfileEntry.of("2027-01-01", "100 NHR"),
+                        SpendProfileEntry.of("2027-07-01", "300 NHR")),
+                award.spendProfile().orElseThrow());
+
+        assertEquals("{\"from\":\"2027-01-01\",\"minimum\":\"100 NHR\"}",
+                award.toJson().get("spend_profile").get(0).toString());
+        assertEquals(award, AwardDetails.fromJson(award.toString()));
+
+        // Absent is left out of the wire form entirely, as the Rust side does;
+        // empty is written, because it means something different.
+        assertFalse(new AwardDetails().toJson().has("spend_profile"));
+        AwardDetails removed = new AwardDetails().setSpendProfile(List.of());
+        assertEquals(List.of(), AwardDetails.fromJson(removed.toString())
+                .spendProfile().orElseThrow());
+    }
+
+    @Test
+    void a_spend_profile_refuses_two_minimums_for_one_day() {
+        assertThrows(IllegalArgumentException.class, () -> new AwardDetails().setSpendProfile(
+                List.of(SpendProfileEntry.of("2027-01-01", "100 NHR"),
+                        SpendProfileEntry.of("2027-01-01", "200 NHR"))));
+
+        assertThrows(IllegalArgumentException.class, () -> AwardDetails.fromJson("""
+                {"spend_profile": [{"from": "2027-01-01"}]}"""));
+    }
+
+    @Test
+    void merging_replaces_the_spend_profile_and_keeps_it_when_unmentioned() {
+        AwardDetails held = new AwardDetails().setSpendProfile(
+                List.of(SpendProfileEntry.of("2027-01-01", "100 NHR")));
+
+        assertEquals(held.spendProfile(), held.merge(new AwardDetails()).spendProfile());
+
+        AwardDetails removal = new AwardDetails().setSpendProfile(List.of());
+        assertEquals(List.of(), held.merge(removal).spendProfile().orElseThrow());
+    }
+
+    @Test
     void a_link_refuses_a_scheme_that_would_be_dangerous_to_render() {
         // These links are documented as being for a portal UI, and a URL parser
         // accepts javascript: and file: happily.

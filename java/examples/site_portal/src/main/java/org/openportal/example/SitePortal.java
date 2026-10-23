@@ -1094,6 +1094,52 @@ public final class SitePortal {
     }
 
     // ----------------------------------------------------------------------
+    // Feature discovery
+    // ----------------------------------------------------------------------
+
+    /**
+     * The optional features this portal supports, by name.
+     *
+     * <p><b>Empty, deliberately.</b> A feature named here is a promise about
+     * this portal's business logic, not about what it can store. This example
+     * carries {@code AwardDetails.spend_profile} intact - it is in the stored
+     * details, so {@code get_award} hands it back - but it does nothing
+     * <i>with</i> it: no warnings, no forfeiting what was not spent. So it does
+     * not claim {@code award_spend_profiles}, and an awarding portal that asks
+     * will know to agree another way, such as sending the award in parts.
+     *
+     * <p>Names are opaque, lowercase strings agreed between the portals; the
+     * well-known ones are listed in the site portal API (§4.4). Add one here
+     * only once this portal does what the name promises - on every offering,
+     * since this example gives every offering the same answer. A portal whose
+     * resources differ answers per offering instead, via {@link #offeringOf}.
+     * Not final, so a test can show what a portal that does claim one answers.
+     */
+    java.util.Set<String> supportedFeatures = java.util.Set.of();
+
+    /**
+     * {@code is_feature_supported <feature>} → {@code bool}.
+     *
+     * <p>{@code false} for anything not in {@link #supportedFeatures} -
+     * including names this portal has never heard of, which is the point: an
+     * awarding portal can ask about a feature defined after this code was
+     * written, and get a correct "no".
+     */
+    public boolean isFeatureSupported(Job job) {
+        return supportedFeatures.contains(job.instruction().argument(0));
+    }
+
+    /**
+     * {@code get_supported_features} → {@code Vec<String>}.
+     *
+     * <p>The same set {@link #isFeatureSupported} answers from, so the two can
+     * never disagree. Sorted, so the answer is stable from one call to the next.
+     */
+    public List<String> getSupportedFeatures(Job job) {
+        return new ArrayList<>(new TreeSet<>(supportedFeatures));
+    }
+
+    // ----------------------------------------------------------------------
     // Dispatch
     // ----------------------------------------------------------------------
 
@@ -1131,8 +1177,23 @@ public final class SitePortal {
         }
     }
 
+    /**
+     * A handler answering a plain JSON value - a {@code bool}, or a list of
+     * strings - which has no {@link OpenPortalType} of its own, so its wire
+     * type name is declared alongside it.
+     */
+    private record ValueHandler(
+            String typeName,
+            java.util.function.Function<Job, com.fasterxml.jackson.databind.JsonNode> fn) {
+
+        com.fasterxml.jackson.databind.JsonNode handle(Job job) {
+            return fn.apply(job);
+        }
+    }
+
     private final Map<String, Handler> handlers = handlers();
     private final Map<String, ListHandler> listHandlers = listHandlers();
+    private final Map<String, ValueHandler> valueHandlers = valueHandlers();
 
     /**
      * Every instruction this portal answers, keyed on the command name as it
@@ -1191,10 +1252,27 @@ public final class SitePortal {
         return table;
     }
 
+    /** The two that answer a plain value: what this portal supports. */
+    private Map<String, ValueHandler> valueHandlers() {
+        Map<String, ValueHandler> table = new LinkedHashMap<>();
+
+        table.put("is_feature_supported", new ValueHandler("bool",
+                job -> com.fasterxml.jackson.databind.node.BooleanNode.valueOf(
+                        isFeatureSupported(job))));
+        table.put("get_supported_features", new ValueHandler("Vec<String>", job -> {
+            var array = org.openportal.Json.array();
+            getSupportedFeatures(job).forEach(array::add);
+            return array;
+        }));
+
+        return table;
+    }
+
     /** Every command this portal will answer. */
     public java.util.Set<String> commands() {
         java.util.Set<String> commands = new TreeSet<>(handlers.keySet());
         commands.addAll(listHandlers.keySet());
+        commands.addAll(valueHandlers.keySet());
 
         return commands;
     }
@@ -1235,8 +1313,9 @@ public final class SitePortal {
         try {
             Handler handler = handlers.get(command);
             ListHandler listHandler = listHandlers.get(command);
+            ValueHandler valueHandler = valueHandlers.get(command);
 
-            if (handler == null && listHandler == null) {
+            if (handler == null && listHandler == null && valueHandler == null) {
                 throw new OpenPortalUnsupportedCommandError(
                         "this portal does not implement '" + command + "'");
             }
@@ -1250,6 +1329,14 @@ public final class SitePortal {
                         + listHandler.typeName());
 
                 return job.completed(list(values), listHandler.typeName());
+            }
+
+            if (valueHandler != null) {
+                var value = valueHandler.handle(job);
+
+                LOG.info(command + " " + job.id() + " -> " + valueHandler.typeName());
+
+                return job.completed(value, valueHandler.typeName());
             }
 
             OpenPortalType result = handler.handle(job);

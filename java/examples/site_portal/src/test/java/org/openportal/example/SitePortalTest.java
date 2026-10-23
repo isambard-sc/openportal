@@ -27,6 +27,7 @@ import org.openportal.ProjectMapping;
 import org.openportal.ProjectStorageReport;
 import org.openportal.ProjectTemplate;
 import org.openportal.ProjectUsageReport;
+import org.openportal.SpendProfileEntry;
 import org.openportal.UsageReport;
 
 /**
@@ -386,6 +387,73 @@ class SitePortalTest {
         // This portal does not implement `get_users`; members travel with the
         // award instead, and this is the field callers read.
         assertEquals(java.util.Set.of(LEAD, MEMBER), read.members().orElseThrow().keySet());
+    }
+
+    @Test
+    void a_spend_profile_is_carried_through_and_handed_back_by_get_award() {
+        portal.addOffering(OFFERING, List.of("standard"), AGREED);
+        created(details());
+        approve(LOCAL, LocalDate.now());
+
+        // This portal does not act on a spend profile, but it must not lose
+        // one: the profile is part of the award.
+        List<SpendProfileEntry> quarterly = List.of(
+                SpendProfileEntry.of("2027-04-01", "500 GPUHR"),
+                SpendProfileEntry.of("2027-01-01", "500 GPUHR"));
+        created(details().setSpendProfile(quarterly));
+
+        AwardDetails read = portal.answer(job("get_award " + AWARD))
+                .result(AwardDetails::fromJson).orElseThrow();
+        assertEquals(
+                List.of(SpendProfileEntry.of("2027-01-01", "500 GPUHR"),
+                        SpendProfileEntry.of("2027-04-01", "500 GPUHR")),
+                read.spendProfile().orElseThrow());
+
+        // An update that does not mention it keeps it; `[]` removes it.
+        created(details());
+        read = portal.answer(job("get_award " + AWARD))
+                .result(AwardDetails::fromJson).orElseThrow();
+        assertEquals(2, read.spendProfile().orElseThrow().size());
+
+        created(details().setSpendProfile(List.of()));
+        read = portal.answer(job("get_award " + AWARD))
+                .result(AwardDetails::fromJson).orElseThrow();
+        assertEquals(List.of(), read.spendProfile().orElseThrow());
+    }
+
+    // ---- what this portal supports -----------------------------------------
+
+    @Test
+    void a_feature_this_portal_does_not_act_on_is_not_supported() {
+        portal.addOffering(OFFERING, List.of("standard"), AGREED);
+
+        // It carries spend profiles but does not act on them, so it does not
+        // claim them - and a name it has never heard of is a plain "no".
+        for (String feature : List.of("award_spend_profiles", "some_future_feature")) {
+            Job answered = portal.answer(job("is_feature_supported " + feature));
+
+            assertFalse(answered.isError(), answered.errorMessage());
+            assertEquals("bool", answered.resultType().orElseThrow());
+            assertEquals("false", answered.resultText().orElseThrow());
+        }
+
+        Job answered = portal.answer(job("get_supported_features"));
+        assertFalse(answered.isError(), answered.errorMessage());
+        assertEquals("Vec<String>", answered.resultType().orElseThrow());
+        assertEquals("[]", answered.resultText().orElseThrow());
+    }
+
+    @Test
+    void a_supported_feature_is_answered_the_same_way_by_both_questions() {
+        portal.addOffering(OFFERING, List.of("standard"), AGREED);
+        portal.supportedFeatures = java.util.Set.of("award_spend_profiles", "a_feature");
+
+        Job answered = portal.answer(job("is_feature_supported award_spend_profiles"));
+        assertEquals("true", answered.resultText().orElseThrow());
+
+        answered = portal.answer(job("get_supported_features"));
+        assertEquals("[\"a_feature\",\"award_spend_profiles\"]",
+                answered.resultText().orElseThrow());
     }
 
     @Test

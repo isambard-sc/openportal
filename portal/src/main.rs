@@ -5,11 +5,12 @@ use anyhow::Result;
 
 use greatwestern::grammar::Instruction::{
     AddOfferings, CreateProject, GetAward, GetAwards, GetOfferings, GetProject, GetProjectMapping,
-    GetProjects, GetStorageReport, GetStorageReports, GetUsageReport, GetUsageReports, GetUsers,
-    RemoveOfferings, RemoveProject, Submit, SyncOfferings, UpdateProject,
+    GetProjects, GetStorageReport, GetStorageReports, GetSupportedFeatures, GetUsageReport,
+    GetUsageReports, GetUsers, IsFeatureSupported, RemoveOfferings, RemoveProject, Submit,
+    SyncOfferings, UpdateProject,
 };
 use greatwestern::grammar::{
-    DateRange, ProjectDetails, ProjectIdentifier, ProjectMapping, UserMapping,
+    DateRange, FeatureName, ProjectDetails, ProjectIdentifier, ProjectMapping, UserMapping,
 };
 use greatwestern::storagereport::{ProjectStorageReport, StorageReport};
 use greatwestern::usagereport::{ProjectUsageReport, UsageReport};
@@ -175,6 +176,20 @@ async fn main() -> Result<()> {
 
                     job.completed(
                         get_storage_reports(&me, &resource, &portal, &dates, &job.destination()).await?)
+                }
+                IsFeatureSupported(feature) => {
+                    tracing::debug!("Asking whether {} supports feature {}", resource, feature);
+
+                    // Answered by the portal software, not by us: whether a
+                    // site supports a feature is business logic we cannot see.
+                    job.completed(
+                        is_feature_supported(&me, &resource, &feature, &job.destination()).await?)
+                }
+                GetSupportedFeatures() => {
+                    tracing::debug!("Getting the features supported by {}", resource);
+
+                    job.completed(
+                        get_supported_features(&me, &resource, &job.destination()).await?)
                 }
                 _ => {
                     tracing::error!("Invalid instruction: {}. Portal agents do not accept this instruction", job.instruction());
@@ -1008,6 +1023,133 @@ pub async fn get_award(
 }
 
 ///
+/// Ask the portal software whether it supports the named feature
+/// for this resource
+///
+pub async fn is_feature_supported(
+    me: &str,
+    resource: &str,
+    feature: &FeatureName,
+    forwarded_for: &Destination,
+) -> Result<bool, Error> {
+    match agent::bridge(BRIDGE_WAIT_TIME).await {
+        Some(bridge) => {
+            let job = Job::parse(
+                &format!(
+                    "{}.{}.{} is_feature_supported {}",
+                    me,
+                    bridge.name(),
+                    resource,
+                    feature
+                ),
+                false,
+            )?
+            .with_forwarded_for(forwarded_for.clone())
+            .put(&bridge)
+            .await?;
+
+            let result = job.wait().await?.result::<bool>()?;
+
+            match result {
+                Some(supported) => {
+                    tracing::debug!(
+                        "Bridge agent says feature {} supported: {}",
+                        feature,
+                        supported
+                    );
+                    Ok(supported)
+                }
+                None => {
+                    // No answer is not "no" - let the caller see it could
+                    // not tell, rather than turning it into a false.
+                    tracing::warn!("No answer about feature {} from the bridge agent", feature);
+                    Err(Error::Call(format!(
+                        "No answer about feature {} from the bridge agent",
+                        feature
+                    )))
+                }
+            }
+        }
+
+        None => {
+            tracing::error!("No bridge agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no bridge agent".to_string(),
+            ))
+        }
+    }
+}
+
+///
+/// Ask the portal software for the names of all of the features it
+/// supports for this resource
+///
+pub async fn get_supported_features(
+    me: &str,
+    resource: &str,
+    forwarded_for: &Destination,
+) -> Result<Vec<String>, Error> {
+    match agent::bridge(BRIDGE_WAIT_TIME).await {
+        Some(bridge) => {
+            let job = Job::parse(
+                &format!(
+                    "{}.{}.{} get_supported_features",
+                    me,
+                    bridge.name(),
+                    resource
+                ),
+                false,
+            )?
+            .with_forwarded_for(forwarded_for.clone())
+            .put(&bridge)
+            .await?;
+
+            let result = job.wait().await?.result::<Vec<String>>()?;
+
+            match result {
+                Some(features) => {
+                    tracing::debug!("Features supported, from the bridge agent: {:?}", features);
+                    validate_feature_names(features)
+                }
+                None => {
+                    tracing::warn!("No supported features retrieved?");
+                    Err(Error::Call(
+                        "No supported features retrieved by bridge agent".to_string(),
+                    ))
+                }
+            }
+        }
+
+        None => {
+            tracing::error!("No bridge agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no bridge agent".to_string(),
+            ))
+        }
+    }
+}
+
+///
+/// Check that every name the portal software reported is a well-formed
+/// feature name. A malformed name is refused, not dropped or tidied, so
+/// the portal developer sees the mistake rather than a feature that
+/// silently never matches.
+///
+fn validate_feature_names(features: Vec<String>) -> Result<Vec<String>, Error> {
+    for feature in &features {
+        if let Err(e) = FeatureName::parse(feature) {
+            tracing::error!("Portal software reported an invalid feature name: {}", e);
+            return Err(Error::Call(format!(
+                "Portal software reported an invalid feature name: {}",
+                e
+            )));
+        }
+    }
+
+    Ok(features)
+}
+
+///
 /// Get the award details for all projects managed for the remote portal
 ///
 pub async fn get_awards(
@@ -1440,6 +1582,21 @@ pub async fn get_usage_reports(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_reported_feature_names_are_checked_not_tidied() {
+        let good = vec!["award_spend_profiles".to_string(), "vendor.x-1".to_string()];
+        assert_eq!(validate_feature_names(good.clone()).ok(), Some(good));
+        assert_eq!(validate_feature_names(vec![]).ok(), Some(vec![]));
+
+        for bad in ["Award_Spend_Profiles", "two words", ""] {
+            assert!(
+                validate_feature_names(vec!["award_spend_profiles".to_string(), bad.to_string()])
+                    .is_err(),
+                "should refuse {bad:?}"
+            );
+        }
+    }
 
     #[test]
     fn test_only_this_portals_relationships_are_offered() {

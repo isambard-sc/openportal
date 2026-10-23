@@ -67,6 +67,7 @@ public final class AwardDetails implements OpenPortalType {
     private Instant earliestApprove;
     private MembershipControl membershipControl;
     private List<DomainPattern> allowedDomains;
+    private List<SpendProfileEntry> spendProfile;
 
     /** An empty award, to fill in with the setters. */
     public AwardDetails() {}
@@ -145,6 +146,13 @@ public final class AwardDetails implements OpenPortalType {
             node.get("allowed_domains").forEach(
                     entry -> domains.add(DomainPattern.parse(entry.asText())));
             details.allowedDomains = domains;
+        }
+
+        if (node.hasNonNull("spend_profile")) {
+            List<SpendProfileEntry> entries = new ArrayList<>();
+            node.get("spend_profile").forEach(
+                    entry -> entries.add(SpendProfileEntry.fromJson(entry)));
+            details.spendProfile = canonicalSpendProfile(entries);
         }
 
         return details;
@@ -527,6 +535,58 @@ public final class AwardDetails implements OpenPortalType {
         return this;
     }
 
+    // ---- spend profile -----------------------------------------------------
+
+    /**
+     * The least that should be spent over each period of the award, sorted by
+     * date.
+     *
+     * <p>An agreement between the awarding portal and the site, carried rather
+     * than interpreted: what a shortfall means, whether an overspend carries
+     * forward, whether the units must match the allocation's - all of that is
+     * for the two portals to agree. Only check
+     * {@code is_feature_supported award_spend_profiles} before relying on a site
+     * acting on one.
+     *
+     * <p>Three states, like {@link #allowedDomains()}: <b>absent</b> means no
+     * profile (or, under a legacy partial update, keep the one held); an
+     * <b>empty list</b> explicitly removes one; a populated list is the profile.
+     */
+    public Optional<List<SpendProfileEntry>> spendProfile() {
+        return Optional.ofNullable(spendProfile).map(Collections::unmodifiableList);
+    }
+
+    /**
+     * Set the spend profile. Entries are sorted by date; two entries sharing a
+     * date are refused, since they do not say which minimum applies. Pass an
+     * empty list to remove a profile, and {@code null} to leave the field out.
+     */
+    public AwardDetails setSpendProfile(List<SpendProfileEntry> value) {
+        spendProfile = value == null ? null : canonicalSpendProfile(value);
+        return this;
+    }
+
+    public AwardDetails clearSpendProfile() {
+        spendProfile = null;
+        return this;
+    }
+
+    private static List<SpendProfileEntry> canonicalSpendProfile(List<SpendProfileEntry> entries) {
+        List<SpendProfileEntry> sorted = new ArrayList<>(entries);
+        sorted.sort(java.util.Comparator.comparing(SpendProfileEntry::from));
+
+        for (int i = 1; i < sorted.size(); i++) {
+            LocalDate date = sorted.get(i).from();
+
+            if (date.equals(sorted.get(i - 1).from())) {
+                throw new IllegalArgumentException(
+                        "Invalid spend profile - two entries share the date " + date);
+            }
+        }
+
+        return sorted;
+    }
+
     /** Whether a bare domain is allowed. Email patterns are ignored. */
     public boolean isDomainAllowed(String domain) {
         if (allowedDomains == null) {
@@ -575,10 +635,10 @@ public final class AwardDetails implements OpenPortalType {
      * This award updated by {@code other}, as a new object.
      *
      * <p>Most fields are <b>replaced</b> when {@code other} sets them and left
-     * alone when it does not - including {@code members} and
-     * {@code allowed_domains}, which are definitive sets rather than
-     * accumulating ones. An allow-list that unioned could only ever widen, and
-     * could never be reduced.
+     * alone when it does not - including {@code members},
+     * {@code allowed_domains} and {@code spend_profile}, which are definitive
+     * rather than accumulating. An allow-list that unioned could only ever
+     * widen, and could never be reduced.
      *
      * <p>Two fields accumulate on purpose: {@code breakdown} (entries are
      * merged key by key) and {@code notes} (new ones appended, then the whole
@@ -668,6 +728,10 @@ public final class AwardDetails implements OpenPortalType {
             merged.allowedDomains = new ArrayList<>(other.allowedDomains);
         }
 
+        if (other.spendProfile != null) {
+            merged.spendProfile = new ArrayList<>(other.spendProfile);
+        }
+
         return merged;
     }
 
@@ -692,6 +756,7 @@ public final class AwardDetails implements OpenPortalType {
         copy.earliestApprove = earliestApprove;
         copy.membershipControl = membershipControl;
         copy.allowedDomains = allowedDomains == null ? null : new ArrayList<>(allowedDomains);
+        copy.spendProfile = spendProfile == null ? null : new ArrayList<>(spendProfile);
 
         return copy;
     }
@@ -753,6 +818,13 @@ public final class AwardDetails implements OpenPortalType {
         } else {
             ArrayNode domains = node.putArray("allowed_domains");
             allowedDomains.forEach(pattern -> domains.add(pattern.pattern()));
+        }
+
+        // Omitted rather than null when absent, as the Rust side does: a peer
+        // that predates the field never sees it.
+        if (spendProfile != null) {
+            ArrayNode entries = node.putArray("spend_profile");
+            spendProfile.forEach(entry -> entries.add(entry.toJson()));
         }
 
         return node;

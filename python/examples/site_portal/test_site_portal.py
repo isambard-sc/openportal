@@ -459,6 +459,54 @@ def _run_all() -> None:
         f"-> {job.error}",
     )
 
+    print("\n-- a spend profile is carried, not interpreted -----------------")
+
+    # The awarding portal can say how an award should be spent over time: the
+    # least to spend from each date. This portal does not act on it (it does not
+    # claim `award_spend_profiles` - see below), but it must not lose it either:
+    # the profile is part of the award, and `get_award` hands the award back.
+    quarterly = [
+        openportal.SpendProfileEntry(datetime.date(2027, 7, 1), "300 NHR"),
+        openportal.SpendProfileEntry(datetime.date(2027, 1, 1), "100 NHR"),
+        openportal.SpendProfileEntry(datetime.date(2027, 4, 1), "100 NHR"),
+        openportal.SpendProfileEntry(datetime.date(2027, 10, 1), "400 NHR"),
+    ]
+    job = site_portal.answer(
+        make_job(f"update_project {AWARD} {details(spend_profile=quarterly)}")
+    )
+    check("an update carrying a spend profile is accepted", not job.is_error)
+
+    held = site_portal.answer(make_job(f"get_award {AWARD}")).result
+    check(
+        "...and get_award hands the profile back, in date order",
+        [(str(e.from_date), str(e.minimum)) for e in held.spend_profile or []]
+        == [
+            ("2027-01-01", "100 NHR"),
+            ("2027-04-01", "100 NHR"),
+            ("2027-07-01", "300 NHR"),
+            ("2027-10-01", "400 NHR"),
+        ],
+        f"-> {held.spend_profile}",
+    )
+
+    # Absent and `[]` are different statements. An update without the field -
+    # from a sender that predates it, say - keeps what is held; `[]` removes it.
+    site_portal.answer(make_job(f"update_project {AWARD} {details()}"))
+    held = site_portal.answer(make_job(f"get_award {AWARD}")).result
+    check(
+        "an update that does not mention it keeps the profile",
+        len(held.spend_profile or []) == 4,
+        f"-> {held.spend_profile}",
+    )
+
+    site_portal.answer(make_job(f"update_project {AWARD} {details(spend_profile=[])}"))
+    held = site_portal.answer(make_job(f"get_award {AWARD}")).result
+    check(
+        "an update carrying [] removes it",
+        held.spend_profile == [],
+        f"-> {held.spend_profile}",
+    )
+
     print("\n-- usage: recorded in our namespace, answered in theirs --------")
 
     # Push figures in the way an operator's parser would - against our own
@@ -694,6 +742,7 @@ def _run_all() -> None:
         "get_usage_reports allocator this_month": "UsageReport",
         f"get_storage_report {AWARD} this_month": "ProjectStorageReport",
         "get_storage_reports allocator": "StorageReport",
+        "is_feature_supported award_spend_profiles": "bool",
         f"remove_project {AWARD2}": "ProjectMapping",
     }
 
@@ -849,6 +898,57 @@ def _run_all() -> None:
     job = site_portal.answer(make_job(f"get_storage_report {AWARD} this_month"))
     check("get_storage_report succeeds rather than failing", not job.is_error)
     check("...with an empty report", job.result.is_empty())
+
+    print("\n-- what this portal supports -----------------------------------")
+
+    # It carries spend profiles but does not act on them, so it does not claim
+    # to support them - and a name it has never heard of is a plain "no", not
+    # an error. That is what lets an awarding portal ask about a feature defined
+    # after this code was written.
+    for feature in ("award_spend_profiles", "some_future_feature"):
+        job = site_portal.answer(make_job(f"is_feature_supported {feature}"))
+        check(
+            f"'{feature}' is not supported",
+            not job.is_error and job.result is False,
+            f"-> {job.result!r}",
+        )
+
+    job = site_portal.answer(make_job("get_supported_features"))
+    check(
+        "get_supported_features lists nothing",
+        not job.is_error and job.result == [],
+        f"-> {job.result!r}",
+    )
+
+    # Once a portal does what a name promises, it says so - and both questions
+    # answer from the one set, so they cannot disagree.
+    supported = site_portal.SUPPORTED_FEATURES
+    site_portal.SUPPORTED_FEATURES = frozenset({"award_spend_profiles", "a_feature"})
+    try:
+        job = site_portal.answer(make_job("is_feature_supported award_spend_profiles"))
+        check("a listed feature is supported", job.result is True, f"-> {job.result!r}")
+
+        job = site_portal.answer(make_job("get_supported_features"))
+        check(
+            "...and appears in the list, which is sorted",
+            job.result == ["a_feature", "award_spend_profiles"],
+            f"-> {job.result!r}",
+        )
+        check(
+            "...typed as a Vec<String>",
+            job.result_type == "Vec<String>",
+            f"-> {job.result_type}",
+        )
+    finally:
+        site_portal.SUPPORTED_FEATURES = supported
+
+    # A malformed name never reaches the handler: the instruction does not parse.
+    try:
+        make_job("is_feature_supported Award_Spend_Profiles")
+        raise AssertionError("an uppercase feature name should not parse")
+    except OSError:
+        pass
+    check("a malformed feature name is refused before it arrives", True)
 
     print("\n-- an instruction we do not implement ---------------------------")
 

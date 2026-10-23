@@ -578,6 +578,10 @@ example does this — see its `approve` endpoint.
   removed. An `allowed_domains` of `[]` permits nobody, and is distinct from
   omitting the field.
 
+  `spend_profile` is replaced wholesale too, and `[]` removes it. Under a legacy
+  partial update (below) an absent `spend_profile` keeps the one you hold,
+  which is why removal is spelled `[]` rather than by leaving the field out.
+
   Older senders may still deliver a partial update, in which case absent fields
   keep their current values. Do not rely on that: it is being retired, and an
   absent field is far more likely to be a caller that has not been updated than
@@ -606,6 +610,14 @@ portal-to-portal work:
   independently of the awarding portal: `open` (default when absent),
   `members_only`, `roles_only`, `locked`. Honour it — the awarding portal is
   entitled to assume you do.
+* **`spend_profile`**, when present, is the least that should be spent over
+  each period of the award - dated absolute minimums such as
+  `[{"from": "2027-01-01", "minimum": "100 NHR"}, ...]`, each applying until the
+  next entry's date and the last until `end_date`. OpenPortal carries it and
+  does not interpret it: what a shortfall means, and how you enforce it, is
+  between you and the awarding portal. Keep it with the award so `get_award`
+  hands it back, whether or not you act on it. Claim `award_spend_profiles`
+  (§4.4) only if you do.
 
 
 #### 4.1.2 `remove_award` disconnects an award; it does not delete a project
@@ -881,7 +893,51 @@ consequences:
 > date until it is reported complete. Implement against the rule above; a site
 > portal that does needs no change when the fix lands.
 
-### 4.4 What you will not receive
+### 4.4 What a portal supports
+
+| Instruction | Arguments | Must return | Wire form |
+|-------------|-----------|-------------|-----------|
+| `is_feature_supported` | `<feature>` | `bool` | `true` / `false` |
+| `get_supported_features` | *(none)* | `Vec<String>` | array of strings |
+
+How an awarding portal finds out what you support before relying on it - for
+example, whether you act on an award's `spend_profile`. Both arrive through an
+offering like everything else, so you may answer differently for each
+resource. Answer them from the same set, so that a feature is supported if and
+only if it is in the list.
+
+**Feature names are opaque strings, not an enum.** They are agreed between
+portals, and you may define your own. A name is 1-64 characters of lowercase
+ASCII letters, digits, `_`, `-` and `.`, starting with a letter; a malformed
+one is refused before it reaches you. Answer `false` for any name you do not
+recognise - that is what lets a caller ask about a feature defined after your
+code was written.
+
+**Claim a feature only if your business logic does what it promises**, not
+merely because you can store the data it concerns. A portal that keeps a spend
+profile but does nothing with it does not support `award_spend_profiles`.
+
+The well-known names:
+
+| Feature | Means the site |
+|---------|----------------|
+| `award_spend_profiles` | Understands `AwardDetails.spend_profile`, and acts on it as agreed with the awarding portal |
+
+For the caller, there are three outcomes, not two:
+
+| What comes back | Means |
+|-----------------|-------|
+| `true` | Supported |
+| `false`, or `OpenPortalUnsupportedCommandError` | Not supported |
+| An error from an agent that cannot parse the instruction | Not supported - the site predates feature discovery |
+| A timeout, or the job expiring | **Unknown.** Ask again later; do not treat it as "no" |
+
+Answers are snapshots - sites upgrade - so ask again before relying on one
+rather than remembering it indefinitely. Implementing these is optional (§4.0);
+a portal that declines them is read as supporting nothing. The design is in
+`docs/plans/award-spend-profiles-and-feature-discovery-design.md`.
+
+### 4.5 What you will not receive
 
 The bridge board carries only the instructions above. Everything else in the
 `greatwestern` vocabulary — `add_user`, `remove_user`, `add_local_user`,
@@ -956,7 +1012,9 @@ The bridge tries 3 times at 2-second intervals, then logs and drops. Configure
 15. Handle `membership_control`, reject an award with an unknown `template` or
     with none, and reject one with no `allocation` - an award is for a quantity
     (§4.1). Populate `AwardDetails.members` (§4.2).
-16. Fetch and acknowledge notifications (§5).
+16. Answer `is_feature_supported` and `get_supported_features` from one set, and
+    claim a feature only if you act on it - or decline both (§4.4).
+17. Fetch and acknowledge notifications (§5).
 
 ---
 ## 7. Source file reference

@@ -2,6 +2,7 @@
 import type { Link } from "./Link";
 import type { MembershipControl } from "./MembershipControl";
 import type { Note } from "./Note";
+import type { SpendProfileEntry } from "./SpendProfileEntry";
 
 /**
  * Details about a project that exists in a portal.
@@ -94,4 +95,15 @@ membership_control?: MembershipControl,
  * If this is Some(vec![...]), then only the domains that match
  * those in the list are allowed.
  */
-allowed_domains: Array<string> | null, };
+allowed_domains: Array<string> | null, 
+/**
+ * The least that should be spent over each period of the award, as an
+ * agreement between the awarding portal and the site. Carried, not
+ * interpreted: OpenPortal only ensures it is well formed.
+ *
+ * Three states, like `allowed_domains`. Absent (`None`) means no profile -
+ * or, under a legacy partial update, keep the one held. `Some(vec![])`
+ * means explicitly no minimums, which is how a profile is removed. A
+ * non-empty list is the profile, held sorted by date.
+ */
+spend_profile?: Array<SpendProfileEntry>, };

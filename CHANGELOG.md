@@ -18,6 +18,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `op-freeipa` and `op-slurm`, the two agents that hold the most privileged
   credentials. Diagrams are in Mermaid, so they render on GitHub and change
   alongside the text. Linked from the README and both docs indexes.
+- **Award spend profiles.** `AwardDetails` gains an optional `spend_profile`:
+  dated absolute minimums, such as
+  `[{"from": "2027-01-01", "minimum": "100 NHR"}, ...]`, through which an
+  awarding portal tells a site how an award should be spent over time. Each
+  entry applies until the next entry's date, and the last until `end_date`.
+  OpenPortal carries the profile and does not interpret it. Shortfalls,
+  carry-over and units are for the two portals to agree. OpenPortal checks only
+  that the profile is well formed: valid dates and allocations, held in date
+  order, and no two entries for the same day. Absent means no profile, and `[]`
+  removes one. An update replaces it wholesale. Supported in the Python module
+  (`SpendProfileEntry`) and the Java client, and both site portal examples carry
+  it through `get_award`. See
+  [`docs/plans/award-spend-profiles-and-feature-discovery-design.md`](docs/plans/award-spend-profiles-and-feature-discovery-design.md).
+- **Feature discovery.** Two new instructions, `is_feature_supported <feature>`
+  (returns `bool`) and `get_supported_features` (returns `Vec<String>`), let one
+  portal ask another what it supports - for example, whether a site acts on
+  spend profiles (`award_spend_profiles`) before relying on one. Both are
+  addressed to an offering, routed by `op-portal` and `op-bridge`, and answered
+  by the site's portal software. Feature names are opaque strings agreed
+  between portals, not an enum, and only their shape is checked. An agent too old to know the
+  instructions answers with an error, which reads correctly as "not
+  supported". The well-known names are listed in the site portal API (§4.4).
+  Both site portal examples answer them, and claim nothing.
+
+### Fixed
+
+- **A `bool` result reaches Python as a `bool`.** `Job.result` returned `0`/`1`
+  for a `bool` result. That compared equal to `False`/`True` but failed an
+  `is` check and printed as a number.
 
 ## [0.94.0] - 2026-10-08
 

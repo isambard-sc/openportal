@@ -110,7 +110,8 @@ complete with `result_type` of `"None"` and `result` of `null` or `"{}"`.
 
 ### `bool`
 
-Returned by: `is_protected_user`, `is_existing_user`, `is_existing_project`
+Returned by: `is_protected_user`, `is_existing_user`, `is_existing_project`,
+`is_feature_supported`
 
 ```json
 true | false
@@ -137,9 +138,11 @@ A plain JSON string containing a filesystem path.
 
 ### `Vec<String>`
 
-Returned by: `get_project_dirs`, `get_local_project_dirs`
+Returned by: `get_project_dirs`, `get_local_project_dirs`,
+`get_supported_features`
 
-A JSON array of filesystem path strings.
+A JSON array of strings - filesystem paths for the directory instructions, and
+feature names (e.g. `"award_spend_profiles"`) for `get_supported_features`.
 
 ```json
 [
@@ -269,6 +272,10 @@ Fields that are `null` or unset are omitted from the serialised JSON.
     "example.com",
     "*.university.ac.uk",
     "collaborator@gmail.com"
+  ],
+  "spend_profile": [
+    { "from": "2024-01-01", "minimum": "100 NHR" },
+    { "from": "2024-07-01", "minimum": "300 NHR" }
   ]
 }
 ```
@@ -294,6 +301,7 @@ Fields that are `null` or unset are omitted from the serialised JSON.
 | `earliest_approve` | string | RFC 3339 UTC — do not approve before this time; omitted when unset |
 | `membership_control` | string | `"open"` / `"members_only"` / `"roles_only"` / `"locked"` — see below; omitted when unset (defaults to `open`) |
 | `allowed_domains` | array of strings | Member email allow-list; `null` = all allowed; `[]` = none allowed. Each entry is either a domain pattern (`"example.com"`, `"*.university.ac.uk"`) or an exact email address (`"collaborator@gmail.com"`). See below. |
+| `spend_profile` | array of `SpendProfileEntry` | Dated minimum spends, carried between portals and not interpreted by OpenPortal; omitted when absent; `[]` explicitly removes a profile. See below. |
 
 **`MembershipControl` values:**
 
@@ -332,6 +340,22 @@ When `allowed_domains` is absent (`null`), all email addresses are permitted.
 When it is present but empty (`[]`), no email addresses are permitted. The
 three-state semantics allow a portal to explicitly express "no members allowed"
 as distinct from "unrestricted".
+
+**`spend_profile` entries (`SpendProfileEntry`):**
+
+```json
+{ "from": "<YYYY-MM-DD>", "minimum": "<size> <units>" }
+```
+
+Both fields are required. `minimum` is an allocation, parsed and validated as
+`allocation` is (a negative, `NaN` or infinite size is refused). By convention
+between the portals, each entry applies from its `from` date up to, but not
+including, the next entry's, and the last until `end_date`. The minimums need
+not add up to the allocation, and nothing checks the units, the dates or the
+total against the award - those are for the portals to agree. Entries are held
+sorted by date, so they always serialise in that order; two entries with the
+same `from` date are refused. `update_award` replaces the profile wholesale, as
+it does `members`.
 
 **`Link` object:**
 

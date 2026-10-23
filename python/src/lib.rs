@@ -1722,7 +1722,11 @@ impl Job {
                 };
 
                 match result {
-                    Some(result) => Ok((result as u64).into_pyobject(py)?.into_any()),
+                    // A Python `bool`, not the integer it used to be cast to:
+                    // `0 == False`, but `0 is False` does not hold, and an
+                    // answer like `is_feature_supported` is naturally tested
+                    // with `is`.
+                    Some(result) => Ok(pyo3::types::PyBool::new(py, result).to_owned().into_any()),
                     None => Ok(py.None().into_bound(py)),
                 }
             }
@@ -5120,6 +5124,98 @@ impl PyStubType for DomainPatternOrStr {
     }
 }
 
+/// Helper enum to accept either an Allocation or a string in Python
+#[derive(FromPyObject)]
+enum AllocationOrStr {
+    Allocation(Allocation),
+    Str(String),
+}
+
+impl PyStubType for AllocationOrStr {
+    fn type_output() -> TypeInfo {
+        TypeInfo::builtin("str | Allocation")
+    }
+}
+
+impl AllocationOrStr {
+    fn into_allocation(self) -> PyResult<grammar::Allocation> {
+        match self {
+            AllocationOrStr::Allocation(a) => Ok(a.0),
+            AllocationOrStr::Str(s) => grammar::Allocation::parse(&s)
+                .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+}
+
+/// One entry in an award's spend profile: the least that should be spent
+/// from `from_date` until the next entry's date (or the award's end date).
+/// OpenPortal carries this between portals; it does not interpret it.
+#[gen_stub_pyclass]
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SpendProfileEntry(grammar::SpendProfileEntry);
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl SpendProfileEntry {
+    #[new]
+    fn new(from_date: chrono::NaiveDate, minimum: AllocationOrStr) -> PyResult<Self> {
+        Ok(Self(grammar::SpendProfileEntry::new(
+            &grammar::Date::from_chrono(&from_date),
+            &minimum.into_allocation()?,
+        )))
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<SpendProfileEntry> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<SpendProfileEntry> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &Bound<'_, PyAny>, op: CompareOp) -> PyResult<bool> {
+        let equal = if let Ok(other_entry) = other.extract::<SpendProfileEntry>() {
+            self.0 == other_entry.0
+        } else {
+            return Err(PyErr::new::<PyOSError, _>(
+                "Cannot compare SpendProfileEntry with this type",
+            ));
+        };
+        match op {
+            CompareOp::Eq => Ok(equal),
+            CompareOp::Ne => Ok(!equal),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
+
+    /// The date this minimum applies from
+    #[getter(from_date)]
+    fn applies_from(&self) -> PyResult<chrono::NaiveDate> {
+        Ok(self.0.from().to_chrono())
+    }
+
+    /// The least that should be spent from that date
+    #[getter]
+    fn minimum(&self) -> PyResult<Allocation> {
+        Ok(self.0.minimum().clone().into())
+    }
+}
+
+impl From<grammar::SpendProfileEntry> for SpendProfileEntry {
+    fn from(entry: grammar::SpendProfileEntry) -> Self {
+        SpendProfileEntry(entry)
+    }
+}
+
 #[gen_stub_pyclass]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5894,6 +5990,38 @@ impl AwardDetails {
 
     fn clear_allowed_domains(&mut self) -> PyResult<()> {
         self.0.clear_allowed_domains();
+        Ok(())
+    }
+
+    /// The spend profile, sorted by date. `None` if there is none; an empty
+    /// list if it has been explicitly removed.
+    #[getter]
+    fn spend_profile(&self) -> PyResult<Option<Vec<SpendProfileEntry>>> {
+        Ok(self
+            .0
+            .spend_profile()
+            .map(|entries| entries.into_iter().map(|e| e.into()).collect()))
+    }
+
+    /// Set the spend profile. Entries are sorted by date, and two entries
+    /// with the same date are refused. `[]` explicitly removes a profile;
+    /// `None` forgets it, so the field is absent on the wire.
+    #[setter]
+    fn set_spend_profile(&mut self, entries: Option<Vec<SpendProfileEntry>>) -> PyResult<()> {
+        match entries {
+            Some(entries) => self
+                .0
+                .set_spend_profile(entries.into_iter().map(|e| e.0).collect())
+                .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+            None => {
+                self.0.clear_spend_profile();
+                Ok(())
+            }
+        }
+    }
+
+    fn clear_spend_profile(&mut self) -> PyResult<()> {
+        self.0.clear_spend_profile();
         Ok(())
     }
 
@@ -6821,6 +6949,7 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ProjectStorageReport>()?;
     m.add_class::<StorageReport>()?;
     m.add_class::<DomainPattern>()?;
+    m.add_class::<SpendProfileEntry>()?;
     m.add_class::<Link>()?;
     m.add_class::<Note>()?;
     m.add_class::<MembershipControl>()?;

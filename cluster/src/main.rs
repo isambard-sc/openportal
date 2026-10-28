@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use greatwestern::grammar::Instruction::{
     AddProject, AddTenancyAddon, AddUser, BlockProject, BlockUser, ClearProjectQuota,
     ClearUserQuota, GetHomeDir, GetLimit, GetLocalHomeDir, GetLocalProjectDirs, GetLocalUserDirs,
-    GetProjectDirs, GetProjectMapping, GetProjectQuota, GetProjectQuotas, GetProjects,
-    GetStorageReport, GetStorageReports, GetUsageReport, GetUsageReports, GetUserDirs,
+    GetLocalUserIds, GetProjectDirs, GetProjectMapping, GetProjectQuota, GetProjectQuotas,
+    GetProjects, GetStorageReport, GetStorageReports, GetUsageReport, GetUsageReports, GetUserDirs,
     GetUserMapping, GetUserQuota, GetUserQuotas, GetUsers, IsBlockedProject, IsBlockedUser,
     IsProjectAdded, IsProjectRemoved, IsProtectedUser, IsUserAdded, IsUserRemoved, RemoveProject,
     RemoveTenancyAddon, RemoveUser, SetLimit, SetProjectQuota, SetTenancy, SetUserQuota,
@@ -17,6 +17,7 @@ use greatwestern::grammar::Instruction::{
 use greatwestern::grammar::{
     DateRange, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
 };
+use greatwestern::localids::LocalUserIds;
 use greatwestern::storage::{Quota, Volume};
 use greatwestern::storagereport::{ProjectStorageReport, StorageReport};
 use greatwestern::tenancy::{Tenancy, TenancyAddon};
@@ -394,6 +395,10 @@ async fn main() -> Result<()> {
                 GetLocalUserDirs(mapping) => {
                     let dirs = get_user_dirs(me.name(), &mapping).await?;
                     job.completed(dirs)
+                }
+                GetLocalUserIds(mapping) => {
+                    let ids = get_user_ids(me.name(), &mapping).await?;
+                    job.completed(ids)
                 }
                 _ => {
                     tracing::error!("Unknown instruction: {:?}", job.instruction());
@@ -2504,6 +2509,45 @@ async fn get_user_dirs(me: &str, mapping: &UserMapping) -> Result<Vec<String>, E
                 "Cannot run the job because there is no filesystem agent".to_string(),
             ))
         }
+    }
+}
+
+///
+/// Ask the filesystem agent for the numeric ids of a local user. The
+/// filesystem agent answers because its host is the one whose name service
+/// the storage itself uses - see `get_local_user_ids` in op-filesystem. This
+/// is how a sibling agent (e.g. a Kubernetes scheduler, which cannot see the
+/// identity service) learns them.
+///
+async fn get_user_ids(me: &str, mapping: &UserMapping) -> Result<LocalUserIds, Error> {
+    let filesystem = match agent::filesystem(AGENT_WAIT_TIME).await {
+        Some(filesystem) => filesystem,
+        None => {
+            tracing::error!("No filesystem agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
+            ));
+        }
+    };
+
+    let job = Job::parse(
+        &format!(
+            "{}.{} get_local_user_ids {}",
+            me,
+            filesystem.name(),
+            mapping
+        ),
+        false,
+    )?
+    .put(&filesystem)
+    .await?;
+
+    match job.wait().await?.result::<LocalUserIds>()? {
+        Some(ids) => Ok(ids),
+        None => Err(Error::MissingUser(format!(
+            "The filesystem agent returned no ids for user {}",
+            mapping
+        ))),
     }
 }
 

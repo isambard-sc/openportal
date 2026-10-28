@@ -14,18 +14,29 @@ use greatwestern::grammar::Instruction::{
     IsLocalProjectAdded, IsLocalProjectRemoved, IsLocalUserAdded, IsLocalUserRemoved,
     RemoveLocalProject, RemoveLocalTenancyAddon, RemoveLocalUser, SetLocalLimit, SetLocalTenancy,
 };
+use greatwestern::grammar::UserMapping;
+use greatwestern::localids::LocalUserIds;
 use greatwestern::tenancy::Tenancy;
 use greatwestern::usagereport::Usage;
 use greatwestern::Hpc;
 use templemeads::agent::scheduler::{process_args, run, Defaults};
-use templemeads::agent::Type as AgentType;
+use templemeads::agent::{Peer, Type as AgentType};
 use templemeads::async_runnable;
+use templemeads::job::assert_not_expired;
 use templemeads::notification::default_notify_runner;
 use templemeads::set_notify_runner;
 use templemeads::Error;
 
 type Envelope = templemeads::job::Envelope<Hpc>;
 type Job = templemeads::job::Job<Hpc>;
+
+/// How many times to ask for a new user's numeric ids before giving up, and
+/// the base delay between attempts (multiplied by the attempt number). The
+/// account is created just before `add_local_user` arrives, and the name
+/// service on the filesystem host can lag behind the identity service, so
+/// the first ask can legitimately fail.
+const USER_IDS_ATTEMPTS: u32 = 4;
+const USER_IDS_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Seconds in one hour - `Usage` is stored (and exchanged with peers) in
 /// seconds, but `Project.spec.budget.nodeHours` is a whole number of hours.
@@ -124,6 +135,8 @@ async fn main() -> Result<()> {
         pub async fn k8s_runner(envelope: Envelope) -> Result<Job, templemeads::Error>
         {
             let job = envelope.job();
+            let me = envelope.recipient();
+            let sender = envelope.sender();
 
             match job.instruction() {
                 AddLocalProject(project) => {
@@ -135,7 +148,8 @@ async fn main() -> Result<()> {
                     job.completed_none()
                 },
                 AddLocalUser(user) => {
-                    client::upsert_project_user(&user).await?;
+                    let ids = get_user_ids(me.name(), &sender, &user, job.expires()).await?;
+                    client::upsert_project_user(&user, &ids).await?;
                     job.completed_none()
                 },
                 RemoveLocalUser(user) => {
@@ -195,4 +209,71 @@ async fn main() -> Result<()> {
     run(config, k8s_runner).await?;
 
     Ok(())
+}
+
+///
+/// Ask the agent that sent us this job (the cluster instance agent) for the
+/// numeric ids of a local user. The instance agent relays this to the
+/// filesystem agent, whose host resolves names through the same identity
+/// service as the storage - this agent runs in a pod and cannot.
+///
+/// The lookup is retried a few times, because the account has normally only
+/// just been created. If it still fails the job fails, rather than creating
+/// a `ProjectUser` with no ids - `add_user` is idempotent, so it is safe for
+/// the portal to retry the whole thing.
+///
+async fn get_user_ids(
+    me: &str,
+    sender: &Peer,
+    mapping: &UserMapping,
+    expires: &chrono::DateTime<chrono::Utc>,
+) -> Result<LocalUserIds, Error> {
+    let mut last_error = None;
+
+    for attempt in 1..=USER_IDS_ATTEMPTS {
+        assert_not_expired(expires)?;
+
+        let result = async {
+            let job = Job::parse(
+                &format!("{}.{} get_local_user_ids {}", me, sender.name(), mapping),
+                false,
+            )?
+            .put(sender)
+            .await?;
+
+            match job.wait().await?.result::<LocalUserIds>()? {
+                Some(ids) => Ok(ids),
+                None => Err(Error::MissingUser(format!(
+                    "No ids were returned for user {}",
+                    mapping
+                ))),
+            }
+        }
+        .await;
+
+        match result {
+            Ok(ids) => {
+                tracing::info!("Resolved ids for user {}: {}", mapping, ids);
+                return Ok(ids);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Could not get the ids for user {} (attempt {} of {}): {}",
+                    mapping,
+                    attempt,
+                    USER_IDS_ATTEMPTS,
+                    e
+                );
+                last_error = Some(e);
+
+                if attempt < USER_IDS_ATTEMPTS {
+                    tokio::time::sleep(USER_IDS_BACKOFF.saturating_mul(attempt)).await;
+                }
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        Error::MissingUser(format!("Could not get the ids for user {}", mapping))
+    }))
 }

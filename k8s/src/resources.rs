@@ -137,8 +137,15 @@ pub struct ProjectUserSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uid: Option<u32>,
 
+    /// GID of the user's own private group (same name as the user; with
+    /// FreeIPA user-private-groups this equals `uid`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gid: Option<u32>,
+
+    /// GID of the project group the user is a member of (the mapping's
+    /// local group, e.g. `project.brics`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_gid: Option<u32>,
 
     /// Suspends the user's project-namespace RBAC without deleting their
     /// identity or usage history. `RemoveLocalUser` deletes the object

@@ -3022,6 +3022,11 @@ pub enum Instruction {
     /// (note this does not guarantee the directories exist)
     GetLocalUserDirs(UserMapping),
 
+    /// Return the numeric ids of a local user: their UID, the GID of their
+    /// private (same-named) group, and the GID of the mapping's local
+    /// (project) group. See `crate::localids::LocalUserIds`.
+    GetLocalUserIds(UserMapping),
+
     /// Return the project directories of a local project
     /// (note this does not guarantee the directories exist)
     GetLocalProjectDirs(ProjectMapping),
@@ -4781,6 +4786,16 @@ impl Instruction {
                     )))
                 }
             },
+            "get_local_user_ids" => match UserMapping::parse(&rest(1)) {
+                Ok(mapping) => Ok(Instruction::GetLocalUserIds(mapping)),
+                Err(_) => {
+                    tracing::error!("get_local_user_ids failed to parse: {}", &rest(1));
+                    Err(Error::Parse(format!(
+                        "get_local_user_ids failed to parse: {}",
+                        rest(1)
+                    )))
+                }
+            },
             "add_offerings" => match Destinations::parse(&rest(1)) {
                 Ok(offerings) => Ok(Instruction::AddOfferings(offerings)),
                 Err(_) => {
@@ -4872,6 +4887,7 @@ impl Instruction {
             Instruction::GetLocalUserQuotas(_) => "get_local_user_quotas".to_string(),
             Instruction::GetLocalHomeDir(_) => "get_local_home_dir".to_string(),
             Instruction::GetLocalUserDirs(_) => "get_local_user_dirs".to_string(),
+            Instruction::GetLocalUserIds(_) => "get_local_user_ids".to_string(),
             Instruction::GetLocalProjectDirs(_) => "get_local_project_dirs".to_string(),
             Instruction::UpdateHomeDir(_, _) => "update_homedir".to_string(),
             Instruction::GetLocalStorageReport(_, _) => "get_local_storage_report".to_string(),
@@ -4983,6 +4999,7 @@ impl Instruction {
             Instruction::GetLocalUserQuotas(mapping) => vec![mapping.to_string()],
             Instruction::GetLocalHomeDir(mapping) => vec![mapping.to_string()],
             Instruction::GetLocalUserDirs(mapping) => vec![mapping.to_string()],
+            Instruction::GetLocalUserIds(mapping) => vec![mapping.to_string()],
             Instruction::GetLocalProjectDirs(mapping) => vec![mapping.to_string()],
             Instruction::GetLocalStorageReport(mapping, date_range) => {
                 vec![mapping.to_string(), date_range.to_string()]
@@ -5197,6 +5214,7 @@ impl std::fmt::Display for Instruction {
             Instruction::GetProjectDirs(project) => write!(f, "get_project_dirs {}", project),
             Instruction::GetLocalHomeDir(mapping) => write!(f, "get_local_home_dir {}", mapping),
             Instruction::GetLocalUserDirs(mapping) => write!(f, "get_local_user_dirs {}", mapping),
+            Instruction::GetLocalUserIds(mapping) => write!(f, "get_local_user_ids {}", mapping),
             Instruction::GetLocalProjectDirs(mapping) => {
                 write!(f, "get_local_project_dirs {}", mapping)
             }
@@ -5264,6 +5282,7 @@ pub fn owning_portal(instruction: &Instruction) -> Option<PortalIdentifier> {
         Instruction::GetLocalUserQuotas(user) => Some(user.user().clone()),
         Instruction::GetUserDirs(user) => Some(user),
         Instruction::GetLocalUserDirs(user) => Some(user.user().clone()),
+        Instruction::GetLocalUserIds(user) => Some(user.user().clone()),
         // The block/unblock family was missing, so the portal-ownership check
         // silently no-op'd for it - letting one portal's client block or
         // unblock another portal's users. See
@@ -5675,6 +5694,7 @@ mod tests {
             Instruction::GetLocalUserQuotas(user_mapping.clone()),
             Instruction::GetUserDirs(user.clone()),
             Instruction::GetLocalUserDirs(user_mapping.clone()),
+            Instruction::GetLocalUserIds(user_mapping.clone()),
             Instruction::BlockUser(user.clone()),
             Instruction::UnblockUser(user.clone()),
             Instruction::IsBlockedUser(user.clone()),

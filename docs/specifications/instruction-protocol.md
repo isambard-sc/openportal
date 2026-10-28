@@ -912,6 +912,21 @@ Returns: `Vec<String>` (filesystem paths)
 > **Note:** `get_local_user_dirs` is defined in the Instruction type but is not
 > yet handled by the parser. It cannot be round-tripped through `parse()`.
 
+#### `get_local_user_ids`
+
+Resolve the numeric ids of a locally mapped user, as the filesystem agent's
+host name service sees them. Handled by the filesystem agent; the instance
+agent relays it there, so a scheduler agent (e.g. `op-k8s`) sends it to its
+instance agent.
+
+```
+get_local_user_ids <user_mapping>
+```
+
+Returns: `LocalUserIds` - `{ uid, user_gid, project_gid }`, where `user_gid`
+is the GID of the user's own private (same-named) group and `project_gid` is
+the GID of the mapping's local group.
+
 #### `get_local_project_dirs`
 
 Retrieve project directory paths for a locally mapped project. Directories may
@@ -1356,6 +1371,7 @@ Returns: `Destinations`
 | `is_local_project_removed` | `<project_mapping>` | `bool` | True if this agent has fully removed the local project |
 | `get_local_home_dir` | `<user_mapping>` | `String` | Get local user home dir |
 | `get_local_user_dirs` | `<user_mapping>` | `Vec<String>` | Get local user dirs *(not yet parseable)* |
+| `get_local_user_ids` | `<user_mapping>` | `LocalUserIds` | Get local user's UID, private-group GID and project GID |
 | `get_local_project_dirs` | `<project_mapping>` | `Vec<String>` | Get local project dirs |
 | `get_usage_report` | `<project_id> [<date_range>]` | `ProjectUsageReport` | Usage report for project |
 | `get_usage_reports` | `<portal_id> [<date_range>]` | `Vec<ProjectUsageReport>` | Usage reports for all portal projects |

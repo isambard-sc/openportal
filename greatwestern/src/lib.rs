@@ -15,6 +15,7 @@
 pub mod errorkind;
 pub mod grammar;
 mod job_bindings;
+pub mod localids;
 pub mod notification;
 pub mod storage;
 pub mod storagereport;

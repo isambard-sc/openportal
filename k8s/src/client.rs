@@ -12,6 +12,7 @@ use anyhow::Context;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use greatwestern::grammar::{ProjectMapping, UserMapping};
+use greatwestern::localids::LocalUserIds;
 use greatwestern::tenancy::TenancyAddon;
 use kube::api::{Api, DeleteParams, Patch, PatchParams};
 use kube::config::{AuthInfo, Kubeconfig};
@@ -318,8 +319,9 @@ pub async fn set_project_tenancy_addon(
 }
 
 /// Idempotently create (or update) the `ProjectUser` custom resource for
-/// this mapping, named `<project>-<username>` by convention.
-pub async fn upsert_project_user(mapping: &UserMapping) -> Result<(), Error> {
+/// this mapping, named `<project>-<username>` by convention, recording the
+/// user's numeric ids as resolved by the filesystem agent.
+pub async fn upsert_project_user(mapping: &UserMapping, ids: &LocalUserIds) -> Result<(), Error> {
     let username = mapping.local_user().unix()?;
     let name = project_user_name(mapping.local_group(), username);
 
@@ -328,8 +330,9 @@ pub async fn upsert_project_user(mapping: &UserMapping) -> Result<(), Error> {
         ProjectUserSpec {
             project: mapping.local_group().to_string(),
             username: username.to_string(),
-            uid: None,
-            gid: None,
+            uid: Some(ids.uid()),
+            gid: Some(ids.user_gid()),
+            project_gid: Some(ids.project_gid()),
             blocked: None,
         },
     );

@@ -7,11 +7,12 @@ use chrono::Utc;
 use greatwestern::grammar::Instruction::{
     AddLocalProject, AddLocalUser, ClearLocalProjectQuota, ClearLocalUserQuota, GetLocalHomeDir,
     GetLocalProjectDirs, GetLocalProjectQuota, GetLocalProjectQuotas, GetLocalStorageReport,
-    GetLocalUserDirs, GetLocalUserQuota, GetLocalUserQuotas, IsLocalProjectAdded,
+    GetLocalUserDirs, GetLocalUserIds, GetLocalUserQuota, GetLocalUserQuotas, IsLocalProjectAdded,
     IsLocalProjectRemoved, IsLocalUserAdded, IsLocalUserRemoved, RemoveLocalProject,
     RemoveLocalUser, SetLocalProjectQuota, SetLocalUserQuota,
 };
 use greatwestern::grammar::{Date, ProjectMapping, UserMapping};
+use greatwestern::localids::LocalUserIds;
 use greatwestern::storage::{Quota, Volume};
 use greatwestern::storagereport::ProjectStorageReport;
 use greatwestern::Hpc;
@@ -185,6 +186,9 @@ async fn main() -> Result<()> {
                     }
 
                     job.completed(user_dirs)
+                },
+                GetLocalUserIds(mapping) => {
+                    job.completed(get_local_user_ids(&mapping).await?)
                 },
                 GetLocalProjectDirs(mapping) => {
                     let config = cache::get_filesystem_config().await?;
@@ -407,6 +411,29 @@ async fn are_user_dirs_added(mapping: &UserMapping) -> Result<bool, Error> {
 ///
 async fn are_user_dirs_removed(mapping: &UserMapping) -> Result<bool, Error> {
     all_paths_match(&user_paths(mapping).await?, false).await
+}
+
+///
+/// Resolve the numeric ids of a local user as this host's name service sees
+/// them - the same ids that the directories created here are owned by, and
+/// that the filesystem's quotas are keyed on.
+///
+/// The user's private group is the group with the same name as the user
+/// (a FreeIPA user-private-group, whose GID equals the UID). The project GID
+/// is that of the mapping's local group.
+///
+/// A name that does not resolve yet is reported as `NotFound`, which a
+/// caller that has only just created the account should treat as "try again
+/// shortly" - the name service on this host may not have caught up.
+///
+async fn get_local_user_ids(mapping: &UserMapping) -> Result<LocalUserIds, Error> {
+    let username = mapping.local_user().unix()?;
+
+    let uid = nameservice::resolve_uid(username).await?;
+    let user_gid = nameservice::resolve_gid(username).await?;
+    let project_gid = nameservice::resolve_gid(mapping.local_group()).await?;
+
+    Ok(LocalUserIds::new(uid, user_gid, project_gid))
 }
 
 ///

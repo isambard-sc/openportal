@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Fixed
+
+- **The release build can publish again.** `helm registry login` was given
+  `ghcr.io/<owner>`, which current Helm rejects ("invalid registry") because it
+  accepts only a registry hostname. It now logs in to `ghcr.io`. This is why
+  0.94.1 was tagged but never published: no images, charts, binaries or GitHub
+  release exist for it. This release carries the 0.94.1 changes below.
+
 ## [0.94.1] - 2026-11-11
 
 ### Fixed

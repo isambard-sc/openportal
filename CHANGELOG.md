@@ -18,13 +18,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   set_user_quota first", and no default quota was set. Retries then skipped the
   directory as "already there", so it was never fixed. The Lustre engine now has
   an `unassigned_project_ids` option (default `[0, 1]`) listing the IDs that mean
-  "not assigned yet"; such directories are treated as having no quota.
+  "not assigned yet"; such directories are treated as having no quota. Two
+  things to know: a directory carrying project ID `1` used to be reported as a
+  mismatch and is now re-tagged with its own quota ID, so a site that uses `1`
+  as a real quota ID must set `unassigned_project_ids` explicitly; and only IDs
+  carrying the inherit flag are recognised, so the filesystem roots must be
+  tagged (e.g. `lfs project -p 1 -s /scratch`) for new directories to get the
+  default quota.
 - **Directories left without a quota by the bug above heal themselves.** An
   existing directory that still carries an unassigned project ID cannot hold a
   quota of its own, so the next `add_local_user` or `add_local_project` for it
   now assigns its quota ID and applies the default, rather than skipping it as
   "already there". Directories that already have their own quota ID are still
-  never given the default again.
+  never given the default again. Assigning the ID walks the whole directory
+  tree inside that job, and the check itself costs one extra `lfs project -d`
+  per existing directory on every repeated `add_local_user` /
+  `add_local_project`.
 - **A configured quota is no longer reported as unlimited when only some of a
   volume's directories carry the quota ID.** If any directory has the expected
   ID, the real quota is now read, so a partly-assigned project cannot have a

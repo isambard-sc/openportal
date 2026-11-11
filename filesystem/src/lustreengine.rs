@@ -387,12 +387,18 @@ pub struct LustreEngineConfig {
     /// directory yet" (default: `[0, 1]`).
     ///
     /// A new directory inherits the project ID of its parent when the parent has
-    /// the inherit (`P`) flag set. `0` is Lustre's own default. Sites commonly tag
-    /// the filesystem roots (e.g. `/scratch`, `/projects`) with a catch-all project
-    /// such as `1`, so every newly created user or project directory starts out
-    /// with that ID. A directory still carrying one of these IDs has never been
-    /// given its own quota ID, so it is treated as uninitialised: it has no quota
-    /// of its own, and the volume's default quota may be applied to it.
+    /// the inherit (`P`) flag set. Sites commonly tag the filesystem roots (e.g.
+    /// `/scratch`, `/projects`) with a catch-all project such as `1`, so every
+    /// newly created user or project directory starts out with that ID. A
+    /// directory still carrying one of these IDs has never been given its own
+    /// quota ID, so it is treated as uninitialised: it has no quota of its own,
+    /// and the volume's default quota may be applied to it.
+    ///
+    /// Only IDs read together with the inherit flag count. A directory under an
+    /// untagged root reads as `0 -`, which `get_lustre_id_from_dir` reports as
+    /// `None` - the same as a directory whose quota was explicitly cleared - so
+    /// it is a mismatch, not unassigned. The `0` here therefore only matches the
+    /// `0 P` state (inherit flag set, no ID chosen).
     #[serde(default = "default_unassigned_project_ids")]
     unassigned_project_ids: Vec<u64>,
 

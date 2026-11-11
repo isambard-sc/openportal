@@ -691,7 +691,7 @@ links        = [""]               # optional symlinks, one per root
 | `is_home` | boolean | auto | Whether this is the primary home volume. Auto-set to `true` when only one user volume exists. At most one user volume can be the home. |
 | `quota_engine` | string | (none) | Name of a `quota_engines` entry to use for quota management. |
 | `max_quota` | size string | unlimited | Maximum allowed quota for any user. |
-| `default_quota` | size string | unlimited | Quota applied when this agent creates a user's directory on this volume, and only if the user has no quota there yet. It is never re-applied to an existing directory, so a quota set with `set_local_user_quota` is not overwritten by a repeated `add_local_user`. |
+| `default_quota` | size string | unlimited | Quota applied when this agent creates a user's directory on this volume, and only if the user has no quota there yet. It is never re-applied to a directory that already has its own quota ID, so a quota set with `set_local_user_quota` is not overwritten by a repeated `add_local_user`. An existing directory that has never been assigned its own quota ID (on Lustre, one still carrying an ID listed in `unassigned_project_ids`) is treated as new. |
 | `mount_point` | string | (none) | Filesystem mount point (required by some quota engines). |
 | `default_inode_limit` | integer | (engine default) | Default number of files/directories allowed. |
 
@@ -732,8 +732,33 @@ projects = "{GID}"
 | `max_runners` | `4` | Maximum concurrent `lfs` commands (excluding recursive project operations). |
 | `command_timeout_secs` | `30` | Timeout in seconds for standard `lfs` commands. |
 | `recursive_timeout_secs` | `18000` | Timeout for `lfs project -srp` (recursive). Default is 5 hours to accommodate large directory trees. |
-| `unassigned_project_ids` | `[0, 1]` | Lustre project IDs that mean a directory has not been given its own quota ID yet. A new directory inherits its parent's project ID when the parent has the inherit (`P`) flag set, so if the filesystem roots are tagged with a catch-all project (e.g. `lfs project -p 1 -s /scratch`) every new directory starts with that ID. A directory carrying one of these IDs is treated as having no quota, so the volume's `default_quota` is applied to it. |
+| `unassigned_project_ids` | `[0, 1]` | Lustre project IDs that mean a directory has not been given its own quota ID yet. A new directory inherits its parent's project ID when the parent has the inherit (`P`) flag set, so if the filesystem roots are tagged with a catch-all project (e.g. `lfs project -p 1 -s /scratch`) every new directory starts with that ID. A directory carrying one of these IDs is treated as having no quota, so the volume's `default_quota` is applied to it and its own quota ID is assigned with a recursive `lfs project -srp` - on the next `add_local_user` or `add_local_project` if it already exists. Never list an ID that is used as a real quota ID by an `id_strategies` entry. See the notes below. |
 | `id_strategies` | (required) | Map of volume name → ID format string. |
+
+**Notes on `unassigned_project_ids`:**
+
+- **The roots must carry the inherit (`P`) flag.** Only a directory whose project ID
+  is shown with the `P` flag by `lfs project -d` is recognised. On a filesystem whose
+  roots are not tagged, a new directory reads as `0 -` (no inherit flag); that is
+  indistinguishable from a directory whose quota was removed with
+  `clear_local_user_quota` / `clear_local_project_quota`, so it is **not** treated as
+  unassigned and gets no default quota. Tag each root, e.g.
+  `lfs project -p 1 -s /scratch`, before using `default_quota` on it.
+- **The default treats project ID `1` as a catch-all.** Before 0.94.1 a directory
+  carrying ID `1` was reported as a mismatch; it is now re-tagged with its own quota
+  ID. If a site uses `1` as a real quota ID, set `unassigned_project_ids` explicitly.
+- **Assigning an ID to an existing directory walks its whole tree**, inside the
+  `add_local_user` / `add_local_project` job that triggered it. Recursive assignments
+  run one at a time, and the job waits for its own for up to
+  `recursive_timeout_secs`, which can outlast the job itself on a large tree. The
+  assignment carries on in the background, but the default limit may then not be
+  applied; send `set_local_user_quota` / `set_local_project_quota` once for that
+  directory.
+- **One extra `lfs project -d` per directory.** A repeated `add_local_user` or
+  `add_local_project` for directories that already exist now reads each directory's
+  project ID to make this check (bounded by `max_runners` and
+  `command_timeout_secs`). A failed read is logged and the default quota is skipped;
+  it does not fail the job.
 
 **ID strategy format strings:**
 

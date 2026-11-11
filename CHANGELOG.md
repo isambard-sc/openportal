@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Fixed
+
+- **Default quotas are applied again to new directories on Lustre whose roots
+  carry a catch-all project ID.** Since 0.93.0 the default quota is only applied
+  after reading the directory's existing quota, and that read accepted only
+  project ID `0` as "not yet assigned". A new directory inherits its parent's
+  project ID when the parent has the inherit (`P`) flag set, so on a filesystem
+  whose roots are tagged with a catch-all project (e.g. `1`) every new user and
+  project directory started at ID `1`, the read failed with "Please run
+  set_user_quota first", and no default quota was set. Retries then skipped the
+  directory as "already there", so it was never fixed. The Lustre engine now has
+  an `unassigned_project_ids` option (default `[0, 1]`) listing the IDs that mean
+  "not assigned yet"; such directories are treated as having no quota.
+- **Directories left without a quota by the bug above heal themselves.** An
+  existing directory that still carries an unassigned project ID cannot hold a
+  quota of its own, so the next `add_local_user` or `add_local_project` for it
+  now assigns its quota ID and applies the default, rather than skipping it as
+  "already there". Directories that already have their own quota ID are still
+  never given the default again.
+- **A configured quota is no longer reported as unlimited when only some of a
+  volume's directories carry the quota ID.** If any directory has the expected
+  ID, the real quota is now read, so a partly-assigned project cannot have a
+  limit set with `set_local_project_quota` overwritten by the default.
+
 ## [0.94.0] - 2026-10-08
 
 ### Added

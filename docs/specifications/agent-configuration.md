@@ -704,7 +704,7 @@ links        = [""]               # optional symlinks, one per root
 | `permissions` | string or array | `"2770"` | Octal directory permissions (SGID bit typical for shared directories). |
 | `quota_engine` | string | (none) | Quota engine to use. |
 | `max_quota` | size string | unlimited | Maximum allowed quota for any project. |
-| `default_quota` | size string | unlimited | Quota applied when this agent creates a project's directory on this volume, and only if the project has no quota there yet. It is never re-applied to an existing directory, so a quota set with `set_local_project_quota` is not overwritten by a repeated `add_local_project` or by adding a new member to the project. |
+| `default_quota` | size string | unlimited | Quota applied when this agent creates a project's directory on this volume, and only if the project has no quota there yet. It is never re-applied to a directory that already has its own quota ID, so a quota set with `set_local_project_quota` is not overwritten by a repeated `add_local_project` or by adding a new member to the project. An existing directory that has never been assigned its own quota ID (on Lustre, one still carrying an ID listed in `unassigned_project_ids`) is treated as new. |
 | `mount_point` | string | (none) | Filesystem mount point. |
 | `default_inode_limit` | integer | (engine default) | Default inode limit. |
 | `links` | array of strings | `[]` | Symlink templates to create alongside each root. Empty string = no link for that root. Placeholder: `{project}`. |
@@ -718,6 +718,7 @@ lfs_command            = "lfs"
 max_runners            = 4
 command_timeout_secs   = 30
 recursive_timeout_secs = 18000
+unassigned_project_ids = [0, 1]
 
 [quota_engines.lustre.id_strategies]
 home     = "{UID-1483800000}01"
@@ -731,6 +732,7 @@ projects = "{GID}"
 | `max_runners` | `4` | Maximum concurrent `lfs` commands (excluding recursive project operations). |
 | `command_timeout_secs` | `30` | Timeout in seconds for standard `lfs` commands. |
 | `recursive_timeout_secs` | `18000` | Timeout for `lfs project -srp` (recursive). Default is 5 hours to accommodate large directory trees. |
+| `unassigned_project_ids` | `[0, 1]` | Lustre project IDs that mean a directory has not been given its own quota ID yet. A new directory inherits its parent's project ID when the parent has the inherit (`P`) flag set, so if the filesystem roots are tagged with a catch-all project (e.g. `lfs project -p 1 -s /scratch`) every new directory starts with that ID. A directory carrying one of these IDs is treated as having no quota, so the volume's `default_quota` is applied to it. |
 | `id_strategies` | (required) | Map of volume name → ID format string. |
 
 **ID strategy format strings:**

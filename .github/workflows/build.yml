@@ -29,7 +29,7 @@ jobs:
           ref: ${{ inputs.ref || '' }}
           fetch-depth: 0  # This is needed so that git-describe works properly to set the version
       - name: install MUSL
-        run: sudo apt install musl-tools
+        run: ./scripts/ci-install-musl.sh
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -307,7 +307,7 @@ jobs:
           ref: ${{ inputs.ref || '' }}
           fetch-depth: 0
       - name: Install MUSL
-        run: sudo apt install musl-tools
+        run: ./scripts/ci-install-musl.sh
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

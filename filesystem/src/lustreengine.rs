@@ -1793,6 +1793,47 @@ impl LustreEngine {
         Ok(false)
     }
 
+    /// Give this user's directories on the volume their quota ID, **without**
+    /// touching the quota limit.
+    ///
+    /// Only directories that still carry an unassigned project ID (see
+    /// `unassigned_project_ids`) are tagged. One that already has the quota ID is
+    /// left alone, and so is one with some other ID or none at all - that was
+    /// either cleared deliberately or belongs to someone else. This is what brings
+    /// a straggler under a limit that is already set, where `set_user_quota`
+    /// would have to rewrite that limit to do the same.
+    ///
+    /// Returns `false` if a recursive assignment is still running in the
+    /// background when the wait for it ends.
+    pub async fn assign_user_ids(
+        &self,
+        mapping: &UserMapping,
+        volume: &Volume,
+        volume_config: &UserVolumeConfig,
+        expires: &chrono::DateTime<Utc>,
+    ) -> Result<bool, Error> {
+        let quota_id = self.compute_user_quota_id(volume, mapping).await?;
+
+        let mut all_set = true;
+
+        for path_config in volume_config.path_configs() {
+            let path = path_config.path(mapping.clone().into())?;
+            let current_lustre_id = self.get_lustre_id_from_dir(&path, expires).await?;
+
+            if let LustreIdState::Unassigned(_) = classify_lustre_id(
+                current_lustre_id,
+                quota_id,
+                self.config.unassigned_project_ids(),
+            ) {
+                if !self.assign_lustre_id(&path, quota_id, expires).await? {
+                    all_set = false;
+                }
+            }
+        }
+
+        Ok(all_set)
+    }
+
     pub async fn get_user_quota(
         &self,
         mapping: &UserMapping,
@@ -1921,6 +1962,47 @@ impl LustreEngine {
         }
 
         Ok(false)
+    }
+
+    /// Give this project's directories on the volume their quota ID, **without**
+    /// touching the quota limit.
+    ///
+    /// Only directories that still carry an unassigned project ID (see
+    /// `unassigned_project_ids`) are tagged. One that already has the quota ID is
+    /// left alone, and so is one with some other ID or none at all - that was
+    /// either cleared deliberately or belongs to someone else. This is what brings
+    /// a straggler under a limit that is already set, where `set_project_quota`
+    /// would have to rewrite that limit to do the same.
+    ///
+    /// Returns `false` if a recursive assignment is still running in the
+    /// background when the wait for it ends.
+    pub async fn assign_project_ids(
+        &self,
+        mapping: &ProjectMapping,
+        volume: &Volume,
+        volume_config: &ProjectVolumeConfig,
+        expires: &chrono::DateTime<Utc>,
+    ) -> Result<bool, Error> {
+        let quota_id = self.compute_project_quota_id(volume, mapping).await?;
+
+        let mut all_set = true;
+
+        for path_config in volume_config.path_configs() {
+            let path = path_config.project_path(mapping)?;
+            let current_lustre_id = self.get_lustre_id_from_dir(&path, expires).await?;
+
+            if let LustreIdState::Unassigned(_) = classify_lustre_id(
+                current_lustre_id,
+                quota_id,
+                self.config.unassigned_project_ids(),
+            ) {
+                if !self.assign_lustre_id(&path, quota_id, expires).await? {
+                    all_set = false;
+                }
+            }
+        }
+
+        Ok(all_set)
     }
 
     pub async fn get_project_quota(
@@ -2386,6 +2468,109 @@ mod tests {
             }
             other => panic!("expected a Lustre engine, got {:?}", other),
         }
+    }
+
+    /// `assign_project_ids` must tag only the directories that still carry an
+    /// unassigned ID - not one that already has the quota ID, not one that has
+    /// been cleared, and not one carrying somebody else's ID.
+    ///
+    /// `lfs` is replaced by `tests/fake_lfs.sh`, which keeps each directory's
+    /// project line in a file and logs every recursive assignment it is asked for.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn test_assign_project_ids_only_tags_unassigned() {
+        let dir = std::env::temp_dir().join(format!("op-fake-lfs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake_lfs.sh");
+
+        let root = |name: &str| format!("{}/{}", dir.display(), name);
+        let set = |name: &str, id: &str, flag: &str| {
+            let path = format!("{}/proj", root(name));
+            let status = std::process::Command::new("sh")
+                .arg(script)
+                .arg(&dir)
+                .args(["seed", &path, id, flag])
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        let read = |name: &str| {
+            let path = format!("{}/proj", root(name));
+            std::fs::read_to_string(dir.join(path.replace('/', "_"))).unwrap()
+        };
+
+        // the group "root" has GID 0, so the quota ID is 500
+        set("has_id", "500", "P");
+        set("inherited", "1", "P");
+        set("cleared", "0", "-");
+        set("foreign", "777", "P");
+
+        let config: LustreEngineConfig = toml::from_str(&format!(
+            r#"
+            lfs_command = "sh {} {}"
+            projects = "{{GID+500}}"
+            "#,
+            script,
+            dir.display()
+        ))
+        .unwrap();
+
+        let volume_config: ProjectVolumeConfig = toml::from_str(&format!(
+            r#"
+            roots = ["{}", "{}", "{}", "{}"]
+            quota_engine = "lustre"
+            mount_point = "{}"
+            "#,
+            root("has_id"),
+            root("inherited"),
+            root("cleared"),
+            root("foreign"),
+            dir.display()
+        ))
+        .unwrap();
+
+        let volume = Volume::new("projects");
+        let mapping = ProjectMapping::parse("proj.portal:root").unwrap();
+        let expires = Utc::now() + chrono::Duration::minutes(5);
+
+        let engine = LustreEngine::new(config).unwrap();
+        engine.initialize().await.unwrap();
+
+        assert!(engine
+            .project_dirs_unassigned(&mapping, &volume, &volume_config, &expires)
+            .await
+            .unwrap());
+
+        assert!(engine
+            .assign_project_ids(&mapping, &volume, &volume_config, &expires)
+            .await
+            .unwrap());
+
+        // exactly one recursive assignment, for the directory with the inherited ID
+        let log = std::fs::read_to_string(dir.join("assigned.log")).unwrap();
+        assert_eq!(log, format!("500 {}/proj\n", root("inherited")));
+
+        assert!(read("has_id").starts_with("500 P "));
+        assert!(read("inherited").starts_with("500 P "));
+        assert!(read("cleared").starts_with("0 - "));
+        assert!(read("foreign").starts_with("777 P "));
+
+        assert!(!engine
+            .project_dirs_unassigned(&mapping, &volume, &volume_config, &expires)
+            .await
+            .unwrap());
+
+        // nothing left to do, so a second call assigns nothing
+        assert!(engine
+            .assign_project_ids(&mapping, &volume, &volume_config, &expires)
+            .await
+            .unwrap());
+        let log = std::fs::read_to_string(dir.join("assigned.log")).unwrap();
+        assert_eq!(log.lines().count(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

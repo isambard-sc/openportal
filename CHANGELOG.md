@@ -37,7 +37,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - **A configured quota is no longer reported as unlimited when only some of a
   volume's directories carry the quota ID.** If any directory has the expected
   ID, the real quota is now read, so a partly-assigned project cannot have a
-  limit set with `set_local_project_quota` overwritten by the default.
+  limit set with `set_local_project_quota` overwritten by the default. A
+  directory of that volume which still lacks the quota ID is now given it
+  (the ID only - the limit is not rewritten), so that it counts against the
+  limit rather than staying outside it indefinitely.
 
 ## [0.94.0] - 2026-10-08
 

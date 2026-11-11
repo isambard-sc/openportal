@@ -512,6 +512,10 @@ async fn create_project_dirs_and_links(
 ///     lets an earlier attempt that failed to apply the default be completed, and
 ///  2. the project has no quota on that volume yet.
 ///
+/// If the first holds but a quota is already set, the limit is left alone and only
+/// the quota ID is assigned to the directories that lack it, so that they count
+/// against that limit.
+///
 /// A quota that cannot be read is **not** taken to be absent: an `lfs quota` that fails
 /// or times out leaves the existing limit unknown, and overwriting it on that basis is
 /// exactly the data loss this guards against. Such a volume is skipped and logged, as
@@ -580,6 +584,32 @@ async fn set_default_project_quotas(
                         volume,
                         quota.limit()
                     );
+
+                    // The limit stays as it is, but a directory that reached this
+                    // point without the quota ID (a straggler from an earlier
+                    // attempt, or one this call just created next to an existing
+                    // one) is not counted against it. Tag it - the ID only, so the
+                    // limit above is not rewritten.
+                    match assign_project_ids(mapping, &volume, expires).await {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            tracing::warn!(
+                                "The quota ID for project {} on volume {} is still being \
+                                 assigned in the background.",
+                                mapping.project(),
+                                volume
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to assign the quota ID for project {} on volume {}: {}",
+                                mapping.project(),
+                                volume,
+                                e
+                            );
+                        }
+                    }
+
                     continue;
                 }
             }
@@ -745,6 +775,32 @@ async fn set_default_user_quotas(
                         volume,
                         quota.limit()
                     );
+
+                    // The limit stays as it is, but a directory that reached this
+                    // point without the quota ID (a straggler from an earlier
+                    // attempt, or one this call just created next to an existing
+                    // one) is not counted against it. Tag it - the ID only, so the
+                    // limit above is not rewritten.
+                    match assign_user_ids(mapping, &volume, expires).await {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            tracing::warn!(
+                                "The quota ID for user {} on volume {} is still being \
+                                 assigned in the background.",
+                                mapping.local_user(),
+                                volume
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to assign the quota ID for user {} on volume {}: {}",
+                                mapping.local_user(),
+                                volume,
+                                e
+                            );
+                        }
+                    }
+
                     continue;
                 }
             }
@@ -953,6 +1009,31 @@ async fn project_dirs_unassigned(
 }
 
 ///
+/// Give the project's directories on a specific volume their quota ID, without
+/// changing the quota limit. Returns false if the assignment is still running.
+///
+async fn assign_project_ids(
+    mapping: &greatwestern::grammar::ProjectMapping,
+    volume: &greatwestern::storage::Volume,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    let config = cache::get_filesystem_config().await?;
+
+    let volume_config = config.get_project_volume(volume)?;
+
+    let Some(engine_name) = volume_config.quota_engine_name() else {
+        return Ok(true);
+    };
+
+    let engine = config.get_quota_engine(engine_name)?;
+
+    engine
+        .assign_project_ids(mapping, volume, &volume_config, expires)
+        .await
+        .map_err(|e| Error::Failed(e.to_string()))
+}
+
+///
 /// Get the storage quota for a project on a specific volume
 ///
 pub async fn get_project_quota(
@@ -1125,6 +1206,31 @@ async fn user_dirs_unassigned(
 
     engine
         .user_dirs_unassigned(mapping, volume, &volume_config, expires)
+        .await
+        .map_err(|e| Error::Failed(e.to_string()))
+}
+
+///
+/// Give the user's directories on a specific volume their quota ID, without
+/// changing the quota limit. Returns false if the assignment is still running.
+///
+async fn assign_user_ids(
+    mapping: &greatwestern::grammar::UserMapping,
+    volume: &greatwestern::storage::Volume,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    let config = cache::get_filesystem_config().await?;
+
+    let volume_config = config.get_user_volume(volume)?;
+
+    let Some(engine_name) = volume_config.quota_engine_name() else {
+        return Ok(true);
+    };
+
+    let engine = config.get_quota_engine(engine_name)?;
+
+    engine
+        .assign_user_ids(mapping, volume, &volume_config, expires)
         .await
         .map_err(|e| Error::Failed(e.to_string()))
 }

@@ -234,6 +234,51 @@ impl QuotaEngineConfig {
     }
 
     ///
+    /// Give a user's directories on this volume their quota ID without changing the
+    /// quota limit. Returns false if the assignment is still running. Only Lustre
+    /// tags directories; the other engines have nothing to do, so this is true.
+    ///
+    pub async fn assign_user_ids(
+        &self,
+        mapping: &UserMapping,
+        volume: &Volume,
+        volume_config: &UserVolumeConfig,
+        expires: &chrono::DateTime<Utc>,
+    ) -> Result<bool, Error> {
+        match self {
+            QuotaEngineConfig::Lustre(config) => {
+                let engine = LustreEngine::new(config.clone())?;
+                Ok(engine
+                    .assign_user_ids(mapping, volume, volume_config, expires)
+                    .await?)
+            }
+            QuotaEngineConfig::Linux(_) | QuotaEngineConfig::Fake(_) => Ok(true),
+        }
+    }
+
+    ///
+    /// Give a project's directories on this volume their quota ID without changing
+    /// the quota limit - see `assign_user_ids`.
+    ///
+    pub async fn assign_project_ids(
+        &self,
+        mapping: &ProjectMapping,
+        volume: &Volume,
+        volume_config: &ProjectVolumeConfig,
+        expires: &chrono::DateTime<Utc>,
+    ) -> Result<bool, Error> {
+        match self {
+            QuotaEngineConfig::Lustre(config) => {
+                let engine = LustreEngine::new(config.clone())?;
+                Ok(engine
+                    .assign_project_ids(mapping, volume, volume_config, expires)
+                    .await?)
+            }
+            QuotaEngineConfig::Linux(_) | QuotaEngineConfig::Fake(_) => Ok(true),
+        }
+    }
+
+    ///
     /// Clear a user quota
     ///
     pub async fn clear_user_quota(

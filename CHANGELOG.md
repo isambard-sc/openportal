@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.94.2] - 2026-11-11
+
 ### Fixed
 
 - **The release build can publish again.** `helm registry login` was given
@@ -2683,6 +2685,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.94.2]: https://github.com/isambard-sc/openportal/releases/tag/0.94.2
 [0.94.1]: https://github.com/isambard-sc/openportal/releases/tag/0.94.1
 [0.94.0]: https://github.com/isambard-sc/openportal/releases/tag/0.94.0
 [0.93.0]: https://github.com/isambard-sc/openportal/releases/tag/0.93.0

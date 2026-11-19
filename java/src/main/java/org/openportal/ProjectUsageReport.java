@@ -275,8 +275,20 @@ public final class ProjectUsageReport implements OpenPortalType {
         return this;
     }
 
-    /** Add to one day's report, summing with whatever is already there. */
+    /**
+     * Add to one day's report, summing with whatever is already there.
+     *
+     * <p>A day with no report yet takes this one as it is, rather than summing
+     * it with an empty day: an empty day is not complete, so the sum would
+     * have turned a complete day incomplete. That made every day that
+     * {@link #plus} and {@link #combine} brought in from a second report
+     * incomplete, unlike the Rust side, which inserts it unchanged.
+     */
     public ProjectUsageReport addReport(LocalDate date, DailyProjectUsageReport report) {
+        if (!reports().path(date.toString()).isObject()) {
+            return setReport(date, report.copy());
+        }
+
         return setReport(date, getReport(date).plus(report));
     }
 

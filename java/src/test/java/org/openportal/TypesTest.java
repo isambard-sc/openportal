@@ -611,6 +611,55 @@ class TypesTest {
         assertEquals(Json.parse(PROJECT_REPORT_JSON), report.toJson());
     }
 
+    private static DailyProjectUsageReport day(long hours, boolean complete) {
+        DailyProjectUsageReport day = new DailyProjectUsageReport();
+
+        if (hours > 0) {
+            day.addUsage("alice", Usage.fromHours(hours));
+        }
+
+        return complete ? day.setComplete() : day;
+    }
+
+    @Test
+    void a_summed_day_is_complete_exactly_when_both_parts_are() {
+        ProjectIdentifier project = ProjectIdentifier.parse("myaward1.allocator");
+        LocalDate date = LocalDate.of(2027, 3, 31);
+
+        // Two complete parts of a day, including two empty ones, stay complete.
+        for (long hours : new long[] {0, 1}) {
+            ProjectUsageReport report = new ProjectUsageReport(project)
+                    .addReport(date, day(hours, true))
+                    .addReport(date, day(hours, true));
+            assertTrue(report.isComplete());
+
+            report.addReport(date, day(hours, false));
+            assertFalse(report.isComplete());
+        }
+
+        // A day added under a date the report does not have yet keeps its own
+        // completeness - it used to be summed with an empty, incomplete day.
+        assertTrue(new ProjectUsageReport(project)
+                .addReport(date, day(1, true)).isComplete());
+
+        // And so through `plus` and `combine`, at both levels.
+        ProjectUsageReport first = new ProjectUsageReport(project)
+                .addReport(date, day(1, true));
+        ProjectUsageReport second = new ProjectUsageReport(project)
+                .addReport(date, day(2, true))
+                .addReport(date.minusDays(1), day(3, true));
+
+        ProjectUsageReport combined = ProjectUsageReport.combine(List.of(first, second));
+        assertTrue(combined.isComplete());
+        assertEquals(Usage.fromHours(6), combined.totalUsage());
+
+        UsageReport portal = UsageReport.combine(List.of(
+                new UsageReport(new PortalIdentifier("allocator")).setReport(first),
+                new UsageReport(new PortalIdentifier("allocator")).setReport(second)));
+        assertTrue(portal.getReport(project).isComplete());
+        assertEquals(Usage.fromHours(6), portal.totalUsage());
+    }
+
     @Test
     void a_report_a_site_builds_carries_the_two_fields_a_0_92_peer_requires() {
         DailyProjectUsageReport day = new DailyProjectUsageReport()

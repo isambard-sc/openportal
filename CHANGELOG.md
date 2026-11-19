@@ -63,6 +63,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- **Summing two parts of a day keeps it complete when both parts are.**
+  Adding one `DailyProjectUsageReport` to another (`+`, `+=`, and so
+  `ProjectUsageReport.add_report` on a date that already has a report,
+  `combine` and adding two reports) always gave an incomplete day. A site that
+  built a day from two settled parts could never report it settled, so the
+  awarding portal kept asking for it. The sum is now complete exactly when
+  both parts are. The Java client had already summed days this way, but its
+  `addReport` turned a complete day added under a new date incomplete. That
+  affected `plus` and `combine` at both report levels, and is fixed too.
 - **A `bool` result reaches Python as a `bool`.** `Job.result` returned `0`/`1`
   for a `bool` result. That compared equal to `False`/`True` but failed an
   `is` check and printed as a number.

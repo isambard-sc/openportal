@@ -2423,7 +2423,12 @@ impl std::ops::Add<DailyProjectUsageReport> for DailyProjectUsageReport {
             new_report.add_reservation_jobs(reservation, *count);
         }
 
-        new_report.is_complete = false; // combine reports are never complete
+        // Complete exactly when both parts are: a total over figures that
+        // will not change will not change either, and a total that includes
+        // an open part is itself provisional. Forcing `false` here meant a
+        // site summing two settled parts of a day could never report it
+        // settled, so the awarding portal kept asking for it.
+        new_report.is_complete = self.is_complete && other.is_complete;
 
         new_report
     }
@@ -2553,7 +2558,8 @@ impl std::ops::AddAssign<DailyProjectUsageReport> for DailyProjectUsageReport {
             self.add_reservation_jobs(reservation, *count);
         }
 
-        self.is_complete = false; // combine reports are never complete
+        // See `Add` above: complete exactly when both parts are.
+        self.is_complete = self.is_complete && other.is_complete;
     }
 }
 
@@ -5279,6 +5285,74 @@ impl Allocation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn day(seconds: u64, complete: bool) -> DailyProjectUsageReport {
+        let mut report = DailyProjectUsageReport::default();
+
+        if seconds > 0 {
+            report.add_usage("alice", Usage::new(seconds));
+        }
+
+        if complete {
+            report.set_complete();
+        }
+
+        report
+    }
+
+    /// Summing two parts of a day is complete exactly when both parts are.
+    /// It used to be forced incomplete, so a site that built a day from two
+    /// settled parts could never report it settled, and the awarding portal
+    /// kept asking for it.
+    #[test]
+    fn test_summed_days_are_complete_exactly_when_both_parts_are() {
+        for (a, b) in [(true, true), (true, false), (false, true), (false, false)] {
+            for seconds in [0, 3600] {
+                let sum = day(seconds, a) + day(seconds, b);
+                assert_eq!(sum.is_complete(), a && b, "{a} + {b} ({seconds}s)");
+                assert_eq!(sum.total_usage(), Usage::new(2 * seconds));
+
+                let mut assigned = day(seconds, a);
+                assigned += day(seconds, b);
+                assert_eq!(assigned.is_complete(), a && b, "{a} += {b} ({seconds}s)");
+            }
+        }
+    }
+
+    /// The same through the report-level calls that a site portal uses:
+    /// `add_report` on a date that already has a report, and `combine`.
+    #[test]
+    fn test_adding_to_a_day_keeps_it_complete_when_both_parts_are() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let project = ProjectIdentifier::parse("myaward1.allocator").unwrap();
+            let date = Date::parse("2027-03-31").unwrap();
+
+            let mut report = ProjectUsageReport::new(&project);
+            report.add_report(&date, &day(3600, true));
+            report.add_report(&date, &day(0, true));
+            assert!(report.is_complete());
+            assert_eq!(report.total_usage(), Usage::new(3600));
+
+            report.add_report(&date, &day(60, false));
+            assert!(!report.is_complete());
+
+            let mut first = ProjectUsageReport::new(&project);
+            first.add_report(&date, &day(3600, true));
+            let mut second = ProjectUsageReport::new(&project);
+            second.add_report(&date, &day(1800, true));
+            let other = Date::parse("2027-03-30").unwrap();
+            second.add_report(&other, &day(10, true));
+
+            let combined = ProjectUsageReport::combine(&[first.clone(), second.clone()]).unwrap();
+            assert!(combined.is_complete());
+            assert_eq!(combined.total_usage(), Usage::new(5410));
+
+            let combined =
+                UsageReport::combine(&[first.to_usage_report(), second.to_usage_report()]).unwrap();
+            assert!(combined.get_report(&project).is_complete());
+        }
+    }
 
     /// A daily report with both a base and a requeue figure, as `op-slurm`
     /// builds one: two jobs' worth of base usage and three superseded attempts.

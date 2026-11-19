@@ -432,8 +432,8 @@ class TypesTest {
                  ]}""");
 
         assertEquals(
-                List.of(SpendProfileEntry.of("2027-01-01", "100 NHR"),
-                        SpendProfileEntry.of("2027-07-01", "300 NHR")),
+                List.of(SpendProfileEntry.minimum("2027-01-01", "100 NHR"),
+                        SpendProfileEntry.minimum("2027-07-01", "300 NHR")),
                 award.spendProfile().orElseThrow());
 
         assertEquals("{\"from\":\"2027-01-01\",\"minimum\":\"100 NHR\"}",
@@ -451,17 +451,72 @@ class TypesTest {
     @Test
     void a_spend_profile_refuses_two_minimums_for_one_day() {
         assertThrows(IllegalArgumentException.class, () -> new AwardDetails().setSpendProfile(
-                List.of(SpendProfileEntry.of("2027-01-01", "100 NHR"),
-                        SpendProfileEntry.of("2027-01-01", "200 NHR"))));
+                List.of(SpendProfileEntry.minimum("2027-01-01", "100 NHR"),
+                        SpendProfileEntry.minimum("2027-01-01", "200 NHR"))));
 
         assertThrows(IllegalArgumentException.class, () -> AwardDetails.fromJson("""
-                {"spend_profile": [{"from": "2027-01-01"}]}"""));
+                {"spend_profile": [{"minimum": "100 NHR"}]}"""));
+    }
+
+    @Test
+    void a_spend_profile_entry_sets_a_minimum_a_maximum_both_or_neither() {
+        AwardDetails award = AwardDetails.fromJson("""
+                {"spend_profile": [
+                   {"from": "2027-01-01", "minimum": "100 NHR", "maximum": "100 NHR"},
+                   {"from": "2027-04-01", "minimum": "100 NHR", "maximum": "300 NHR"},
+                   {"from": "2027-07-01", "maximum": "300 NHR"},
+                   {"from": "2027-08-01", "minimum": "5 NHR"},
+                   {"from": "2027-09-01"},
+                   {"from": "2027-10-01"}
+                 ]}""");
+
+        // Printed as words, the same as the Rust side, so an entry with no
+        // controls reads as what it means.
+        assertEquals(List.of(
+                        "from 2027-01-01: spend exactly 100 NHR",
+                        "from 2027-04-01: spend at least 100 NHR and at most 300 NHR",
+                        "from 2027-07-01: spend at most 300 NHR",
+                        "from 2027-08-01: spend at least 5 NHR",
+                        "from 2027-09-01: no spend controls",
+                        "from 2027-10-01: no spend controls"),
+                award.spendProfile().orElseThrow().stream()
+                        .map(SpendProfileEntry::toString).toList());
+
+        // Nothing carries over, and redundant entries are kept as sent.
+        assertTrue(award.spendProfile().orElseThrow().get(3).maximumSpend().isEmpty());
+        assertTrue(award.spendProfile().orElseThrow().get(4).hasNoControls());
+
+        // An unset control is left out of the wire form, as the Rust side does.
+        assertEquals("{\"from\":\"2027-09-01\"}",
+                award.toJson().get("spend_profile").get(4).toString());
+        assertEquals(award, AwardDetails.fromJson(award.toString()));
+    }
+
+    @Test
+    void a_spend_profile_entry_refuses_what_would_mean_two_things() {
+        // "none" as a control could mean no limit or nothing.
+        assertThrows(IllegalArgumentException.class,
+                () -> SpendProfileEntry.maximum("2027-01-01", "none"));
+        // A misspelled control must not read as an entry with no controls.
+        assertThrows(IllegalArgumentException.class, () -> AwardDetails.fromJson("""
+                {"spend_profile": [{"from": "2027-01-01", "maximun": "100 NHR"}]}"""));
+        // A minimum and maximum must be comparable, and consistent.
+        assertThrows(IllegalArgumentException.class,
+                () -> SpendProfileEntry.of("2027-01-01", "100 NHR", "400 GPUHR"));
+        assertThrows(IllegalArgumentException.class,
+                () -> SpendProfileEntry.of("2027-01-01", "100 NHR", "99 NHR"));
+
+        // Equal is an exact spend, and a cap of zero is a period with none.
+        assertEquals("from 2027-01-01: spend exactly 0 NHR",
+                SpendProfileEntry.of("2027-01-01", "0 NHR", "0 NHR").toString());
+        assertEquals("from 2027-01-01: spend at most 0 NHR",
+                SpendProfileEntry.maximum("2027-01-01", "0 NHR").toString());
     }
 
     @Test
     void merging_replaces_the_spend_profile_and_keeps_it_when_unmentioned() {
         AwardDetails held = new AwardDetails().setSpendProfile(
-                List.of(SpendProfileEntry.of("2027-01-01", "100 NHR")));
+                List.of(SpendProfileEntry.minimum("2027-01-01", "100 NHR")));
 
         assertEquals(held.spendProfile(), held.merge(new AwardDetails()).spendProfile());
 

@@ -302,7 +302,7 @@ enabling partial updates. This type is also accepted under the legacy name
   "earliest_approve":   "<RFC 3339 UTC>",
   "membership_control": "<open|members_only|roles_only|locked>",
   "allowed_domains":    ["<domain_pattern>", ...],
-  "spend_profile":      [ { "from": "<YYYY-MM-DD>", "minimum": "<size> <units>" }, ... ]
+  "spend_profile":      [ { "from": "<YYYY-MM-DD>", "minimum": "<size> <units>", "maximum": "<size> <units>" }, ... ]
 }
 ```
 
@@ -363,18 +363,25 @@ Use `"No allocation"` or `"none"` to represent no allocation.
 a single-level wildcard (`"*.example.com"`). `null` means all domains are
 permitted; `[]` means no domains are permitted.
 
-**`spend_profile`**: the least that should be spent over each period of the
-award, as dated absolute minimums. By convention between the portals, each entry
-applies from its `from` date up to, but not including, the next entry's, and the
-last until `end_date`; the minimums need not add up to the allocation.
-OpenPortal **carries this, and does not interpret it** - shortfalls, carry-over
-and units are for the two portals to agree. It checks only that every `from` is
-a valid date, every `minimum` a valid allocation, and that no two entries share
-a date (refused); entries are held sorted by date. Omitted when absent, which
-means no profile; `[]` explicitly removes one. On `merge` / `update_award` a
-profile present in the incoming object replaces the held one wholesale. An agent
-that predates the field drops it when re-serialising an award, so ask
-`is_feature_supported award_spend_profiles` before relying on one. See
+**`spend_profile`**: the controls on spending over each period of the award.
+Each entry sets, from its `from` date, an optional `minimum` (the least that
+should be spent - "use it or lose it"), an optional `maximum` (a cap), both, or
+neither. By convention between the portals, each entry applies from its `from`
+date up to, but not including, the next entry's, and the last until `end_date`.
+**Each entry describes only its own period: nothing carries over**, so a control
+an entry leaves out does not apply in its period, and an entry with neither
+(`{"from": "2027-10-01"}`) means no controls from that date. OpenPortal
+**carries this, and does not interpret it** - shortfalls, caps and units are for
+the two portals to agree. It refuses only what would make the data mean two
+things: an invalid date or allocation, an empty allocation (`"none"`) as a
+control, a minimum and maximum in different units or with the maximum below the
+minimum, an unknown field in an entry, and two entries with the same date.
+Entries are held sorted by date and otherwise kept exactly as sent. Omitted when
+absent, which means no profile; `[]` explicitly removes one. On `merge` /
+`update_award` a profile present in the incoming object replaces the held one
+wholesale. An agent that predates the field drops it when re-serialising an
+award, so ask `is_feature_supported award_spend_minimums` (or
+`award_spend_maximums`) before relying on one. See
 `docs/plans/award-spend-profiles-and-feature-discovery-design.md`.
 
 ---
@@ -1421,8 +1428,8 @@ create_project myproject.waldur {"name":"My Project","template":"cpu-cluster","a
 # Sync available cluster offerings
 sync_offerings [portal.provider.cluster_a, portal.provider.cluster_b]
 
-# Ask whether the site behind an offering acts on award spend profiles
-submit allocator.site.cluster1 is_feature_supported award_spend_profiles
+# Ask whether the site behind an offering enforces spend caps
+submit allocator.site.cluster1 is_feature_supported award_spend_maximums
 
 # Set a local project quota with a mapped name
 set_local_project_quota myproject.waldur:hpc_myproject scratch 2TB

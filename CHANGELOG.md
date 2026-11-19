@@ -18,29 +18,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `op-freeipa` and `op-slurm`, the two agents that hold the most privileged
   credentials. Diagrams are in Mermaid, so they render on GitHub and change
   alongside the text. Linked from the README and both docs indexes.
-- **Award spend profiles.** `AwardDetails` gains an optional `spend_profile`:
-  dated absolute minimums, such as
-  `[{"from": "2027-01-01", "minimum": "100 NHR"}, ...]`, through which an
-  awarding portal tells a site how an award should be spent over time. Each
-  entry applies until the next entry's date, and the last until `end_date`.
-  OpenPortal carries the profile and does not interpret it. Shortfalls,
-  carry-over and units are for the two portals to agree. OpenPortal checks only
-  that the profile is well formed: valid dates and allocations, held in date
-  order, and no two entries for the same day. Absent means no profile, and `[]`
-  removes one. An update replaces it wholesale. Supported in the Python module
-  (`SpendProfileEntry`) and the Java client, and both site portal examples carry
-  it through `get_award`. See
+- **Award spend profiles.** `AwardDetails` gains an optional `spend_profile`,
+  through which an awarding portal tells a site how an award should be spent
+  over time. Each entry sets, from its date, an optional `minimum` ("use it or
+  lose it"), an optional `maximum` (a cap), both, or neither:
+  `[{"from": "2027-01-01", "minimum": "100 NHR", "maximum": "100 NHR"},
+  {"from": "2027-04-01", "maximum": "300 NHR"}, {"from": "2027-07-01"}]`.
+  An entry applies until the next entry's date, and the last until `end_date`.
+  Each entry describes only its own period, and nothing carries over. So an
+  entry with neither control means "no controls from this date".
+  OpenPortal carries the profile and does not interpret it. Shortfalls, caps
+  and units are for the two portals to agree. OpenPortal refuses only what
+  would make the data ambiguous:
+  - an invalid date or allocation;
+  - `"none"` as a control;
+  - a minimum and maximum in different units, or a maximum below the minimum;
+  - an unknown field in an entry;
+  - two entries for the same day.
+
+  Entries are held in date order and otherwise kept as sent. Each prints in
+  words, such as `from 2027-07-01: no spend controls`. Absent means no
+  profile, and `[]` removes one. An update replaces the profile wholesale.
+  Supported in the Python module (`SpendProfileEntry`) and the Java client,
+  and both site portal examples carry it through `get_award`. See
   [`docs/plans/award-spend-profiles-and-feature-discovery-design.md`](docs/plans/award-spend-profiles-and-feature-discovery-design.md).
 - **Feature discovery.** Two new instructions, `is_feature_supported <feature>`
   (returns `bool`) and `get_supported_features` (returns `Vec<String>`), let one
-  portal ask another what it supports - for example, whether a site acts on
-  spend profiles (`award_spend_profiles`) before relying on one. Both are
+  portal ask another what it supports before relying on it. For example, a
+  portal can ask whether a site enforces spend minimums
+  (`award_spend_minimums`) or caps (`award_spend_maximums`). They are separate
+  because a site may well do one and not the other. Both instructions are
   addressed to an offering, routed by `op-portal` and `op-bridge`, and answered
   by the site's portal software. Feature names are opaque strings agreed
-  between portals, not an enum, and only their shape is checked. An agent too old to know the
-  instructions answers with an error, which reads correctly as "not
-  supported". The well-known names are listed in the site portal API (§4.4).
-  Both site portal examples answer them, and claim nothing.
+  between portals, not an enum, and only their shape is checked. An agent too
+  old to know the instructions answers with an error, which reads correctly as
+  "not supported". The well-known names are listed in the site portal API
+  (§4.4). Both site portal examples answer them, and claim nothing.
 
 ### Fixed
 

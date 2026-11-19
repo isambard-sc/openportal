@@ -1022,9 +1022,11 @@ def get_storage_reports(job: openportal.Job) -> openportal.StorageReport:
 #: portal's business logic, not about what it can store. This example carries
 #: `AwardDetails.spend_profile` intact - it is in the stored details, so
 #: `get_award` hands it back - but it does nothing *with* it: no warnings, no
-#: forfeiting what was not spent. So it does not claim `award_spend_profiles`,
-#: and an awarding portal that asks will know to agree another way, such as
-#: sending the award in parts.
+#: forfeiting what was not spent, no stopping work at a cap. So it claims
+#: neither `award_spend_minimums` nor `award_spend_maximums`, and an awarding
+#: portal that asks will know to agree another way, such as sending the award
+#: in parts. The two are separate because a site may well enforce one and not
+#: the other - a cap maps onto scheduler limits, a minimum does not.
 #:
 #: Names are opaque, lowercase strings agreed between the portals; the well-known
 #: ones are listed in the site portal API (§4.4). Add one here only once this

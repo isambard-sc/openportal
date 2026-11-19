@@ -1418,7 +1418,7 @@ impl<'de> Deserialize<'de> for ProjectTemplate {
 
 ///
 /// The name of a feature that one portal can ask another whether it
-/// supports, e.g. `award_spend_profiles`.
+/// supports, e.g. `award_spend_maximums`.
 ///
 /// Deliberately an opaque string rather than an enum. Features are defined
 /// by convention between the portals at either end - which may define their
@@ -1426,7 +1426,7 @@ impl<'de> Deserialize<'de> for ProjectTemplate {
 /// before a new feature could even be asked about. Only the shape is checked:
 /// one to 64 characters of lowercase ASCII letters, digits, `_`, `-` and `.`,
 /// starting with a letter. A name outside that shape is refused, never
-/// normalised, so `Award_Spend_Profiles` is an error rather than a silent
+/// normalised, so `Award_Spend_Maximums` is an error rather than a silent
 /// near-miss. See `docs/plans/award-spend-profiles-and-feature-discovery-design.md`.
 ///
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -2273,31 +2273,119 @@ impl std::fmt::Display for MembershipControl {
 }
 
 ///
-/// One entry in an award's spend profile: a minimum spend that applies from a
-/// given date.
+/// One entry in an award's spend profile: the controls on spending that apply
+/// from a given date - a `minimum` ("use it or lose it"), a `maximum` (a cap),
+/// both, or neither.
 ///
 /// By convention between portals, an entry applies from its `from` date up to,
 /// but not including, the next entry's, and the last until the award's end
-/// date. OpenPortal does not interpret that - it only carries the profile intact
-/// and unambiguous. See `docs/plans/award-spend-profiles-and-feature-discovery-design.md`.
+/// date. Each entry describes only its own period: nothing carries over from
+/// the entry before, so a control the entry does not set does not apply in its
+/// period. An entry that sets neither therefore means "no controls from this
+/// date" - which is how a profile ends its controls before the award ends.
+///
+/// OpenPortal does not interpret any of that - it only carries the profile
+/// intact and unambiguous. So the only checks are on what would make an entry
+/// mean two things: an empty allocation ("none") is refused, since as a
+/// maximum it could mean "no cap" or "nothing", and when both controls are set
+/// they must be in the same units, with the maximum no less than the minimum.
+/// See `docs/plans/award-spend-profiles-and-feature-discovery-design.md`.
 ///
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(try_from = "UncheckedSpendProfileEntry")]
 #[ts(export)]
 pub struct SpendProfileEntry {
-    /// The date this minimum applies from (ISO 8601 date string)
+    /// The date these controls apply from (ISO 8601 date string)
     #[ts(as = "String")]
     from: Date,
 
-    /// The least that should be spent from that date, e.g. "100 NHR"
-    #[ts(as = "String")]
-    minimum: Allocation,
+    /// The least that should be spent in this period, e.g. "100 NHR".
+    /// Absent means no minimum in this period.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, as = "Option<String>")]
+    minimum: Option<Allocation>,
+
+    /// The most that may be spent in this period, e.g. "100 NHR".
+    /// Absent means no maximum in this period.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, as = "Option<String>")]
+    maximum: Option<Allocation>,
+}
+
+/// The wire form of a `SpendProfileEntry`, before it has been checked.
+///
+/// Unknown fields are refused. An entry that sets no controls means "no
+/// controls from this date", so a misspelled `"maximun"` that was quietly
+/// ignored would turn a cap into no cap. A field added to entries in future
+/// arrives with a feature name of its own, and a sender only uses it with a
+/// site that has said it supports it - so refusing here does not stop the
+/// format growing.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UncheckedSpendProfileEntry {
+    from: Date,
+    #[serde(default)]
+    minimum: Option<Allocation>,
+    #[serde(default)]
+    maximum: Option<Allocation>,
+}
+
+impl TryFrom<UncheckedSpendProfileEntry> for SpendProfileEntry {
+    type Error = Error;
+
+    fn try_from(entry: UncheckedSpendProfileEntry) -> Result<Self, Self::Error> {
+        SpendProfileEntry::new(&entry.from, entry.minimum.as_ref(), entry.maximum.as_ref())
+    }
 }
 
 impl SpendProfileEntry {
-    pub fn new(from: &Date, minimum: &Allocation) -> Self {
+    pub fn new(
+        from: &Date,
+        minimum: Option<&Allocation>,
+        maximum: Option<&Allocation>,
+    ) -> Result<Self, Error> {
+        for (name, control) in [("minimum", minimum), ("maximum", maximum)] {
+            if control.is_some_and(|c| c.is_empty()) {
+                return Err(Error::Parse(format!(
+                    "Invalid spend profile entry from {} - the {} cannot be an empty \
+                     allocation. Leave it out for no {} in this period",
+                    from, name, name
+                )));
+            }
+        }
+
+        if let (Some(min), Some(max)) = (minimum, maximum) {
+            if min.units() != max.units() {
+                return Err(Error::Parse(format!(
+                    "Invalid spend profile entry from {} - the minimum ({}) and maximum \
+                     ({}) must be in the same units",
+                    from, min, max
+                )));
+            }
+
+            if max.size().unwrap_or_default() < min.size().unwrap_or_default() {
+                return Err(Error::Parse(format!(
+                    "Invalid spend profile entry from {} - the maximum ({}) is less than \
+                     the minimum ({})",
+                    from, max, min
+                )));
+            }
+        }
+
+        Ok(Self {
+            from: from.clone(),
+            minimum: minimum.cloned(),
+            maximum: maximum.cloned(),
+        })
+    }
+
+    /// An entry that sets no controls: from this date, nothing is required
+    /// and nothing is capped.
+    pub fn no_controls(from: &Date) -> Self {
         Self {
             from: from.clone(),
-            minimum: minimum.clone(),
+            minimum: None,
+            maximum: None,
         }
     }
 
@@ -2305,8 +2393,18 @@ impl SpendProfileEntry {
         &self.from
     }
 
-    pub fn minimum(&self) -> &Allocation {
-        &self.minimum
+    pub fn minimum(&self) -> Option<&Allocation> {
+        self.minimum.as_ref()
+    }
+
+    pub fn maximum(&self) -> Option<&Allocation> {
+        self.maximum.as_ref()
+    }
+
+    /// True if this entry sets neither a minimum nor a maximum - it ends any
+    /// controls from its date.
+    pub fn has_no_controls(&self) -> bool {
+        self.minimum.is_none() && self.maximum.is_none()
     }
 }
 
@@ -2316,9 +2414,29 @@ impl NamedType for SpendProfileEntry {
     }
 }
 
+/// Spelled out in words, so that an entry setting no controls reads as what it
+/// means rather than as a date with something missing:
+///
+/// * `from 2027-01-01: spend exactly 100 NHR`
+/// * `from 2027-01-01: spend at least 100 NHR and at most 300 NHR`
+/// * `from 2027-01-01: spend at least 100 NHR`
+/// * `from 2027-01-01: spend at most 300 NHR`
+/// * `from 2027-01-01: no spend controls`
 impl std::fmt::Display for SpendProfileEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.from, self.minimum)
+        match (&self.minimum, &self.maximum) {
+            (Some(min), Some(max)) if min == max => {
+                write!(f, "from {}: spend exactly {}", self.from, min)
+            }
+            (Some(min), Some(max)) => write!(
+                f,
+                "from {}: spend at least {} and at most {}",
+                self.from, min, max
+            ),
+            (Some(min), None) => write!(f, "from {}: spend at least {}", self.from, min),
+            (None, Some(max)) => write!(f, "from {}: spend at most {}", self.from, max),
+            (None, None) => write!(f, "from {}: no spend controls", self.from),
+        }
     }
 }
 
@@ -2329,8 +2447,9 @@ impl std::fmt::Display for SpendProfileEntry {
 /// Sorting is the only change made. OpenPortal carries a profile rather than
 /// judging it, so nothing else is checked here - not the units, not the dates
 /// against the award, not the total. A duplicate date is refused because it is
-/// ambiguity in the data itself: two minimums from the same day do not say
-/// which applies.
+/// ambiguity in the data itself: two entries from the same day do not say
+/// which applies. Redundant entries - two in a row that set no controls, say -
+/// are not ambiguous, and are kept as sent.
 ///
 fn canonical_spend_profile(
     mut entries: Vec<SpendProfileEntry>,
@@ -5687,7 +5806,7 @@ mod tests {
             Instruction::SyncOfferings(Destinations::default()),
             Instruction::GetSupportedFeatures(),
             Instruction::IsFeatureSupported(
-                FeatureName::parse("award_spend_profiles")
+                FeatureName::parse("award_spend_maximums")
                     .unwrap_or_else(|e| unreachable!("feature: {:?}", e)),
             ),
         ] {
@@ -5803,7 +5922,7 @@ mod tests {
     #[test]
     fn test_feature_name_validates_shape_only() {
         for good in [
-            "award_spend_profiles",
+            "award_spend_maximums",
             "a",
             "x9",
             "vendor.feature-2_beta",
@@ -5814,10 +5933,10 @@ mod tests {
 
         for bad in [
             "",
-            "Award_Spend_Profiles",
+            "Award_Spend_Maximums",
             "award spend profiles",
-            " award_spend_profiles",
-            "award_spend_profiles ",
+            " award_spend_maximums",
+            "award_spend_maximums ",
             "9lives",
             "_private",
             ".dotted",
@@ -5831,9 +5950,9 @@ mod tests {
 
         #[allow(clippy::unwrap_used)]
         {
-            let feature = FeatureName::parse("award_spend_profiles").unwrap();
+            let feature = FeatureName::parse("award_spend_maximums").unwrap();
             let json = serde_json::to_string(&feature).unwrap();
-            assert_eq!(json, "\"award_spend_profiles\"");
+            assert_eq!(json, "\"award_spend_maximums\"");
             assert_eq!(serde_json::from_str::<FeatureName>(&json).unwrap(), feature);
             assert!(serde_json::from_str::<FeatureName>("\"Not Valid\"").is_err());
         }
@@ -5845,15 +5964,15 @@ mod tests {
     fn test_feature_discovery_instructions_round_trip() {
         #[allow(clippy::unwrap_used)]
         {
-            let ask = Instruction::parse("is_feature_supported award_spend_profiles").unwrap();
+            let ask = Instruction::parse("is_feature_supported award_spend_maximums").unwrap();
             assert_eq!(
                 ask,
                 Instruction::IsFeatureSupported(
-                    FeatureName::parse("award_spend_profiles").unwrap()
+                    FeatureName::parse("award_spend_maximums").unwrap()
                 )
             );
             assert_eq!(ask.command(), "is_feature_supported");
-            assert_eq!(ask.arguments(), vec!["award_spend_profiles".to_string()]);
+            assert_eq!(ask.arguments(), vec!["award_spend_maximums".to_string()]);
             assert_eq!(Instruction::parse(&ask.to_string()).unwrap(), ask);
 
             let list = Instruction::parse("get_supported_features").unwrap();
@@ -5864,7 +5983,7 @@ mod tests {
         }
 
         assert!(Instruction::parse("is_feature_supported").is_err());
-        assert!(Instruction::parse("is_feature_supported Award_Spend_Profiles").is_err());
+        assert!(Instruction::parse("is_feature_supported Award_Spend_Maximums").is_err());
         assert!(Instruction::parse("is_feature_supported two words").is_err());
         assert!(Instruction::parse("get_supported_features extra").is_err());
     }
@@ -6414,11 +6533,21 @@ mod tests {
     }
 
     fn spend_entry(from: &str, minimum: &str) -> SpendProfileEntry {
+        spend_controls(from, Some(minimum), None)
+    }
+
+    fn spend_controls(
+        from: &str,
+        minimum: Option<&str>,
+        maximum: Option<&str>,
+    ) -> SpendProfileEntry {
         #[allow(clippy::unwrap_used)]
         SpendProfileEntry::new(
             &Date::parse(from).unwrap(),
-            &Allocation::parse(minimum).unwrap(),
+            minimum.map(|m| Allocation::parse(m).unwrap()).as_ref(),
+            maximum.map(|m| Allocation::parse(m).unwrap()).as_ref(),
         )
+        .unwrap()
     }
 
     /// A spend profile survives the wire intact, in the shape the design
@@ -6515,10 +6644,99 @@ mod tests {
             r#"{"from": "not-a-date", "minimum": "100 NHR"}"#,
             r#"{"from": "2027-01-01", "minimum": "-100 NHR"}"#,
             r#"{"from": "2027-01-01", "minimum": "lots"}"#,
-            r#"{"from": "2027-01-01"}"#,
+            r#"{"minimum": "100 NHR"}"#,
+            // A misspelled control must not read as an entry with no controls.
+            r#"{"from": "2027-01-01", "maximun": "100 NHR"}"#,
+            r#"{"from": "2027-01-01", "maximum": "-1 NHR"}"#,
+            // "none" is an empty allocation, and as a control it could mean
+            // either "no limit" or "nothing" - so it is refused, not guessed.
+            r#"{"from": "2027-01-01", "minimum": "none"}"#,
+            r#"{"from": "2027-01-01", "maximum": "No allocation"}"#,
+            // Both controls must be comparable, and consistent.
+            r#"{"from": "2027-01-01", "minimum": "100 NHR", "maximum": "400 GPUHR"}"#,
+            r#"{"from": "2027-01-01", "minimum": "100 NHR", "maximum": "99 NHR"}"#,
         ] {
             let json = format!(r#"{{"spend_profile": [{entry}]}}"#);
             assert!(AwardDetails::parse(&json).is_err(), "accepted {json}");
+        }
+    }
+
+    /// Each control is optional, and an entry describes only its own period.
+    /// Nothing is carried from one entry to the next - so the shapes below all
+    /// stay exactly as sent, including the entry that sets no controls at all,
+    /// which ends the controls from its date.
+    #[test]
+    fn test_spend_profile_minimums_maximums_and_no_controls() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let json = r#"{"spend_profile": [
+                {"from": "2027-01-01", "minimum": "100 NHR", "maximum": "100 NHR"},
+                {"from": "2027-04-01", "minimum": "100 NHR", "maximum": "300 NHR"},
+                {"from": "2027-07-01", "maximum": "300 NHR"},
+                {"from": "2027-08-01", "minimum": "node hours 5"},
+                {"from": "2027-09-01"},
+                {"from": "2027-10-01"}
+            ]}"#;
+            // "node hours 5" is not an allocation - check the error, then
+            // carry on with a well-formed profile.
+            assert!(AwardDetails::parse(json).is_err());
+
+            let json = json.replace("node hours 5", "5 node hours");
+            let details = AwardDetails::parse(&json).unwrap();
+            let profile = details.spend_profile().unwrap();
+
+            assert_eq!(
+                profile.iter().map(|e| e.to_string()).collect::<Vec<_>>(),
+                vec![
+                    "from 2027-01-01: spend exactly 100 NHR",
+                    "from 2027-04-01: spend at least 100 NHR and at most 300 NHR",
+                    "from 2027-07-01: spend at most 300 NHR",
+                    "from 2027-08-01: spend at least 5 NHR",
+                    "from 2027-09-01: no spend controls",
+                    "from 2027-10-01: no spend controls",
+                ]
+            );
+
+            // Not carried forward: the cap of 2027-07-01 is not in force in
+            // the period from 2027-08-01, which sets only a minimum.
+            assert!(profile.get(3).unwrap().maximum().is_none());
+            assert!(profile.get(4).unwrap().has_no_controls());
+
+            // Redundant entries are kept, not tidied away.
+            assert_eq!(profile.len(), 6);
+
+            // An unset control is left out of the wire form rather than
+            // written as null, and the whole profile round-trips.
+            let value: serde_json::Value = serde_json::from_str(&details.to_string()).unwrap();
+            assert_eq!(
+                value.get("spend_profile").and_then(|p| p.get(4)),
+                Some(&serde_json::json!({"from": "2027-09-01"}))
+            );
+            assert_eq!(
+                value.get("spend_profile").and_then(|p| p.get(2)),
+                Some(&serde_json::json!({"from": "2027-07-01", "maximum": "300 NHR"}))
+            );
+            assert_eq!(AwardDetails::parse(&details.to_string()).unwrap(), details);
+
+            // A maximum equal to the minimum is allowed - it is an exact
+            // spend - and a maximum of zero is a period with no spending.
+            assert_eq!(
+                spend_controls("2027-01-01", Some("0 NHR"), Some("0 NHR")).to_string(),
+                "from 2027-01-01: spend exactly 0 NHR"
+            );
+            assert_eq!(
+                spend_controls("2027-01-01", None, Some("0 NHR")).to_string(),
+                "from 2027-01-01: spend at most 0 NHR"
+            );
+
+            let date = Date::parse("2027-01-01").unwrap();
+            assert!(SpendProfileEntry::no_controls(&date).has_no_controls());
+            assert!(SpendProfileEntry::new(
+                &date,
+                Some(&Allocation::parse("10 NHR").unwrap()),
+                Some(&Allocation::parse("9 NHR").unwrap())
+            )
+            .is_err());
         }
     }
 

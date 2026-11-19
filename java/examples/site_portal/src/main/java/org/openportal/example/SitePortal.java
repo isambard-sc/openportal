@@ -1104,9 +1104,13 @@ public final class SitePortal {
      * this portal's business logic, not about what it can store. This example
      * carries {@code AwardDetails.spend_profile} intact - it is in the stored
      * details, so {@code get_award} hands it back - but it does nothing
-     * <i>with</i> it: no warnings, no forfeiting what was not spent. So it does
-     * not claim {@code award_spend_profiles}, and an awarding portal that asks
-     * will know to agree another way, such as sending the award in parts.
+     * <i>with</i> it: no warnings, no forfeiting what was not spent, no
+     * stopping work at a cap. So it claims neither
+     * {@code award_spend_minimums} nor {@code award_spend_maximums}, and an
+     * awarding portal that asks will know to agree another way, such as sending
+     * the award in parts. The two are separate because a site may well enforce
+     * one and not the other - a cap maps onto scheduler limits, a minimum does
+     * not.
      *
      * <p>Names are opaque, lowercase strings agreed between the portals; the
      * well-known ones are listed in the site portal API (§4.4). Add one here

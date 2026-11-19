@@ -5147,8 +5147,10 @@ impl AllocationOrStr {
     }
 }
 
-/// One entry in an award's spend profile: the least that should be spent
-/// from `from_date` until the next entry's date (or the award's end date).
+/// One entry in an award's spend profile: the controls on spending from
+/// `from_date` until the next entry's date (or the award's end date) - a
+/// `minimum`, a `maximum`, both, or neither. Each entry describes only its own
+/// period, so one that sets neither means "no controls from this date".
 /// OpenPortal carries this between portals; it does not interpret it.
 #[gen_stub_pyclass]
 #[pyclass(module = "openportal")]
@@ -5159,11 +5161,22 @@ struct SpendProfileEntry(grammar::SpendProfileEntry);
 #[pymethods]
 impl SpendProfileEntry {
     #[new]
-    fn new(from_date: chrono::NaiveDate, minimum: AllocationOrStr) -> PyResult<Self> {
-        Ok(Self(grammar::SpendProfileEntry::new(
+    #[pyo3(signature = (from_date, minimum=None, maximum=None))]
+    fn new(
+        from_date: chrono::NaiveDate,
+        minimum: Option<AllocationOrStr>,
+        maximum: Option<AllocationOrStr>,
+    ) -> PyResult<Self> {
+        let minimum = minimum.map(|m| m.into_allocation()).transpose()?;
+        let maximum = maximum.map(|m| m.into_allocation()).transpose()?;
+
+        grammar::SpendProfileEntry::new(
             &grammar::Date::from_chrono(&from_date),
-            &minimum.into_allocation()?,
-        )))
+            minimum.as_ref(),
+            maximum.as_ref(),
+        )
+        .map(Self)
+        .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
     }
 
     fn __str__(&self) -> PyResult<String> {
@@ -5197,16 +5210,29 @@ impl SpendProfileEntry {
         }
     }
 
-    /// The date this minimum applies from
+    /// The date these controls apply from
     #[getter(from_date)]
     fn applies_from(&self) -> PyResult<chrono::NaiveDate> {
         Ok(self.0.from().to_chrono())
     }
 
-    /// The least that should be spent from that date
+    /// The least that should be spent in this period, or `None` for no minimum
     #[getter]
-    fn minimum(&self) -> PyResult<Allocation> {
-        Ok(self.0.minimum().clone().into())
+    fn minimum(&self) -> PyResult<Option<Allocation>> {
+        Ok(self.0.minimum().cloned().map(|m| m.into()))
+    }
+
+    /// The most that may be spent in this period, or `None` for no maximum
+    #[getter]
+    fn maximum(&self) -> PyResult<Option<Allocation>> {
+        Ok(self.0.maximum().cloned().map(|m| m.into()))
+    }
+
+    /// True if this entry sets neither a minimum nor a maximum - it ends any
+    /// controls from its date
+    #[getter]
+    fn has_no_controls(&self) -> PyResult<bool> {
+        Ok(self.0.has_no_controls())
     }
 }
 

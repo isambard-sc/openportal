@@ -1585,13 +1585,13 @@ mod tests {
 
     #[test]
     fn test_reported_feature_names_are_checked_not_tidied() {
-        let good = vec!["award_spend_profiles".to_string(), "vendor.x-1".to_string()];
+        let good = vec!["award_spend_maximums".to_string(), "vendor.x-1".to_string()];
         assert_eq!(validate_feature_names(good.clone()).ok(), Some(good));
         assert_eq!(validate_feature_names(vec![]).ok(), Some(vec![]));
 
-        for bad in ["Award_Spend_Profiles", "two words", ""] {
+        for bad in ["Award_Spend_Maximums", "two words", ""] {
             assert!(
-                validate_feature_names(vec!["award_spend_profiles".to_string(), bad.to_string()])
+                validate_feature_names(vec!["award_spend_maximums".to_string(), bad.to_string()])
                     .is_err(),
                 "should refuse {bad:?}"
             );

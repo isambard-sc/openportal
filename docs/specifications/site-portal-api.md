@@ -610,14 +610,21 @@ portal-to-portal work:
   independently of the awarding portal: `open` (default when absent),
   `members_only`, `roles_only`, `locked`. Honour it — the awarding portal is
   entitled to assume you do.
-* **`spend_profile`**, when present, is the least that should be spent over
-  each period of the award - dated absolute minimums such as
-  `[{"from": "2027-01-01", "minimum": "100 NHR"}, ...]`, each applying until the
-  next entry's date and the last until `end_date`. OpenPortal carries it and
-  does not interpret it: what a shortfall means, and how you enforce it, is
-  between you and the awarding portal. Keep it with the award so `get_award`
-  hands it back, whether or not you act on it. Claim `award_spend_profiles`
-  (§4.4) only if you do.
+* **`spend_profile`**, when present, sets the controls on spending over each
+  period of the award: from each entry's date, an optional `minimum` (the least
+  that should be spent), an optional `maximum` (a cap), both, or neither - such
+  as `[{"from": "2027-01-01", "minimum": "100 NHR", "maximum": "100 NHR"},
+  {"from": "2027-04-01", "maximum": "300 NHR"}, {"from": "2027-07-01"}]`. Each
+  entry applies until the next entry's date and the last until `end_date`.
+  **Each entry describes only its own period: nothing carries over.** A control
+  an entry leaves out does not apply in its period, so in the example the
+  second quarter has a cap and no minimum, and the entry with neither means no
+  controls from July. OpenPortal carries the profile and does not interpret it:
+  what a shortfall means, whether a cap is a hard stop, and how you enforce
+  either, is between you and the awarding portal. Keep it with the award so
+  `get_award` hands it back, whether or not you act on it. Claim
+  `award_spend_minimums` and `award_spend_maximums` (§4.4) only for what you
+  do act on. The full rules are in [json-types.md](json-types.md).
 
 
 #### 4.1.2 `remove_award` disconnects an award; it does not delete a project
@@ -915,13 +922,19 @@ code was written.
 
 **Claim a feature only if your business logic does what it promises**, not
 merely because you can store the data it concerns. A portal that keeps a spend
-profile but does nothing with it does not support `award_spend_profiles`.
+profile but does nothing with it supports neither `award_spend_minimums` nor
+`award_spend_maximums`.
 
 The well-known names:
 
 | Feature | Means the site |
 |---------|----------------|
-| `award_spend_profiles` | Understands `AwardDetails.spend_profile`, and acts on it as agreed with the awarding portal |
+| `award_spend_minimums` | Understands the `minimum`s in `AwardDetails.spend_profile`, and acts on them as agreed with the awarding portal |
+| `award_spend_maximums` | Understands the `maximum`s in `AwardDetails.spend_profile`, and acts on them as agreed with the awarding portal |
+
+They are separate because a site may enforce one and not the other: a cap maps
+naturally onto scheduler limits, while forfeiting what was not spent is a
+process. Claim each only for what you do.
 
 For the caller, there are three outcomes, not two:
 

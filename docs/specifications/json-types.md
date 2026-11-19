@@ -142,7 +142,7 @@ Returned by: `get_project_dirs`, `get_local_project_dirs`,
 `get_supported_features`
 
 A JSON array of strings - filesystem paths for the directory instructions, and
-feature names (e.g. `"award_spend_profiles"`) for `get_supported_features`.
+feature names (e.g. `"award_spend_maximums"`) for `get_supported_features`.
 
 ```json
 [
@@ -274,8 +274,10 @@ Fields that are `null` or unset are omitted from the serialised JSON.
     "collaborator@gmail.com"
   ],
   "spend_profile": [
-    { "from": "2024-01-01", "minimum": "100 NHR" },
-    { "from": "2024-07-01", "minimum": "300 NHR" }
+    { "from": "2024-01-01", "minimum": "100 NHR", "maximum": "100 NHR" },
+    { "from": "2024-04-01", "minimum": "100 NHR" },
+    { "from": "2024-07-01", "maximum": "300 NHR" },
+    { "from": "2024-10-01" }
   ]
 }
 ```
@@ -301,7 +303,7 @@ Fields that are `null` or unset are omitted from the serialised JSON.
 | `earliest_approve` | string | RFC 3339 UTC — do not approve before this time; omitted when unset |
 | `membership_control` | string | `"open"` / `"members_only"` / `"roles_only"` / `"locked"` — see below; omitted when unset (defaults to `open`) |
 | `allowed_domains` | array of strings | Member email allow-list; `null` = all allowed; `[]` = none allowed. Each entry is either a domain pattern (`"example.com"`, `"*.university.ac.uk"`) or an exact email address (`"collaborator@gmail.com"`). See below. |
-| `spend_profile` | array of `SpendProfileEntry` | Dated minimum spends, carried between portals and not interpreted by OpenPortal; omitted when absent; `[]` explicitly removes a profile. See below. |
+| `spend_profile` | array of `SpendProfileEntry` | Dated spend controls (minimums and maximums), carried between portals and not interpreted by OpenPortal; omitted when absent; `[]` explicitly removes a profile. See below. |
 
 **`MembershipControl` values:**
 
@@ -344,18 +346,38 @@ as distinct from "unrestricted".
 **`spend_profile` entries (`SpendProfileEntry`):**
 
 ```json
-{ "from": "<YYYY-MM-DD>", "minimum": "<size> <units>" }
+{ "from": "<YYYY-MM-DD>", "minimum": "<size> <units>", "maximum": "<size> <units>" }
 ```
 
-Both fields are required. `minimum` is an allocation, parsed and validated as
-`allocation` is (a negative, `NaN` or infinite size is refused). By convention
-between the portals, each entry applies from its `from` date up to, but not
-including, the next entry's, and the last until `end_date`. The minimums need
-not add up to the allocation, and nothing checks the units, the dates or the
-total against the award - those are for the portals to agree. Entries are held
-sorted by date, so they always serialise in that order; two entries with the
-same `from` date are refused. `update_award` replaces the profile wholesale, as
-it does `members`.
+`from` is required; `minimum` (the least that should be spent - "use it or lose
+it") and `maximum` (a cap) are each optional, and left out rather than written
+as `null` when unset. Each is an allocation, parsed and validated as
+`allocation` is (a negative, `NaN` or infinite size is refused), and neither may
+be an empty allocation (`"none"`), which as a cap could mean either "no cap" or
+"nothing". When both are set they must be in the same units, with the maximum no
+less than the minimum; equal is an exact spend. Any other field is refused, so
+a misspelled control cannot quietly read as an absent one.
+
+By convention between the portals, each entry applies from its `from` date up
+to, but not including, the next entry's, and the last until `end_date`. **Each
+entry describes only its own period - nothing carries over from the entry
+before.** A control an entry leaves out does not apply in its period, and an
+entry with neither control means no controls from its date:
+
+| Entry | Means (and how it prints) |
+|-------|---------------------------|
+| `{"from": "2027-01-01", "minimum": "100 NHR", "maximum": "100 NHR"}` | `from 2027-01-01: spend exactly 100 NHR` |
+| `{"from": "2027-01-01", "minimum": "100 NHR", "maximum": "300 NHR"}` | `from 2027-01-01: spend at least 100 NHR and at most 300 NHR` |
+| `{"from": "2027-01-01", "minimum": "100 NHR"}` | `from 2027-01-01: spend at least 100 NHR` |
+| `{"from": "2027-01-01", "maximum": "300 NHR"}` | `from 2027-01-01: spend at most 300 NHR` |
+| `{"from": "2027-01-01"}` | `from 2027-01-01: no spend controls` |
+
+Nothing checks the units across entries or against the allocation, the dates
+against the award, or the totals - those are for the portals to agree. Entries
+are held sorted by date, so they always serialise in that order, and are
+otherwise kept exactly as sent - redundant entries included. Two entries with
+the same `from` date are refused. `update_award` replaces the profile wholesale,
+as it does `members`.
 
 **`Link` object:**
 

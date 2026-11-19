@@ -538,15 +538,15 @@ public final class AwardDetails implements OpenPortalType {
     // ---- spend profile -----------------------------------------------------
 
     /**
-     * The least that should be spent over each period of the award, sorted by
-     * date.
+     * The controls on spending over each period of the award - a minimum, a
+     * maximum, both or neither per period - sorted by date. Each entry
+     * describes only its own period; see {@link SpendProfileEntry}.
      *
      * <p>An agreement between the awarding portal and the site, carried rather
-     * than interpreted: what a shortfall means, whether an overspend carries
-     * forward, whether the units must match the allocation's - all of that is
-     * for the two portals to agree. Only check
-     * {@code is_feature_supported award_spend_profiles} before relying on a site
-     * acting on one.
+     * than interpreted: what a shortfall means, whether a cap is a hard stop,
+     * whether the units must match the allocation's - all of that is for the
+     * two portals to agree. Ask {@code is_feature_supported award_spend_minimums}
+     * or {@code award_spend_maximums} before relying on a site acting on one.
      *
      * <p>Three states, like {@link #allowedDomains()}: <b>absent</b> means no
      * profile (or, under a legacy partial update, keep the one held); an

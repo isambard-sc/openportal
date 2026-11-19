@@ -398,22 +398,27 @@ class SitePortalTest {
         // This portal does not act on a spend profile, but it must not lose
         // one: the profile is part of the award.
         List<SpendProfileEntry> quarterly = List.of(
-                SpendProfileEntry.of("2027-04-01", "500 GPUHR"),
-                SpendProfileEntry.of("2027-01-01", "500 GPUHR"));
+                SpendProfileEntry.minimum("2027-04-01", "500 GPUHR"),
+                SpendProfileEntry.of("2027-01-01", "500 GPUHR", "500 GPUHR"),
+                SpendProfileEntry.maximum("2027-07-01", "1000 GPUHR"),
+                SpendProfileEntry.noControls("2027-10-01"));
         created(details().setSpendProfile(quarterly));
 
         AwardDetails read = portal.answer(job("get_award " + AWARD))
                 .result(AwardDetails::fromJson).orElseThrow();
         assertEquals(
-                List.of(SpendProfileEntry.of("2027-01-01", "500 GPUHR"),
-                        SpendProfileEntry.of("2027-04-01", "500 GPUHR")),
-                read.spendProfile().orElseThrow());
+                List.of("from 2027-01-01: spend exactly 500 GPUHR",
+                        "from 2027-04-01: spend at least 500 GPUHR",
+                        "from 2027-07-01: spend at most 1000 GPUHR",
+                        "from 2027-10-01: no spend controls"),
+                read.spendProfile().orElseThrow().stream()
+                        .map(SpendProfileEntry::toString).toList());
 
         // An update that does not mention it keeps it; `[]` removes it.
         created(details());
         read = portal.answer(job("get_award " + AWARD))
                 .result(AwardDetails::fromJson).orElseThrow();
-        assertEquals(2, read.spendProfile().orElseThrow().size());
+        assertEquals(4, read.spendProfile().orElseThrow().size());
 
         created(details().setSpendProfile(List.of()));
         read = portal.answer(job("get_award " + AWARD))
@@ -429,7 +434,7 @@ class SitePortalTest {
 
         // It carries spend profiles but does not act on them, so it does not
         // claim them - and a name it has never heard of is a plain "no".
-        for (String feature : List.of("award_spend_profiles", "some_future_feature")) {
+        for (String feature : List.of("award_spend_minimums", "award_spend_maximums", "some_future_feature")) {
             Job answered = portal.answer(job("is_feature_supported " + feature));
 
             assertFalse(answered.isError(), answered.errorMessage());
@@ -446,13 +451,13 @@ class SitePortalTest {
     @Test
     void a_supported_feature_is_answered_the_same_way_by_both_questions() {
         portal.addOffering(OFFERING, List.of("standard"), AGREED);
-        portal.supportedFeatures = java.util.Set.of("award_spend_profiles", "a_feature");
+        portal.supportedFeatures = java.util.Set.of("award_spend_maximums", "a_feature");
 
-        Job answered = portal.answer(job("is_feature_supported award_spend_profiles"));
+        Job answered = portal.answer(job("is_feature_supported award_spend_maximums"));
         assertEquals("true", answered.resultText().orElseThrow());
 
         answered = portal.answer(job("get_supported_features"));
-        assertEquals("[\"a_feature\",\"award_spend_profiles\"]",
+        assertEquals("[\"a_feature\",\"award_spend_maximums\"]",
                 answered.resultText().orElseThrow());
     }
 

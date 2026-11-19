@@ -462,14 +462,16 @@ def _run_all() -> None:
     print("\n-- a spend profile is carried, not interpreted -----------------")
 
     # The awarding portal can say how an award should be spent over time: the
-    # least to spend from each date. This portal does not act on it (it does not
-    # claim `award_spend_profiles` - see below), but it must not lose it either:
-    # the profile is part of the award, and `get_award` hands the award back.
+    # least to spend, the most that may be spent, or both, from each date. An
+    # entry that sets neither ends the controls from its date. This portal does
+    # not act on any of it (it claims neither `award_spend_minimums` nor
+    # `award_spend_maximums` - see below), but it must not lose it either: the
+    # profile is part of the award, and `get_award` hands the award back.
     quarterly = [
-        openportal.SpendProfileEntry(datetime.date(2027, 7, 1), "300 NHR"),
-        openportal.SpendProfileEntry(datetime.date(2027, 1, 1), "100 NHR"),
+        openportal.SpendProfileEntry(datetime.date(2027, 7, 1), maximum="300 NHR"),
+        openportal.SpendProfileEntry(datetime.date(2027, 1, 1), "100 NHR", "100 NHR"),
         openportal.SpendProfileEntry(datetime.date(2027, 4, 1), "100 NHR"),
-        openportal.SpendProfileEntry(datetime.date(2027, 10, 1), "400 NHR"),
+        openportal.SpendProfileEntry(datetime.date(2027, 10, 1)),
     ]
     job = site_portal.answer(
         make_job(f"update_project {AWARD} {details(spend_profile=quarterly)}")
@@ -479,12 +481,12 @@ def _run_all() -> None:
     held = site_portal.answer(make_job(f"get_award {AWARD}")).result
     check(
         "...and get_award hands the profile back, in date order",
-        [(str(e.from_date), str(e.minimum)) for e in held.spend_profile or []]
+        [str(e) for e in held.spend_profile or []]
         == [
-            ("2027-01-01", "100 NHR"),
-            ("2027-04-01", "100 NHR"),
-            ("2027-07-01", "300 NHR"),
-            ("2027-10-01", "400 NHR"),
+            "from 2027-01-01: spend exactly 100 NHR",
+            "from 2027-04-01: spend at least 100 NHR",
+            "from 2027-07-01: spend at most 300 NHR",
+            "from 2027-10-01: no spend controls",
         ],
         f"-> {held.spend_profile}",
     )
@@ -742,7 +744,7 @@ def _run_all() -> None:
         "get_usage_reports allocator this_month": "UsageReport",
         f"get_storage_report {AWARD} this_month": "ProjectStorageReport",
         "get_storage_reports allocator": "StorageReport",
-        "is_feature_supported award_spend_profiles": "bool",
+        "is_feature_supported award_spend_minimums": "bool",
         f"remove_project {AWARD2}": "ProjectMapping",
     }
 
@@ -905,7 +907,7 @@ def _run_all() -> None:
     # to support them - and a name it has never heard of is a plain "no", not
     # an error. That is what lets an awarding portal ask about a feature defined
     # after this code was written.
-    for feature in ("award_spend_profiles", "some_future_feature"):
+    for feature in ("award_spend_minimums", "award_spend_maximums", "some_future_feature"):
         job = site_portal.answer(make_job(f"is_feature_supported {feature}"))
         check(
             f"'{feature}' is not supported",
@@ -923,15 +925,15 @@ def _run_all() -> None:
     # Once a portal does what a name promises, it says so - and both questions
     # answer from the one set, so they cannot disagree.
     supported = site_portal.SUPPORTED_FEATURES
-    site_portal.SUPPORTED_FEATURES = frozenset({"award_spend_profiles", "a_feature"})
+    site_portal.SUPPORTED_FEATURES = frozenset({"award_spend_maximums", "a_feature"})
     try:
-        job = site_portal.answer(make_job("is_feature_supported award_spend_profiles"))
+        job = site_portal.answer(make_job("is_feature_supported award_spend_maximums"))
         check("a listed feature is supported", job.result is True, f"-> {job.result!r}")
 
         job = site_portal.answer(make_job("get_supported_features"))
         check(
             "...and appears in the list, which is sorted",
-            job.result == ["a_feature", "award_spend_profiles"],
+            job.result == ["a_feature", "award_spend_maximums"],
             f"-> {job.result!r}",
         )
         check(
@@ -944,7 +946,7 @@ def _run_all() -> None:
 
     # A malformed name never reaches the handler: the instruction does not parse.
     try:
-        make_job("is_feature_supported Award_Spend_Profiles")
+        make_job("is_feature_supported Award_Spend_Maximums")
         raise AssertionError("an uppercase feature name should not parse")
     except OSError:
         pass

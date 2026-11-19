@@ -33,7 +33,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   - an invalid date or allocation;
   - `"none"` as a control;
   - a minimum and maximum in different units, or a maximum below the minimum;
-  - an unknown field in an entry;
   - two entries for the same day.
 
   Entries are held in date order and otherwise kept as sent. Each prints in

@@ -497,9 +497,13 @@ class TypesTest {
         // "none" as a control could mean no limit or nothing.
         assertThrows(IllegalArgumentException.class,
                 () -> SpendProfileEntry.maximum("2027-01-01", "none"));
-        // A misspelled control must not read as an entry with no controls.
-        assertThrows(IllegalArgumentException.class, () -> AwardDetails.fromJson("""
-                {"spend_profile": [{"from": "2027-01-01", "maximun": "100 NHR"}]}"""));
+        // A field this version does not know is ignored, as it is everywhere
+        // else in an award, so a later addition does not stop it parsing.
+        assertEquals(List.of(SpendProfileEntry.maximum("2027-01-01", "5 NHR")),
+                AwardDetails.fromJson("""
+                        {"spend_profile": [
+                          {"from": "2027-01-01", "maximum": "5 NHR", "added_later": 1}
+                        ]}""").spendProfile().orElseThrow());
         // A minimum and maximum must be comparable, and consistent.
         assertThrows(IllegalArgumentException.class,
                 () -> SpendProfileEntry.of("2027-01-01", "100 NHR", "400 GPUHR"));

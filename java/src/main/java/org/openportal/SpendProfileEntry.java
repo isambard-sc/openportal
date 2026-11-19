@@ -140,18 +140,8 @@ public record SpendProfileEntry(LocalDate from, Allocation minimum, Allocation m
             throw new IllegalArgumentException("a spend profile entry needs 'from': " + node);
         }
 
-        // Unknown fields are refused: an entry with no controls means "no
-        // controls from this date", so a misspelled "maximun" quietly ignored
-        // would turn a cap into no cap. A future entry field comes with a
-        // feature name of its own, so refusing here does not stop the format
-        // growing.
-        node.fieldNames().forEachRemaining(name -> {
-            if (!name.equals("from") && !name.equals("minimum") && !name.equals("maximum")) {
-                throw new IllegalArgumentException(
-                        "a spend profile entry has an unknown field '" + name + "': " + node);
-            }
-        });
-
+        // Any other field is ignored, as it is everywhere else in an award, so
+        // a field added to entries later does not stop this parsing the rest.
         return of(node.get("from").asText(),
                 node.hasNonNull("minimum") ? node.get("minimum").asText() : null,
                 node.hasNonNull("maximum") ? node.get("maximum").asText() : null);

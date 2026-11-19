@@ -375,7 +375,7 @@ an entry leaves out does not apply in its period, and an entry with neither
 the two portals to agree. It refuses only what would make the data mean two
 things: an invalid date or allocation, an empty allocation (`"none"`) as a
 control, a minimum and maximum in different units or with the maximum below the
-minimum, an unknown field in an entry, and two entries with the same date.
+minimum, and two entries with the same date. Unknown fields are ignored.
 Entries are held sorted by date and otherwise kept exactly as sent. Omitted when
 absent, which means no profile; `[]` explicitly removes one. On `merge` /
 `update_award` a profile present in the incoming object replaces the held one

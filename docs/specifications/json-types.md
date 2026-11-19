@@ -355,8 +355,8 @@ as `null` when unset. Each is an allocation, parsed and validated as
 `allocation` is (a negative, `NaN` or infinite size is refused), and neither may
 be an empty allocation (`"none"`), which as a cap could mean either "no cap" or
 "nothing". When both are set they must be in the same units, with the maximum no
-less than the minimum; equal is an exact spend. Any other field is refused, so
-a misspelled control cannot quietly read as an absent one.
+less than the minimum; equal is an exact spend. Any other field is ignored, as
+it is elsewhere in `AwardDetails`.
 
 By convention between the portals, each entry applies from its `from` date up
 to, but not including, the next entry's, and the last until `end_date`. **Each

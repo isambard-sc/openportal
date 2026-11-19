@@ -2314,14 +2314,10 @@ pub struct SpendProfileEntry {
 
 /// The wire form of a `SpendProfileEntry`, before it has been checked.
 ///
-/// Unknown fields are refused. An entry that sets no controls means "no
-/// controls from this date", so a misspelled `"maximun"` that was quietly
-/// ignored would turn a cap into no cap. A field added to entries in future
-/// arrives with a feature name of its own, and a sender only uses it with a
-/// site that has said it supports it - so refusing here does not stop the
-/// format growing.
+/// Unknown fields are ignored, as they are everywhere else in `AwardDetails`,
+/// so a field added to entries later does not stop an older reader parsing
+/// the rest.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct UncheckedSpendProfileEntry {
     from: Date,
     #[serde(default)]
@@ -6645,8 +6641,6 @@ mod tests {
             r#"{"from": "2027-01-01", "minimum": "-100 NHR"}"#,
             r#"{"from": "2027-01-01", "minimum": "lots"}"#,
             r#"{"minimum": "100 NHR"}"#,
-            // A misspelled control must not read as an entry with no controls.
-            r#"{"from": "2027-01-01", "maximun": "100 NHR"}"#,
             r#"{"from": "2027-01-01", "maximum": "-1 NHR"}"#,
             // "none" is an empty allocation, and as a control it could mean
             // either "no limit" or "nothing" - so it is refused, not guessed.
@@ -6717,6 +6711,18 @@ mod tests {
                 Some(&serde_json::json!({"from": "2027-07-01", "maximum": "300 NHR"}))
             );
             assert_eq!(AwardDetails::parse(&details.to_string()).unwrap(), details);
+
+            // A field this version does not know is ignored, as it is
+            // everywhere else in AwardDetails, so a later addition to entries
+            // does not stop an older reader parsing the rest.
+            let newer = AwardDetails::parse(
+                r#"{"spend_profile": [{"from": "2027-01-01", "maximum": "5 NHR", "added_later": 1}]}"#,
+            )
+            .unwrap();
+            assert_eq!(
+                newer.spend_profile(),
+                Some(vec![spend_controls("2027-01-01", None, Some("5 NHR"))])
+            );
 
             // A maximum equal to the minimum is allowed - it is an exact
             // spend - and a maximum of zero is a period with no spending.

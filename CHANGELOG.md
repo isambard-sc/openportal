@@ -53,6 +53,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   old to know the instructions answers with an error, which reads correctly as
   "not supported". The well-known names are listed in the site portal API
   (§4.4). Both site portal examples answer them, and claim nothing.
+- **Reporting a spend-profile forfeit.** A site that claims
+  `award_spend_minimums` reports a missed minimum (a forfeit) in its existing
+  usage reports. The forfeit is billed to a user and a component both named
+  `forfeit`, in the award's unit, and counted in the totals. It is dated the
+  last day of the period that was missed, and that month stays incomplete
+  until the forfeit has settled. This is a convention between portals, needing
+  no type or wire change; see the site portal API (§4.4.1).
 
 ### Fixed
 

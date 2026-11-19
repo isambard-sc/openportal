@@ -886,6 +886,10 @@ consequences:
   believed. This is the one way to make the expensive mistake *by accident*. If
   you have no figures for a month and are not asserting that it is settled,
   include an explicit zero-usage day that is **not** marked complete.
+* **A forfeit can arrive after the day it is dated.** A site enforcing spend
+  minimums charges a missed minimum after the period ends, dated the period's
+  last day, so the month holding that day is not settled until the forfeit is
+  (§4.4.1).
 * **A day's attribution can change after the day starts.** Which award a day is
   billed to is decided by the attachment in force during it, and attaching an
   award part-way through a day takes the whole of it (§4.1.2). So a day whose
@@ -929,7 +933,7 @@ The well-known names:
 
 | Feature | Means the site |
 |---------|----------------|
-| `award_spend_minimums` | Understands the `minimum`s in `AwardDetails.spend_profile`, and acts on them as agreed with the awarding portal |
+| `award_spend_minimums` | Understands the `minimum`s in `AwardDetails.spend_profile`, acts on them as agreed with the awarding portal, and reports any forfeit as described in §4.4.1 |
 | `award_spend_maximums` | Understands the `maximum`s in `AwardDetails.spend_profile`, and acts on them as agreed with the awarding portal |
 
 They are separate because a site may enforce one and not the other: a cap maps
@@ -949,6 +953,113 @@ Answers are snapshots - sites upgrade - so ask again before relying on one
 rather than remembering it indefinitely. Implementing these is optional (§4.0);
 a portal that declines them is read as supporting nothing. The design is in
 `docs/plans/award-spend-profiles-and-feature-discovery-design.md`.
+
+#### 4.4.1 Reporting a forfeit
+
+A site that enforces spend minimums will at some point charge an award for
+what it did not spend - a **forfeit**. How much, and when, is policy agreed
+between the two portals (an example is below). How the forfeit is *reported*
+is a convention every site and awarding portal shares, so that an awarding
+portal can read any site's forfeits the same way. It needs nothing new on the
+wire: a forfeit travels in the usage reports a site already answers
+(`get_usage_report` / `get_usage_reports`, §4.3), and OpenPortal carries it
+like any other usage without interpreting it.
+
+A site that claims `award_spend_minimums` reports a forfeit like this:
+
+1. **It is billed to a user named `forfeit`.** In the report it is a local user
+   `forfeit`, mapped in `users` to `forfeit.<project>.<portal>` in the
+   awarding portal's namespace, like any other user. Map it rather than leaving
+   it unmapped, so that an awarding portal that flags unattributed usage does
+   not mistake it for an error. No real person may be given that username:
+   if your usernames are derived from something a person chooses (an email's
+   local part, say), map `forfeit@...` to something else.
+2. **It appears under a component named `forfeit`**, for that user, in the
+   same day's `components`.
+3. **It is in the award's unit, like every other figure** (§4.3). A minimum is
+   normally written in the award's unit already, so the shortfall needs no
+   conversion; if it is not, convert it with the factor you agreed, as you do
+   usage. The awarding portal converts nothing.
+4. **It counts in the totals.** It is part of the `forfeit` user's usage in
+   `reports`, and so of the day's and the report's totals. An awarding portal
+   that knows nothing of forfeits therefore still sees the award's true spend,
+   provided it keeps usage from users who are not project members; one that
+   does know can show the `forfeit` user or component specially. It is not a
+   job: it adds nothing to `num_jobs`, `user_job_counts` or the wait and
+   runtime figures.
+5. **It is dated the last day of the period whose minimum was missed**, which
+   for the final period is the award's `end_date`. It belongs to the award it
+   was charged to, so it is reported against that award even if the award has
+   since been detached (§4.1.2) - and even when the forfeit for the final
+   period is only charged after the award has ended.
+6. **A correction replaces it.** Reports are recomputed rather than appended,
+   so if a forfeit is later corrected - because late usage records changed the
+   period's spend, say - report the corrected amount on the same day. The
+   latest report for that day is the truth.
+
+**Keep the month incomplete until the forfeit is settled.** This is the rule
+most likely to go wrong. A forfeit is dated the last day of a period but only
+known after the period has ended - for a quarter, on the first day of the next
+month, dated the last day of the one before. And it is computed from the
+period's usage, so a late usage record changes it too. So do not report the
+month containing that day complete (§4.3, `is_complete`) until the forfeit has
+been charged and the usage it depends on has settled. Point 6 only works while
+the month is incomplete: once you report it complete, the awarding portal stops
+asking, and a correction is never collected.
+
+**A worked example.** An award of `1000 NHR` from 2027-01-01, whose first
+period has a minimum of `250 NHR`:
+
+```json
+"spend_profile": [
+  {"from": "2027-01-01", "minimum": "250 NHR"},
+  {"from": "2027-04-01", "minimum": "250 NHR"},
+  ...
+]
+```
+
+By 2027-03-31, the last day of the first period, the project has used
+`150 NHR`. On 2027-04-01 the site charges the shortfall, `100 NHR`, as a
+forfeit dated 2027-03-31. Its report for that day carries the forfeit
+alongside that day's real usage - 100 NHR is 360000 node-seconds:
+
+```json
+{
+  "project": "myaward1.allocator",
+  "reports": {
+    "2027-03-31": {
+      "reports": {
+        "alice":   {"seconds": 7200},
+        "forfeit": {"seconds": 360000}
+      },
+      "components": {
+        "forfeit": {"forfeit": {"seconds": 360000}}
+      },
+      "num_jobs": 3,
+      "user_job_counts": {"alice": 3},
+      "is_complete": false
+    }
+  },
+  "users": {
+    "alice.myaward1.allocator":   "alice",
+    "forfeit.myaward1.allocator": "forfeit"
+  }
+}
+```
+
+March stays incomplete until the site is sure of both the usage and the
+forfeit, and is reported complete after that.
+
+*The policy behind a forfeit is the two portals' to agree, not part of this
+convention.* For example, one pair of portals has agreed that the shortfall
+charged at the start of each period is the sum of the minimums so far, less
+everything charged so far (usage and earlier forfeits), so that spending above
+one period's minimum counts towards later ones; and that the award behaves as
+if its allocation were the sum of the maximums so far, capped at the award.
+Another pair could agree something quite different and report it the same way.
+Whatever is agreed should say what a period with no `minimum` or no `maximum`
+means under it - in the profile's own terms, that period has no control of that
+kind (json-types.md, `SpendProfileEntry`).
 
 ### 4.5 What you will not receive
 
@@ -1026,7 +1137,9 @@ The bridge tries 3 times at 2-second intervals, then logs and drops. Configure
     with none, and reject one with no `allocation` - an award is for a quantity
     (§4.1). Populate `AwardDetails.members` (§4.2).
 16. Answer `is_feature_supported` and `get_supported_features` from one set, and
-    claim a feature only if you act on it - or decline both (§4.4).
+    claim a feature only if you act on it - or decline both (§4.4). If you claim
+    `award_spend_minimums`, report forfeits as §4.4.1 describes, and keep a
+    month incomplete until its forfeit has settled.
 17. Fetch and acknowledge notifications (§5).
 
 ---

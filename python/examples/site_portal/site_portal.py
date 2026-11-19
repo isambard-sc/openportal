@@ -767,6 +767,13 @@ def build_usage_report(
     `store.Project.final_months` rather than inferred from the calendar. Until a
     month is declared final it is reported incomplete and keeps being asked
     for. See the README for what the allocator does with that.
+
+    **On forfeits.** This portal claims neither spend-profile feature, so it
+    never charges one. A portal that claims `award_spend_minimums` adds each
+    forfeit here as usage by a local user `forfeit`, under a component also
+    named `forfeit`, in the award's unit, dated the last day of the period whose
+    minimum was missed - and keeps that month incomplete until the forfeit has
+    settled. See site-portal-api.md §4.4.1.
     """
     report = openportal.ProjectUsageReport(openportal.ProjectIdentifier(project_id))
 

@@ -100,6 +100,16 @@ so they can, but **OpenPortal does not interpret it**:
   `maximum` is an exact spend; a `maximum` of zero is a period with no spending.
   Neither needs to add up to the allocation.
 
+When a site charges a missed minimum - a **forfeit** - it reports it in the
+usage reports it already answers: billed to a user and a component both named
+`forfeit`, in the award's unit, counted in the totals, dated the last day of the
+period that was missed, with that month kept incomplete until the forfeit is
+settled. That is a convention between the portals, documented in
+[site-portal-api.md §4.4.1](../specifications/site-portal-api.md#441-reporting-a-forfeit)
+so that every site reports a forfeit the same way. It needs no type or wire
+change, and OpenPortal carries a forfeit like any other usage, without
+interpreting it. How large a forfeit is, and when it is charged, stays policy.
+
 This reading is part of the data format, not business logic: without it, two
 portals could read the same profile differently. Everything else - whether
 spending above a minimum in one period counts towards the next, whether an
@@ -325,4 +335,6 @@ dropped, and the question is answered with an error.
 
 Everything that gives a spend profile its consequences: computing shortfalls,
 forfeiting allocation, carrying an overspend forward, checking units or totals,
-and enforcing anything. Those belong to the portals - which is the point.
+and enforcing anything. Those belong to the portals - which is the point. The
+one thing written down here is how a forfeit is *reported* (§2.2), because
+every awarding portal has to be able to read it from every site.

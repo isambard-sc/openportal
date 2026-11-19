@@ -821,6 +821,14 @@ public final class SitePortal {
      * change" - which only the site's operations team can make, so here it is
      * driven by {@link LocalProject#finalMonths} rather than inferred from the
      * calendar.
+     *
+     * <p><b>On forfeits.</b> This portal claims neither spend-profile feature,
+     * so it never charges one. A portal that claims
+     * {@code award_spend_minimums} adds each forfeit here as usage by a local
+     * user {@code forfeit}, under a component also named {@code forfeit}, in the
+     * award's unit, dated the last day of the period whose minimum was missed -
+     * and keeps that month incomplete until the forfeit has settled. See
+     * site-portal-api.md §4.4.1.
      */
     public ProjectUsageReport buildUsageReport(
             String offering, String projectId, DateRange dateRange) {

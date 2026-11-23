@@ -9,8 +9,8 @@ use url::Url;
 
 use greatwestern::grammar::Instruction::{
     CreateProject, GetAward, GetAwards, GetProject, GetProjectMapping, GetProjects,
-    GetStorageReport, GetStorageReports, GetUsageReport, GetUsageReports, GetUsers, RemoveProject,
-    SyncOfferings, UpdateProject,
+    GetStorageReport, GetStorageReports, GetSupportedFeatures, GetUsageReport, GetUsageReports,
+    GetUsers, IsFeatureSupported, RemoveProject, SyncOfferings, UpdateProject,
 };
 use greatwestern::Hpc;
 use templemeads::agent;
@@ -533,6 +533,40 @@ async fn main() -> Result<()> {
                 GetStorageReports(portal, _dates) => {
                     // get the storage reports for the portal from the cluster
                     tracing::debug!("Getting storage reports for {}", portal);
+
+                    let board = server::get_board::<Hpc>().await?;
+
+                    let waiter = board.write().await.add(&job)?;
+
+                    // now signal the web-portal connected to the bridge
+                    // that this job is ready to be processed
+                    let signal_url = board.read().await.signal_url();
+
+                    match signal_web_portal(&signal_url, &job).await {
+                        Ok(_) => {},
+                        Err(e) => {
+                            // remove the job from the board as it will not be processed
+                            board.write().await.remove(&job)?;
+                            return job.errored(
+                                &format!("Failed to signal web portal: {}", e),
+                            );
+                        }
+                    }
+
+                    let mut result = waiter.result().await?;
+
+                    while !result.is_finished() {
+                        // get a new waiter to wait for the job to finish
+                        let waiter = board.write().await.get_waiter(&result)?;
+                        result = waiter.result().await?;
+                    }
+
+                    job.copy_result_from(&result)
+                }
+                IsFeatureSupported(_) | GetSupportedFeatures() => {
+                    // only the portal software knows what it supports, so
+                    // this is passed through to it like any other request
+                    tracing::debug!("Asking the portal software: {}", job.instruction());
 
                     let board = server::get_board::<Hpc>().await?;
 

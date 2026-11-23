@@ -189,6 +189,147 @@ impl QuotaEngineConfig {
     }
 
     ///
+    /// Whether any of a user's directories on this volume has never been given its
+    /// own quota ID. Only Lustre has such a notion (an inherited or default project
+    /// ID); the other engines key quotas on the UID/GID, so this is always false.
+    ///
+    pub async fn user_dirs_unassigned(
+        &self,
+        mapping: &UserMapping,
+        volume: &Volume,
+        volume_config: &UserVolumeConfig,
+        expires: &chrono::DateTime<Utc>,
+    ) -> Result<bool, Error> {
+        match self {
+            QuotaEngineConfig::Lustre(config) => {
+                let engine = LustreEngine::new(config.clone())?;
+                Ok(engine
+                    .user_dirs_unassigned(mapping, volume, volume_config, expires)
+                    .await?)
+            }
+            QuotaEngineConfig::Linux(_) | QuotaEngineConfig::Fake(_) => Ok(false),
+        }
+    }
+
+    ///
+    /// Whether any of a project's directories on this volume has never been given
+    /// its own quota ID - see `user_dirs_unassigned`.
+    ///
+    pub async fn project_dirs_unassigned(
+        &self,
+        mapping: &ProjectMapping,
+        volume: &Volume,
+        volume_config: &ProjectVolumeConfig,
+        expires: &chrono::DateTime<Utc>,
+    ) -> Result<bool, Error> {
+        match self {
+            QuotaEngineConfig::Lustre(config) => {
+                let engine = LustreEngine::new(config.clone())?;
+                Ok(engine
+                    .project_dirs_unassigned(mapping, volume, volume_config, expires)
+                    .await?)
+            }
+            QuotaEngineConfig::Linux(_) | QuotaEngineConfig::Fake(_) => Ok(false),
+        }
+    }
+
+    ///
+    /// Give a user's directories on this volume their quota ID without changing the
+    /// quota limit. Returns false if the assignment is still running. Only Lustre
+    /// tags directories; the other engines have nothing to do, so this is true.
+    ///
+    pub async fn assign_user_ids(
+        &self,
+        mapping: &UserMapping,
+        volume: &Volume,
+        volume_config: &UserVolumeConfig,
+        expires: &chrono::DateTime<Utc>,
+    ) -> Result<bool, Error> {
+        match self {
+            QuotaEngineConfig::Lustre(config) => {
+                let engine = LustreEngine::new(config.clone())?;
+                Ok(engine
+                    .assign_user_ids(mapping, volume, volume_config, expires)
+                    .await?)
+            }
+            QuotaEngineConfig::Linux(_) | QuotaEngineConfig::Fake(_) => Ok(true),
+        }
+    }
+
+    ///
+    /// Give a project's directories on this volume their quota ID without changing
+    /// the quota limit - see `assign_user_ids`.
+    ///
+    pub async fn assign_project_ids(
+        &self,
+        mapping: &ProjectMapping,
+        volume: &Volume,
+        volume_config: &ProjectVolumeConfig,
+        expires: &chrono::DateTime<Utc>,
+    ) -> Result<bool, Error> {
+        match self {
+            QuotaEngineConfig::Lustre(config) => {
+                let engine = LustreEngine::new(config.clone())?;
+                Ok(engine
+                    .assign_project_ids(mapping, volume, volume_config, expires)
+                    .await?)
+            }
+            QuotaEngineConfig::Linux(_) | QuotaEngineConfig::Fake(_) => Ok(true),
+        }
+    }
+
+    ///
+    /// The quota set on a user's quota ID, whether or not their directories
+    /// carry it yet. On Lustre this differs from `get_user_quota`, which reports
+    /// directories not yet assigned their ID as unlimited; the other engines key
+    /// quotas on the UID/GID, so it is the same.
+    ///
+    pub async fn get_user_quota_by_id(
+        &self,
+        mapping: &UserMapping,
+        volume: &Volume,
+        volume_config: &UserVolumeConfig,
+        expires: &chrono::DateTime<Utc>,
+    ) -> Result<Quota, Error> {
+        match self {
+            QuotaEngineConfig::Lustre(config) => {
+                let engine = LustreEngine::new(config.clone())?;
+                Ok(engine
+                    .get_user_quota_by_id(mapping, volume, volume_config, expires)
+                    .await?)
+            }
+            QuotaEngineConfig::Linux(_) | QuotaEngineConfig::Fake(_) => {
+                self.get_user_quota(mapping, volume, volume_config, expires)
+                    .await
+            }
+        }
+    }
+
+    ///
+    /// The quota set on a project's quota ID - see `get_user_quota_by_id`.
+    ///
+    pub async fn get_project_quota_by_id(
+        &self,
+        mapping: &ProjectMapping,
+        volume: &Volume,
+        volume_config: &ProjectVolumeConfig,
+        expires: &chrono::DateTime<Utc>,
+    ) -> Result<Quota, Error> {
+        match self {
+            QuotaEngineConfig::Lustre(config) => {
+                let engine = LustreEngine::new(config.clone())?;
+                Ok(engine
+                    .get_project_quota_by_id(mapping, volume, volume_config, expires)
+                    .await?)
+            }
+            QuotaEngineConfig::Linux(_) | QuotaEngineConfig::Fake(_) => {
+                self.get_project_quota(mapping, volume, volume_config, expires)
+                    .await
+            }
+        }
+    }
+
+    ///
     /// Clear a user quota
     ///
     pub async fn clear_user_quota(
@@ -255,9 +396,15 @@ impl QuotaEngineConfig {
     ///
     /// Verify that this engine is properly configured for the given volume.
     ///
-    /// For Lustre engines, this checks that an ID strategy exists for the volume.
+    /// For Lustre engines, this checks that an ID strategy exists for the volume,
+    /// and that a volume with a default quota says which project IDs mean
+    /// "unassigned" - without them the default could never be applied.
     ///
-    pub fn verify_volume_config(&self, volume: &Volume) -> Result<(), Error> {
+    pub fn verify_volume_config(
+        &self,
+        volume: &Volume,
+        default_quota: Option<&QuotaLimit>,
+    ) -> Result<(), Error> {
         match self {
             QuotaEngineConfig::Lustre(config) => {
                 if config.get_id_strategy(volume).is_none() {
@@ -266,6 +413,18 @@ impl QuotaEngineConfig {
                         volume
                     )));
                 }
+
+                if default_quota.is_some() && !config.has_unassigned_project_ids() {
+                    return Err(Error::Misconfigured(format!(
+                        "Volume '{}' has a default_quota, but its Lustre quota engine does not \
+                         set unassigned_project_ids. The default can only be applied to a \
+                         directory carrying one of those IDs, so say which they are - typically \
+                         the ID the volume roots are tagged with, e.g. \
+                         unassigned_project_ids = [1].",
+                        volume
+                    )));
+                }
+
                 Ok(())
             }
             QuotaEngineConfig::Linux(_config) => {
@@ -277,6 +436,30 @@ impl QuotaEngineConfig {
                 // Fake quota engine requires no per-volume configuration.
                 Ok(())
             }
+        }
+    }
+
+    ///
+    /// Check, at start-up, that a volume's default quota can be applied to the
+    /// directories created under each of its roots. Only Lustre needs this - see
+    /// `LustreEngine::check_default_quota_root`.
+    ///
+    pub async fn check_default_quota_roots(
+        &self,
+        volume: &Volume,
+        roots: &[std::path::PathBuf],
+    ) -> Result<(), Error> {
+        match self {
+            QuotaEngineConfig::Lustre(config) => {
+                let engine = LustreEngine::new(config.clone())?;
+
+                for root in roots {
+                    engine.check_default_quota_root(volume, root).await?;
+                }
+
+                Ok(())
+            }
+            QuotaEngineConfig::Linux(_) | QuotaEngineConfig::Fake(_) => Ok(()),
         }
     }
 }

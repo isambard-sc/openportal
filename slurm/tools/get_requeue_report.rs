@@ -44,7 +44,7 @@ use greatwestern::grammar::{Date, DateRange, ProjectIdentifier};
 use greatwestern::usagereport::{DailyProjectUsageReport, ProjectUsageReport, Usage};
 
 use op_slurm::dayquery::{jobs_on_day, DayRecords, JobQuery};
-use op_slurm::sacctmgr::{record_job, set_commands, ReportTotals};
+use op_slurm::sacctmgr::{new_usage_report, record_job, set_commands, ReportTotals};
 use op_slurm::slurm::{RequeuePolicy, SlurmJob, SlurmNode, SlurmNodes};
 
 ///
@@ -357,7 +357,7 @@ async fn collect(options: &Options, nodes: &SlurmNodes) -> Result<Collected> {
 
         let requeued = jobs.iter().filter(|job| job.is_requeued_attempt()).count();
 
-        absorb_day(&mut collected, &jobs, day, options.requeue_policy);
+        absorb_day(&mut collected, &jobs, day, options.requeue_policy)?;
 
         tracing::info!(
             "{}: {} record(s) read, {} of them superseded by a requeue",
@@ -392,7 +392,12 @@ async fn collect(options: &Options, nodes: &SlurmNodes) -> Result<Collected> {
 /// builds them, so that `record_job` counts a job in the window it started in
 /// and the charged/absorbed split is the agent's own.
 ///
-fn absorb_day(collected: &mut Collected, jobs: &[SlurmJob], day: &Date, policy: RequeuePolicy) {
+fn absorb_day(
+    collected: &mut Collected,
+    jobs: &[SlurmJob],
+    day: &Date,
+    policy: RequeuePolicy,
+) -> Result<()> {
     collected.days.push(day.clone());
 
     let start_time = day.day().start_time().and_utc();
@@ -447,9 +452,11 @@ fn absorb_day(collected: &mut Collected, jobs: &[SlurmJob], day: &Date, policy: 
         collected
             .projects
             .entry(project.clone())
-            .or_insert_with(|| ProjectUsageReport::new(&project))
-            .set_report(day, &report);
+            .or_insert(new_usage_report(&project)?)
+            .set_report(day, &report)?;
     }
+
+    Ok(())
 }
 
 /// Everything requeueing cost a project - charged and absorbed together.
@@ -1124,7 +1131,7 @@ mod tests {
     fn collected_fixture(policy: RequeuePolicy) -> Collected {
         let mut collected = Collected::default();
 
-        absorb_day(&mut collected, &fixture_jobs(), &day(DAY_ONE), policy);
+        absorb_day(&mut collected, &fixture_jobs(), &day(DAY_ONE), policy).unwrap();
 
         collected
     }

@@ -2,6 +2,7 @@
 import type { Link } from "./Link";
 import type { MembershipControl } from "./MembershipControl";
 import type { Note } from "./Note";
+import type { SpendProfileEntry } from "./SpendProfileEntry";
 
 /**
  * Details about a project that exists in a portal.
@@ -57,7 +58,8 @@ allocation: string | null,
  */
 breakdown: { [key in string]?: string }, 
 /**
- * Link back to the award record on the funding body's system
+ * The award as made by the awarding portal: its identifier there, and
+ * in `url` the link to the award's page on the awarding portal
  */
 award?: Link, 
 /**
@@ -65,7 +67,8 @@ award?: Link,
  */
 call?: Link, 
 /**
- * Link to the project page on the remote/awarding portal
+ * Link to the project's page on the site portal. Set by the site and
+ * returned from `get_award`; the awarding portal keeps and shows it
  */
 project_link?: Link, 
 /**
@@ -94,4 +97,15 @@ membership_control?: MembershipControl,
  * If this is Some(vec![...]), then only the domains that match
  * those in the list are allowed.
  */
-allowed_domains: Array<string> | null, };
+allowed_domains: Array<string> | null, 
+/**
+ * The least that should be spent over each period of the award, as an
+ * agreement between the awarding portal and the site. Carried, not
+ * interpreted: OpenPortal only ensures it is well formed.
+ *
+ * Three states, like `allowed_domains`. Absent (`None`) means no profile -
+ * or, under a legacy partial update, keep the one held. `Some(vec![])`
+ * means explicitly no minimums, which is how a profile is removed. A
+ * non-empty list is the profile, held sorted by date.
+ */
+spend_profile?: Array<SpendProfileEntry>, };

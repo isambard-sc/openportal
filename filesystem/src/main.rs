@@ -35,6 +35,7 @@ mod linuxquotaengine;
 mod lustreengine;
 mod nameservice;
 mod quotaengine;
+mod quotamarker;
 mod volumeconfig;
 
 use volumeconfig::FilesystemConfig;
@@ -495,23 +496,33 @@ async fn create_project_dirs_and_links(
 }
 
 ///
-/// Apply each project volume's configured default quota, for the volumes named in
-/// `created_volumes`.
+/// Apply each project volume's configured default quota.
 ///
 /// The default is a **starting point for a new directory, not a policy that is
 /// re-imposed**. `add_local_project` and `add_local_user` are both re-sent for
 /// projects that already exist - the cluster agent re-runs them on a retry, and
 /// `create_user_dirs` calls `create_project_dirs_and_links` every time any member is
-/// added - so applying the default on every call silently undid quotas an operator had
-/// raised with `set_local_project_quota`. Two conditions therefore gate it:
+/// added - so applying the default on every call would silently undo quotas an
+/// operator had raised. For each volume with a quota engine and a `default_quota`:
 ///
-///  1. this call created the directory on that volume (`created_volumes`), and
-///  2. the project has no quota on that volume yet.
+///  - **The directories have never been given their own quota ID** (on Lustre, they
+///    still carry one of the engine's `unassigned_project_ids`, typically inherited
+///    from the volume root). If the quota ID has no limit yet, the default is set
+///    and then the ID is assigned to the directories. If the ID already has a limit
+///    it is left alone, and only the ID is assigned.
+///  - **Otherwise, if this call created a directory on the volume** - the case for
+///    engines that key quotas on the UID/GID, which have no notion of an unassigned
+///    directory - the default is set unless a quota is already set.
+///  - **Otherwise** the directories already carry their ID. No limit is touched,
+///    but an assignment that was interrupted part way (see `quotamarker`) is
+///    finished.
 ///
-/// A quota that cannot be read is **not** taken to be absent: an `lfs quota` that fails
-/// or times out leaves the existing limit unknown, and overwriting it on that basis is
-/// exactly the data loss this guards against. Such a volume is skipped and logged, as
-/// is any failure to set the quota itself - as before, neither fails the job.
+/// On Lustre, assigning the ID walks the whole directory tree, which can take
+/// hours. The walk carries on in the background, and until it has finished this
+/// returns `Error::NotReady`, so the job is resubmitted rather than reporting
+/// success for a quota that is not in place yet. Any other failure fails the job
+/// too - including a quota that cannot be read, which is never taken to be absent,
+/// as overwriting an unknown limit is exactly the data loss this guards against.
 ///
 async fn set_default_project_quotas(
     mapping: &ProjectMapping,
@@ -519,6 +530,8 @@ async fn set_default_project_quotas(
     expires: &chrono::DateTime<Utc>,
 ) -> Result<(), Error> {
     let config = cache::get_filesystem_config().await?;
+
+    let mut walking: Vec<String> = Vec::new();
 
     for (volume, volume_config) in config.get_project_volumes() {
         if !volume_config.has_quota_engine() {
@@ -529,65 +542,70 @@ async fn set_default_project_quotas(
             continue;
         };
 
-        if !created_volumes.contains(&volume) {
-            tracing::info!(
-                "Not setting the default quota for project {} on volume {} - the directories \
-                 were already there, so this is not a new project directory.",
-                mapping.project(),
-                volume
-            );
-            continue;
-        }
-
-        match get_project_quota(mapping, &volume, expires).await {
-            Ok(quota) => {
-                if !quota.is_unlimited() {
+        let finished = if project_dirs_unassigned(mapping, &volume, expires).await? {
+            match get_project_quota_by_id(mapping, &volume, expires).await? {
+                Some(quota) if !quota.is_unlimited() => {
                     tracing::info!(
-                        "Not setting the default quota for project {} on volume {} - a quota \
-                         of {} is already set.",
+                        "The directories for project {} on volume {} have not been assigned \
+                         their own quota ID, but the ID already has a quota of {} - leaving \
+                         that limit as it is, and assigning the ID.",
                         mapping.project(),
                         volume,
                         quota.limit()
                     );
-                    continue;
+                    assign_project_ids(mapping, &volume, expires).await?
+                }
+                _ => {
+                    tracing::info!(
+                        "Setting the default quota of {} for project {} on volume {} - its \
+                         directories have not been assigned their own quota ID yet.",
+                        default_quota,
+                        mapping.project(),
+                        volume
+                    );
+                    apply_default(
+                        set_project_quota(mapping, &volume, default_quota, expires).await,
+                    )?
                 }
             }
-            Err(e) => {
-                tracing::warn!(
-                    "Not setting the default quota for project {} on volume {} - could not \
-                     read the existing quota: {}",
-                    mapping.project(),
-                    volume,
-                    e
-                );
-                continue;
-            }
-        }
+        } else if created_volumes.contains(&volume) {
+            let quota = get_project_quota(mapping, &volume, expires).await?;
 
-        tracing::info!(
-            "Setting default quota for project {} on volume {}: {}",
-            mapping.project(),
-            volume,
-            default_quota
-        );
-
-        match set_project_quota(mapping, &volume, default_quota, expires).await {
-            Ok(_) => {
+            if quota.is_unlimited() {
                 tracing::info!(
-                    "Successfully set default quota for project {} on volume {}",
+                    "Setting the default quota of {} for new project {} on volume {}",
+                    default_quota,
                     mapping.project(),
                     volume
                 );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to set default quota for project {} on volume {}: {}",
+                apply_default(set_project_quota(mapping, &volume, default_quota, expires).await)?
+            } else {
+                tracing::info!(
+                    "Not setting the default quota for project {} on volume {} - a quota of \
+                     {} is already set.",
                     mapping.project(),
                     volume,
-                    e
+                    quota.limit()
                 );
+                true
             }
+        } else {
+            // already assigned: only finish a walk that was interrupted
+            assign_project_ids(mapping, &volume, expires).await?
+        };
+
+        if !finished {
+            walking.push(volume.to_string());
         }
+    }
+
+    if !walking.is_empty() {
+        return Err(Error::NotReady(format!(
+            "The quota ID for project {} is still being assigned to its directories on \
+             volume(s) {} in the background. Resubmit to check again.",
+            mapping.project(),
+            walking.join(", ")
+        )));
     }
 
     Ok(())
@@ -600,7 +618,14 @@ async fn create_user_dirs(
     mapping: &UserMapping,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<(), Error> {
-    create_project_dirs_and_links(&mapping.project(), expires).await?;
+    // A project directory whose quota ID is still being assigned does not hold up
+    // the user's own directories: they are created regardless, and the job then
+    // reports that it is not ready yet.
+    let project_ready = match create_project_dirs_and_links(&mapping.project(), expires).await {
+        Ok(()) => Ok(()),
+        Err(Error::NotReady(message)) => Err(Error::NotReady(message)),
+        Err(e) => return Err(e),
+    };
 
     let config = cache::get_filesystem_config().await?;
 
@@ -636,20 +661,47 @@ async fn create_user_dirs(
 
     // now we have created all of the directories, set the default quota on the volumes
     // whose directories this call actually created, and only where none is set already
-    set_default_user_quotas(mapping, &created_volumes, expires).await?;
-
-    Ok(())
+    match (
+        project_ready,
+        set_default_user_quotas(mapping, &created_volumes, expires).await,
+    ) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(Error::NotReady(project)), Err(Error::NotReady(user))) => {
+            Err(Error::NotReady(format!("{} {}", project, user)))
+        }
+        (_, Err(e)) if !matches!(e, Error::NotReady(_)) => Err(e),
+        (Err(e), _) | (_, Err(e)) => Err(e),
+    }
 }
 
 ///
-/// Apply each user volume's configured default quota, for the volumes named in
-/// `created_volumes`.
+/// Apply each user volume's configured default quota.
 ///
-/// The same two conditions as `set_default_project_quotas` gate this, and for the same
-/// reason - `add_local_user` is re-sent for users who already exist, and the default is
-/// a starting point for a new directory rather than a policy to re-impose. See there
-/// for the full rationale, including why an unreadable quota is not treated as an
-/// absent one.
+/// The default is a **starting point for a new directory, not a policy that is
+/// re-imposed**. `add_local_project` and `add_local_user` are both re-sent for
+/// users that already exist - the cluster agent re-runs them on a retry, and
+/// `create_user_dirs` calls `create_project_dirs_and_links` every time any member is
+/// added - so applying the default on every call would silently undo quotas an
+/// operator had raised. For each volume with a quota engine and a `default_quota`:
+///
+///  - **The directories have never been given their own quota ID** (on Lustre, they
+///    still carry one of the engine's `unassigned_project_ids`, typically inherited
+///    from the volume root). If the quota ID has no limit yet, the default is set
+///    and then the ID is assigned to the directories. If the ID already has a limit
+///    it is left alone, and only the ID is assigned.
+///  - **Otherwise, if this call created a directory on the volume** - the case for
+///    engines that key quotas on the UID/GID, which have no notion of an unassigned
+///    directory - the default is set unless a quota is already set.
+///  - **Otherwise** the directories already carry their ID. No limit is touched,
+///    but an assignment that was interrupted part way (see `quotamarker`) is
+///    finished.
+///
+/// On Lustre, assigning the ID walks the whole directory tree, which can take
+/// hours. The walk carries on in the background, and until it has finished this
+/// returns `Error::NotReady`, so the job is resubmitted rather than reporting
+/// success for a quota that is not in place yet. Any other failure fails the job
+/// too - including a quota that cannot be read, which is never taken to be absent,
+/// as overwriting an unknown limit is exactly the data loss this guards against.
 ///
 async fn set_default_user_quotas(
     mapping: &UserMapping,
@@ -657,6 +709,8 @@ async fn set_default_user_quotas(
     expires: &chrono::DateTime<Utc>,
 ) -> Result<(), Error> {
     let config = cache::get_filesystem_config().await?;
+
+    let mut walking: Vec<String> = Vec::new();
 
     for (volume, volume_config) in config.get_user_volumes() {
         if !volume_config.has_quota_engine() {
@@ -667,68 +721,83 @@ async fn set_default_user_quotas(
             continue;
         };
 
-        if !created_volumes.contains(&volume) {
-            tracing::info!(
-                "Not setting the default quota for user {} on volume {} - the directories \
-                 were already there, so this is not a new user directory.",
-                mapping.local_user(),
-                volume
-            );
-            continue;
-        }
-
-        match get_user_quota(mapping, &volume, expires).await {
-            Ok(quota) => {
-                if !quota.is_unlimited() {
+        let finished = if user_dirs_unassigned(mapping, &volume, expires).await? {
+            match get_user_quota_by_id(mapping, &volume, expires).await? {
+                Some(quota) if !quota.is_unlimited() => {
                     tracing::info!(
-                        "Not setting the default quota for user {} on volume {} - a quota of \
-                         {} is already set.",
+                        "The directories for user {} on volume {} have not been assigned \
+                         their own quota ID, but the ID already has a quota of {} - leaving \
+                         that limit as it is, and assigning the ID.",
                         mapping.local_user(),
                         volume,
                         quota.limit()
                     );
-                    continue;
+                    assign_user_ids(mapping, &volume, expires).await?
+                }
+                _ => {
+                    tracing::info!(
+                        "Setting the default quota of {} for user {} on volume {} - its \
+                         directories have not been assigned their own quota ID yet.",
+                        default_quota,
+                        mapping.local_user(),
+                        volume
+                    );
+                    apply_default(set_user_quota(mapping, &volume, default_quota, expires).await)?
                 }
             }
-            Err(e) => {
-                tracing::warn!(
-                    "Not setting the default quota for user {} on volume {} - could not read \
-                     the existing quota: {}",
-                    mapping.local_user(),
-                    volume,
-                    e
-                );
-                continue;
-            }
-        }
+        } else if created_volumes.contains(&volume) {
+            let quota = get_user_quota(mapping, &volume, expires).await?;
 
-        tracing::info!(
-            "Setting default quota for user {} on volume {}: {}",
-            mapping.local_user(),
-            volume,
-            default_quota
-        );
-
-        match set_user_quota(mapping, &volume, default_quota, expires).await {
-            Ok(_) => {
+            if quota.is_unlimited() {
                 tracing::info!(
-                    "Successfully set default quota for user {} on volume {}",
+                    "Setting the default quota of {} for new user {} on volume {}",
+                    default_quota,
                     mapping.local_user(),
                     volume
                 );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to set default quota for user {} on volume {}: {}",
+                apply_default(set_user_quota(mapping, &volume, default_quota, expires).await)?
+            } else {
+                tracing::info!(
+                    "Not setting the default quota for user {} on volume {} - a quota of \
+                     {} is already set.",
                     mapping.local_user(),
                     volume,
-                    e
+                    quota.limit()
                 );
+                true
             }
+        } else {
+            // already assigned: only finish a walk that was interrupted
+            assign_user_ids(mapping, &volume, expires).await?
+        };
+
+        if !finished {
+            walking.push(volume.to_string());
         }
     }
 
+    if !walking.is_empty() {
+        return Err(Error::NotReady(format!(
+            "The quota ID for user {} is still being assigned to its directories on \
+             volume(s) {} in the background. Resubmit to check again.",
+            mapping.local_user(),
+            walking.join(", ")
+        )));
+    }
+
     Ok(())
+}
+
+///
+/// The result of setting a default quota, as "has the quota ID finished being
+/// assigned": `NotReady` means the limit is set but the walk is still running.
+///
+fn apply_default(result: Result<Quota, Error>) -> Result<bool, Error> {
+    match result {
+        Ok(_) => Ok(true),
+        Err(Error::NotReady(_)) => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 ///
@@ -834,7 +903,6 @@ pub async fn clear_project_quota(
     engine
         .clear_project_quota(mapping, volume, &volume_config, expires)
         .await
-        .map_err(|e| Error::Failed(e.to_string()))
 }
 
 ///
@@ -866,7 +934,80 @@ pub async fn set_project_quota(
     engine
         .set_project_quota(mapping, volume, &volume_config, limit, expires)
         .await
-        .map_err(|e| Error::Failed(e.to_string()))
+}
+
+///
+/// Whether any of the project's directories on a specific volume has never been
+/// assigned its own quota ID by the quota engine
+///
+async fn project_dirs_unassigned(
+    mapping: &greatwestern::grammar::ProjectMapping,
+    volume: &greatwestern::storage::Volume,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    let config = cache::get_filesystem_config().await?;
+
+    let volume_config = config.get_project_volume(volume)?;
+
+    let Some(engine_name) = volume_config.quota_engine_name() else {
+        return Ok(false);
+    };
+
+    let engine = config.get_quota_engine(engine_name)?;
+
+    engine
+        .project_dirs_unassigned(mapping, volume, &volume_config, expires)
+        .await
+}
+
+///
+/// Give the project's directories on a specific volume their quota ID, without
+/// changing the quota limit. Returns false if the assignment is still running.
+///
+async fn assign_project_ids(
+    mapping: &greatwestern::grammar::ProjectMapping,
+    volume: &greatwestern::storage::Volume,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    let config = cache::get_filesystem_config().await?;
+
+    let volume_config = config.get_project_volume(volume)?;
+
+    let Some(engine_name) = volume_config.quota_engine_name() else {
+        return Ok(true);
+    };
+
+    let engine = config.get_quota_engine(engine_name)?;
+
+    engine
+        .assign_project_ids(mapping, volume, &volume_config, expires)
+        .await
+}
+
+///
+/// The quota set on the project's quota ID on a specific volume, whether or not
+/// its directories carry that ID yet. `None` if the volume has no quota engine.
+///
+async fn get_project_quota_by_id(
+    mapping: &greatwestern::grammar::ProjectMapping,
+    volume: &greatwestern::storage::Volume,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Option<Quota>, Error> {
+    let config = cache::get_filesystem_config().await?;
+
+    let volume_config = config.get_project_volume(volume)?;
+
+    let Some(engine_name) = volume_config.quota_engine_name() else {
+        return Ok(None);
+    };
+
+    let engine = config.get_quota_engine(engine_name)?;
+
+    Ok(Some(
+        engine
+            .get_project_quota_by_id(mapping, volume, &volume_config, expires)
+            .await?,
+    ))
 }
 
 ///
@@ -897,7 +1038,6 @@ pub async fn get_project_quota(
     engine
         .get_project_quota(mapping, volume, &volume_config, expires)
         .await
-        .map_err(|e| Error::Failed(e.to_string()))
 }
 
 ///
@@ -986,7 +1126,6 @@ pub async fn clear_user_quota(
     engine
         .clear_user_quota(mapping, volume, &volume_config, expires)
         .await
-        .map_err(|e| Error::Failed(e.to_string()))
 }
 
 ///
@@ -1018,7 +1157,80 @@ pub async fn set_user_quota(
     engine
         .set_user_quota(mapping, volume, &volume_config, limit, expires)
         .await
-        .map_err(|e| Error::Failed(e.to_string()))
+}
+
+///
+/// Whether any of the user's directories on a specific volume has never been
+/// assigned its own quota ID by the quota engine
+///
+async fn user_dirs_unassigned(
+    mapping: &greatwestern::grammar::UserMapping,
+    volume: &greatwestern::storage::Volume,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    let config = cache::get_filesystem_config().await?;
+
+    let volume_config = config.get_user_volume(volume)?;
+
+    let Some(engine_name) = volume_config.quota_engine_name() else {
+        return Ok(false);
+    };
+
+    let engine = config.get_quota_engine(engine_name)?;
+
+    engine
+        .user_dirs_unassigned(mapping, volume, &volume_config, expires)
+        .await
+}
+
+///
+/// Give the user's directories on a specific volume their quota ID, without
+/// changing the quota limit. Returns false if the assignment is still running.
+///
+async fn assign_user_ids(
+    mapping: &greatwestern::grammar::UserMapping,
+    volume: &greatwestern::storage::Volume,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    let config = cache::get_filesystem_config().await?;
+
+    let volume_config = config.get_user_volume(volume)?;
+
+    let Some(engine_name) = volume_config.quota_engine_name() else {
+        return Ok(true);
+    };
+
+    let engine = config.get_quota_engine(engine_name)?;
+
+    engine
+        .assign_user_ids(mapping, volume, &volume_config, expires)
+        .await
+}
+
+///
+/// The quota set on the user's quota ID on a specific volume, whether or not
+/// its directories carry that ID yet. `None` if the volume has no quota engine.
+///
+async fn get_user_quota_by_id(
+    mapping: &greatwestern::grammar::UserMapping,
+    volume: &greatwestern::storage::Volume,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Option<Quota>, Error> {
+    let config = cache::get_filesystem_config().await?;
+
+    let volume_config = config.get_user_volume(volume)?;
+
+    let Some(engine_name) = volume_config.quota_engine_name() else {
+        return Ok(None);
+    };
+
+    let engine = config.get_quota_engine(engine_name)?;
+
+    Ok(Some(
+        engine
+            .get_user_quota_by_id(mapping, volume, &volume_config, expires)
+            .await?,
+    ))
 }
 
 ///
@@ -1049,7 +1261,6 @@ pub async fn get_user_quota(
     engine
         .get_user_quota(mapping, volume, &volume_config, expires)
         .await
-        .map_err(|e| Error::Failed(e.to_string()))
 }
 
 ///

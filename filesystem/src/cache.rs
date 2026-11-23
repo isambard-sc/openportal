@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::Result;
-use greatwestern::storage::QuotaLimit;
+use greatwestern::storage::{QuotaLimit, Volume};
 use once_cell::sync::Lazy;
 use templemeads::Error;
 use tokio::sync::RwLock;
@@ -122,6 +122,47 @@ pub async fn set_filesystem_config(mut config: FilesystemConfig) -> Result<(), E
         let engine_config = config.get_quota_engine(&engine_name)?;
         tracing::info!("  - Config: {:?}", engine_config);
         engine_config.initialize().await?;
+    }
+
+    // A volume with a default quota must be able to apply it. On Lustre that
+    // depends on how the volume roots are tagged, which can only be checked
+    // against the filesystem - so refuse to start, naming the fix, rather than
+    // run with a default that would silently never be applied.
+    let mut defaulted: Vec<(Volume, String, Vec<std::path::PathBuf>)> = Vec::new();
+
+    for (volume, volume_config) in config.get_user_volumes() {
+        if let (Some(engine_name), Some(_)) = (
+            volume_config.quota_engine_name(),
+            volume_config.default_quota(),
+        ) {
+            let roots = volume_config
+                .path_configs()
+                .iter()
+                .map(|p| std::path::PathBuf::from(p.root()))
+                .collect();
+            defaulted.push((volume, engine_name.to_string(), roots));
+        }
+    }
+
+    for (volume, volume_config) in config.get_project_volumes() {
+        if let (Some(engine_name), Some(_)) = (
+            volume_config.quota_engine_name(),
+            volume_config.default_quota(),
+        ) {
+            let roots = volume_config
+                .path_configs()
+                .iter()
+                .map(|p| std::path::PathBuf::from(p.root()))
+                .collect();
+            defaulted.push((volume, engine_name.to_string(), roots));
+        }
+    }
+
+    for (volume, engine_name, roots) in defaulted {
+        config
+            .get_quota_engine(&engine_name)?
+            .check_default_quota_roots(&volume, &roots)
+            .await?;
     }
 
     cache.filesystem_config = Some(config);

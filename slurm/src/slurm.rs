@@ -1777,7 +1777,7 @@ impl Display for SlurmAccount {
             self.name(),
             self.description(),
             self.organization(),
-            self.limit(),
+            self.limit().as_duration(),
             self.clusters()
         )
     }

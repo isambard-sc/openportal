@@ -110,7 +110,8 @@ complete with `result_type` of `"None"` and `result` of `null` or `"{}"`.
 
 ### `bool`
 
-Returned by: `is_protected_user`, `is_existing_user`, `is_existing_project`
+Returned by: `is_protected_user`, `is_existing_user`, `is_existing_project`,
+`is_feature_supported`
 
 ```json
 true | false
@@ -137,9 +138,11 @@ A plain JSON string containing a filesystem path.
 
 ### `Vec<String>`
 
-Returned by: `get_project_dirs`, `get_local_project_dirs`
+Returned by: `get_project_dirs`, `get_local_project_dirs`,
+`get_supported_features`
 
-A JSON array of filesystem path strings.
+A JSON array of strings - filesystem paths for the directory instructions, and
+feature names (e.g. `"award_spend_maximums"`) for `get_supported_features`.
 
 ```json
 [
@@ -256,7 +259,7 @@ Fields that are `null` or unset are omitted from the serialised JSON.
     "project_storage":  "5 TB",
     "user_storage":     "500 GB"
   },
-  "award":       { "id": "061-4738952-1", "url": "https://gtr.ukri.org/..." },
+  "award":       { "id": "061-4738952-1", "url": "https://waldur.example.ac.uk/awards/..." },
   "call":        { "id": "EPSRC-2024-AI", "url": "https://..." },
   "project_link":{ "id": "PRJ-001", "url": "https://waldur.example.ac.uk/projects/..." },
   "renewal":     { "url": "https://apply.example.ac.uk/renew" },
@@ -269,6 +272,12 @@ Fields that are `null` or unset are omitted from the serialised JSON.
     "example.com",
     "*.university.ac.uk",
     "collaborator@gmail.com"
+  ],
+  "spend_profile": [
+    { "from": "2024-01-01", "minimum": "100 NHR", "maximum": "100 NHR" },
+    { "from": "2024-04-01", "minimum": "100 NHR" },
+    { "from": "2024-07-01", "maximum": "300 NHR" },
+    { "from": "2024-10-01" }
   ]
 }
 ```
@@ -286,14 +295,15 @@ Fields that are `null` or unset are omitted from the serialised JSON.
 | `start_date` | string | ISO date `YYYY-MM-DD` |
 | `end_date` | string | ISO date `YYYY-MM-DD` |
 | `allocation` | string | Resource allocation, e.g. `"1000 NHR"` or `"No allocation"` |
-| `award` | `Link` | Link to the award record on the funding body's system |
+| `award` | `Link` | The award as made by the awarding portal: its identifier there, and in `url` the link to the award's page on the awarding portal. Set by the awarding portal; a site echoes it |
 | `call` | `Link` | Link to the funding call that produced this award |
-| `project_link` | `Link` | Link to the project page on the remote/awarding portal |
+| `project_link` | `Link` | Link to the project's page on the site portal. Set by the site and returned from `get_award`; the awarding portal keeps and shows it. See [site-portal-api.md §4.1.3](site-portal-api.md#413-what-happens-to-your-get_award-reply) |
 | `renewal` | `Link` | Link to the renewal / more-time application page |
 | `notes` | array of `Note` | Append-only timestamped messages; omitted when empty |
 | `earliest_approve` | string | RFC 3339 UTC — do not approve before this time; omitted when unset |
 | `membership_control` | string | `"open"` / `"members_only"` / `"roles_only"` / `"locked"` — see below; omitted when unset (defaults to `open`) |
 | `allowed_domains` | array of strings | Member email allow-list; `null` = all allowed; `[]` = none allowed. Each entry is either a domain pattern (`"example.com"`, `"*.university.ac.uk"`) or an exact email address (`"collaborator@gmail.com"`). See below. |
+| `spend_profile` | array of `SpendProfileEntry` | Dated spend controls (minimums and maximums), carried between portals and not interpreted by OpenPortal; omitted when absent; `[]` explicitly removes a profile. See below. |
 
 **`MembershipControl` values:**
 
@@ -332,6 +342,42 @@ When `allowed_domains` is absent (`null`), all email addresses are permitted.
 When it is present but empty (`[]`), no email addresses are permitted. The
 three-state semantics allow a portal to explicitly express "no members allowed"
 as distinct from "unrestricted".
+
+**`spend_profile` entries (`SpendProfileEntry`):**
+
+```json
+{ "from": "<YYYY-MM-DD>", "minimum": "<size> <units>", "maximum": "<size> <units>" }
+```
+
+`from` is required; `minimum` (the least that should be spent - "use it or lose
+it") and `maximum` (a cap) are each optional, and left out rather than written
+as `null` when unset. Each is an allocation, parsed and validated as
+`allocation` is (a negative, `NaN` or infinite size is refused), and neither may
+be an empty allocation (`"none"`), which as a cap could mean either "no cap" or
+"nothing". When both are set they must be in the same units, with the maximum no
+less than the minimum; equal is an exact spend. Any other field is ignored, as
+it is elsewhere in `AwardDetails`.
+
+By convention between the portals, each entry applies from its `from` date up
+to, but not including, the next entry's, and the last until `end_date`. **Each
+entry describes only its own period - nothing carries over from the entry
+before.** A control an entry leaves out does not apply in its period, and an
+entry with neither control means no controls from its date:
+
+| Entry | Means (and how it prints) |
+|-------|---------------------------|
+| `{"from": "2027-01-01", "minimum": "100 NHR", "maximum": "100 NHR"}` | `from 2027-01-01: spend exactly 100 NHR` |
+| `{"from": "2027-01-01", "minimum": "100 NHR", "maximum": "300 NHR"}` | `from 2027-01-01: spend at least 100 NHR and at most 300 NHR` |
+| `{"from": "2027-01-01", "minimum": "100 NHR"}` | `from 2027-01-01: spend at least 100 NHR` |
+| `{"from": "2027-01-01", "maximum": "300 NHR"}` | `from 2027-01-01: spend at most 300 NHR` |
+| `{"from": "2027-01-01"}` | `from 2027-01-01: no spend controls` |
+
+Nothing checks the units across entries or against the allocation, the dates
+against the award, or the totals - those are for the portals to agree. Entries
+are held sorted by date, so they always serialise in that order, and are
+otherwise kept exactly as sent - redundant entries included. Two entries with
+the same `from` date are refused. `update_award` replaces the profile wholesale,
+as it does `members`.
 
 **`Link` object:**
 
@@ -403,7 +449,29 @@ A JSON object containing a single integer field `seconds`.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `seconds` | integer (u64) | Total compute time in seconds |
+| `seconds` | integer (u64) | A count. For `get_limit` it is seconds of time; inside a usage report it is a count of the report's `usage_unit` (see [`UsageUnit`](#usageunit)), whatever that is - the field keeps the name `seconds` for compatibility |
+
+---
+
+### `UsageUnit`
+
+What one count of a usage report's figures means: `counts_per_unit` counts make
+one `name`. Carried by `ProjectUsageReport` as `usage_unit`, and per component
+as `component_units`.
+
+```json
+{ "name": "GBP", "counts_per_unit": 1000000 }
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | The unit, canonicalised as `Allocation` units are: a time unit (`NHR`, `GPUHR`, `CPUHR`, `COREHR`, `GBHR`, `MBHR`, `BHR`), an ISO 4217 currency code (`GBP`, `USD`, `EUR`, ...; `£` and `€` are read as `GBP` and `EUR`; `$` is not accepted), or a name two portals agreed |
+| `counts_per_unit` | integer (u64, at least 1) | How many counts make one unit. Defaults for the well-known units: 3600 for a time unit (a count is a unit-second, as usage has always been), 1000000 for a currency (a count is a micro-unit). A unit of your own states its own |
+
+So in a report in `GBP` at 1000000, `{"seconds": 3200000}` is £3.20; in one in
+`GPUHR` at 3600, `{"seconds": 180000}` is 50 GPU hours. Read a figure as
+`seconds / counts_per_unit` of `name`. See
+`docs/plans/usage-units-design.md`.
 
 ---
 
@@ -547,6 +615,8 @@ Compute usage for a single project over a date range, indexed by calendar date.
 ```json
 {
   "project": "myproject.waldur",
+  "usage_unit": {"name": "NHR", "counts_per_unit": 3600},
+  "component_units": {"gpu-partition": {"name": "GPUHR", "counts_per_unit": 3600}},
   "reports": {
     "2024-01-15": {
       "reports": {
@@ -586,8 +656,19 @@ Compute usage for a single project over a date range, indexed by calendar date.
 | Field | Type | Description |
 |-------|------|-------------|
 | `project` | string | `ProjectIdentifier` in `project.portal` format |
+| `usage_unit` | `UsageUnit` | The unit of every consumption figure in the report - `reports` (including unattributed usage) and the requeue, charged-requeue and reservation figures. Billing and limits use this unit. Absent only on a report from before units, whose figures were 3600 counts per hour of the award's unit |
+| `component_units` | object | (Optional, omitted when empty) Map of component name → `UsageUnit`, for components not in `usage_unit`. A component not listed is in `usage_unit`. Components are information |
 | `reports` | object | Map of date string (`YYYY-MM-DD`) → `DailyProjectUsageReport` |
 | `users` | object | Map of `UserIdentifier` string → local username string. Provides the mapping used to translate local usernames back to OpenPortal identifiers |
+
+Queue waits, runtimes and the other job statistics in a daily report are seconds
+of real time, whatever `usage_unit` is.
+
+**A report from before units** has no `usage_unit`. It reads, totals and passes
+on as before, but no figures can be added to it until its unit is declared
+(`set_unit`, or `set_time_unit` for a time unit). Reports combine only in the
+same unit - or when both have none - and a report with no figures takes the
+other's unit. See `docs/plans/usage-units-design.md`.
 
 **Empty report (no usage data for the requested period):**
 ```json

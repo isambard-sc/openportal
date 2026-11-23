@@ -459,6 +459,56 @@ def _run_all() -> None:
         f"-> {job.error}",
     )
 
+    print("\n-- a spend profile is carried, not interpreted -----------------")
+
+    # The awarding portal can say how an award should be spent over time: the
+    # least to spend, the most that may be spent, or both, from each date. An
+    # entry that sets neither ends the controls from its date. This portal does
+    # not act on any of it (it claims neither `award_spend_minimums` nor
+    # `award_spend_maximums` - see below), but it must not lose it either: the
+    # profile is part of the award, and `get_award` hands the award back.
+    quarterly = [
+        openportal.SpendProfileEntry(datetime.date(2027, 7, 1), maximum="300 NHR"),
+        openportal.SpendProfileEntry(datetime.date(2027, 1, 1), "100 NHR", "100 NHR"),
+        openportal.SpendProfileEntry(datetime.date(2027, 4, 1), "100 NHR"),
+        openportal.SpendProfileEntry(datetime.date(2027, 10, 1)),
+    ]
+    job = site_portal.answer(
+        make_job(f"update_project {AWARD} {details(spend_profile=quarterly)}")
+    )
+    check("an update carrying a spend profile is accepted", not job.is_error)
+
+    held = site_portal.answer(make_job(f"get_award {AWARD}")).result
+    check(
+        "...and get_award hands the profile back, in date order",
+        [str(e) for e in held.spend_profile or []]
+        == [
+            "from 2027-01-01: spend exactly 100 NHR",
+            "from 2027-04-01: spend at least 100 NHR",
+            "from 2027-07-01: spend at most 300 NHR",
+            "from 2027-10-01: no spend controls",
+        ],
+        f"-> {held.spend_profile}",
+    )
+
+    # Absent and `[]` are different statements. An update without the field -
+    # from a sender that predates it, say - keeps what is held; `[]` removes it.
+    site_portal.answer(make_job(f"update_project {AWARD} {details()}"))
+    held = site_portal.answer(make_job(f"get_award {AWARD}")).result
+    check(
+        "an update that does not mention it keeps the profile",
+        len(held.spend_profile or []) == 4,
+        f"-> {held.spend_profile}",
+    )
+
+    site_portal.answer(make_job(f"update_project {AWARD} {details(spend_profile=[])}"))
+    held = site_portal.answer(make_job(f"get_award {AWARD}")).result
+    check(
+        "an update carrying [] removes it",
+        held.spend_profile == [],
+        f"-> {held.spend_profile}",
+    )
+
     print("\n-- usage: recorded in our namespace, answered in theirs --------")
 
     # Push figures in the way an operator's parser would - against our own
@@ -694,6 +744,7 @@ def _run_all() -> None:
         "get_usage_reports allocator this_month": "UsageReport",
         f"get_storage_report {AWARD} this_month": "ProjectStorageReport",
         "get_storage_reports allocator": "StorageReport",
+        "is_feature_supported award_spend_minimums": "bool",
         f"remove_project {AWARD2}": "ProjectMapping",
     }
 
@@ -849,6 +900,57 @@ def _run_all() -> None:
     job = site_portal.answer(make_job(f"get_storage_report {AWARD} this_month"))
     check("get_storage_report succeeds rather than failing", not job.is_error)
     check("...with an empty report", job.result.is_empty())
+
+    print("\n-- what this portal supports -----------------------------------")
+
+    # It carries spend profiles but does not act on them, so it does not claim
+    # to support them - and a name it has never heard of is a plain "no", not
+    # an error. That is what lets an awarding portal ask about a feature defined
+    # after this code was written.
+    for feature in ("award_spend_minimums", "award_spend_maximums", "some_future_feature"):
+        job = site_portal.answer(make_job(f"is_feature_supported {feature}"))
+        check(
+            f"'{feature}' is not supported",
+            not job.is_error and job.result is False,
+            f"-> {job.result!r}",
+        )
+
+    job = site_portal.answer(make_job("get_supported_features"))
+    check(
+        "get_supported_features lists nothing",
+        not job.is_error and job.result == [],
+        f"-> {job.result!r}",
+    )
+
+    # Once a portal does what a name promises, it says so - and both questions
+    # answer from the one set, so they cannot disagree.
+    supported = site_portal.SUPPORTED_FEATURES
+    site_portal.SUPPORTED_FEATURES = frozenset({"award_spend_maximums", "a_feature"})
+    try:
+        job = site_portal.answer(make_job("is_feature_supported award_spend_maximums"))
+        check("a listed feature is supported", job.result is True, f"-> {job.result!r}")
+
+        job = site_portal.answer(make_job("get_supported_features"))
+        check(
+            "...and appears in the list, which is sorted",
+            job.result == ["a_feature", "award_spend_maximums"],
+            f"-> {job.result!r}",
+        )
+        check(
+            "...typed as a Vec<String>",
+            job.result_type == "Vec<String>",
+            f"-> {job.result_type}",
+        )
+    finally:
+        site_portal.SUPPORTED_FEATURES = supported
+
+    # A malformed name never reaches the handler: the instruction does not parse.
+    try:
+        make_job("is_feature_supported Award_Spend_Maximums")
+        raise AssertionError("an uppercase feature name should not parse")
+    except OSError:
+        pass
+    check("a malformed feature name is refused before it arrives", True)
 
     print("\n-- an instruction we do not implement ---------------------------")
 
@@ -1077,8 +1179,18 @@ def _run_all() -> None:
     ).result
     check(
         "12.5 node hours are reported as 50 GPU hours",
-        abs(report.total_usage.hours - 50.0) < 0.001,
-        f"-> {report.total_usage.in_hours()}",
+        abs(report.total().value - 50.0) < 0.001,
+        f"-> {report.total()}",
+    )
+    check(
+        "...and the report says it is in GPU hours",
+        report.unit == openportal.UsageUnit("GPUHR"),
+        f"-> {report.unit!r}",
+    )
+    check(
+        "...which prints as such",
+        f"{report.total():.1f}" == "50.0 GPUHR",
+        f"-> {report.total():.1f}",
     )
 
     # An award of nothing is not an award. There is no amount to provision
@@ -1144,8 +1256,8 @@ def _run_all() -> None:
     ).result
     check(
         "the same usage on another resource converts at that resource's factor",
-        abs(report.total_usage.hours - 25.0) < 0.001,
-        f"-> {report.total_usage.in_hours()} at 2 to 1, against 50 at 4 to 1",
+        abs(report.total().value - 25.0) < 0.001,
+        f"-> {report.total()} at 2 to 1, against 50 at 4 to 1",
     )
 
     # A unit nobody has agreed gets the same answer, for the same reason - and
@@ -1174,8 +1286,13 @@ def _run_all() -> None:
     ).result
     check(
         "...and answerable once a factor is agreed, whatever the unit is called",
-        abs(report.total_usage.hours - 6.25) < 0.001,
-        f"-> {report.total_usage.in_hours()} for 12.5 of ours at 0.5",
+        abs(report.total().value - 6.25) < 0.001,
+        f"-> {report.total()} for 12.5 of ours at 0.5",
+    )
+    check(
+        "...in a unit of our own agreeing, which the report states in full",
+        report.unit == openportal.UsageUnit("credits", counts_per_unit=1_000_000),
+        f"-> {report.unit!r}",
     )
     check(
         "the same factor values the award in our own units",

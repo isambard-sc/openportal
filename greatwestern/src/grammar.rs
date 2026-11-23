@@ -1417,6 +1417,96 @@ impl<'de> Deserialize<'de> for ProjectTemplate {
 }
 
 ///
+/// The name of a feature that one portal can ask another whether it
+/// supports, e.g. `award_spend_maximums`.
+///
+/// Deliberately an opaque string rather than an enum. Features are defined
+/// by convention between the portals at either end - which may define their
+/// own - and an enum would mean every agent on the path had to be upgraded
+/// before a new feature could even be asked about. Only the shape is checked:
+/// one to 64 characters of lowercase ASCII letters, digits, `_`, `-` and `.`,
+/// starting with a letter. A name outside that shape is refused, never
+/// normalised, so `Award_Spend_Maximums` is an error rather than a silent
+/// near-miss. See `docs/plans/award-spend-profiles-and-feature-discovery-design.md`.
+///
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FeatureName {
+    name: String,
+}
+
+impl FeatureName {
+    /// The longest name accepted, in characters (all of which are ASCII).
+    pub const MAX_LEN: usize = 64;
+
+    pub fn parse(name: &str) -> Result<Self, Error> {
+        let mut chars = name.chars();
+
+        if !chars.next().is_some_and(|c| c.is_ascii_lowercase()) {
+            return Err(Error::Parse(format!(
+                "Invalid FeatureName - must start with a lowercase ASCII letter '{}'",
+                name
+            )));
+        }
+
+        if name.len() > Self::MAX_LEN {
+            return Err(Error::Parse(format!(
+                "Invalid FeatureName - longer than {} characters '{}'",
+                Self::MAX_LEN,
+                name
+            )));
+        }
+
+        if !chars.all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' || c == '.'
+        }) {
+            return Err(Error::Parse(format!(
+                "Invalid FeatureName - can only contain lowercase ASCII letters, digits, '_', '-' and '.' '{}'",
+                name
+            )));
+        }
+
+        Ok(Self {
+            name: name.to_string(),
+        })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl NamedType for FeatureName {
+    fn type_name() -> String {
+        "FeatureName".to_string()
+    }
+}
+
+impl std::fmt::Display for FeatureName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name)
+    }
+}
+
+impl Serialize for FeatureName {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.name.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for FeatureName {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        FeatureName::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+///
 /// Details about a compute node
 ///
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -1555,6 +1645,12 @@ impl Allocation {
     }
 
     pub fn canonicalize(units: &str) -> String {
+        // A currency is named by its ISO 4217 code, in capitals, so that an
+        // award of "5000 gbp" and a usage report in "GBP" are one unit.
+        if let Some(code) = crate::usageunit::currency_code(units) {
+            return code.to_string();
+        }
+
         let canonical = units.trim().to_lowercase();
 
         if canonical == "node hours" || canonical == "node hour" || canonical == "nhr" {
@@ -1567,6 +1663,8 @@ impl Allocation {
             return "COREHR".to_string();
         } else if canonical == "gb hours" || canonical == "gb hour" || canonical == "gbhr" {
             return "GBHR".to_string();
+        } else if canonical == "mb hours" || canonical == "mb hour" || canonical == "mbhr" {
+            return "MBHR".to_string();
         } else if canonical == "billing hours" || canonical == "billing hour" || canonical == "bhr"
         {
             return "BHR".to_string();
@@ -2182,6 +2280,214 @@ impl std::fmt::Display for MembershipControl {
     }
 }
 
+///
+/// One entry in an award's spend profile: the controls on spending that apply
+/// from a given date - a `minimum` ("use it or lose it"), a `maximum` (a cap),
+/// both, or neither.
+///
+/// By convention between portals, an entry applies from its `from` date up to,
+/// but not including, the next entry's, and the last until the award's end
+/// date. Each entry describes only its own period: nothing carries over from
+/// the entry before, so a control the entry does not set does not apply in its
+/// period. An entry that sets neither therefore means "no controls from this
+/// date" - which is how a profile ends its controls before the award ends.
+///
+/// OpenPortal does not interpret any of that - it only carries the profile
+/// intact and unambiguous. So the only checks are on what would make an entry
+/// mean two things: an empty allocation ("none") is refused, since as a
+/// maximum it could mean "no cap" or "nothing", and when both controls are set
+/// they must be in the same units, with the maximum no less than the minimum.
+/// See `docs/plans/award-spend-profiles-and-feature-discovery-design.md`.
+///
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(try_from = "UncheckedSpendProfileEntry")]
+#[ts(export)]
+pub struct SpendProfileEntry {
+    /// The date these controls apply from (ISO 8601 date string)
+    #[ts(as = "String")]
+    from: Date,
+
+    /// The least that should be spent in this period, e.g. "100 NHR".
+    /// Absent means no minimum in this period.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, as = "Option<String>")]
+    minimum: Option<Allocation>,
+
+    /// The most that may be spent in this period, e.g. "100 NHR".
+    /// Absent means no maximum in this period.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, as = "Option<String>")]
+    maximum: Option<Allocation>,
+}
+
+/// The wire form of a `SpendProfileEntry`, before it has been checked.
+///
+/// Unknown fields are ignored, as they are everywhere else in `AwardDetails`,
+/// so a field added to entries later does not stop an older reader parsing
+/// the rest.
+#[derive(Deserialize)]
+struct UncheckedSpendProfileEntry {
+    from: Date,
+    #[serde(default)]
+    minimum: Option<Allocation>,
+    #[serde(default)]
+    maximum: Option<Allocation>,
+}
+
+impl TryFrom<UncheckedSpendProfileEntry> for SpendProfileEntry {
+    type Error = Error;
+
+    fn try_from(entry: UncheckedSpendProfileEntry) -> Result<Self, Self::Error> {
+        SpendProfileEntry::new(&entry.from, entry.minimum.as_ref(), entry.maximum.as_ref())
+    }
+}
+
+impl SpendProfileEntry {
+    pub fn new(
+        from: &Date,
+        minimum: Option<&Allocation>,
+        maximum: Option<&Allocation>,
+    ) -> Result<Self, Error> {
+        for (name, control) in [("minimum", minimum), ("maximum", maximum)] {
+            if control.is_some_and(|c| c.is_empty()) {
+                return Err(Error::Parse(format!(
+                    "Invalid spend profile entry from {} - the {} cannot be an empty \
+                     allocation. Leave it out for no {} in this period",
+                    from, name, name
+                )));
+            }
+        }
+
+        if let (Some(min), Some(max)) = (minimum, maximum) {
+            if min.units() != max.units() {
+                return Err(Error::Parse(format!(
+                    "Invalid spend profile entry from {} - the minimum ({}) and maximum \
+                     ({}) must be in the same units",
+                    from, min, max
+                )));
+            }
+
+            if max.size().unwrap_or_default() < min.size().unwrap_or_default() {
+                return Err(Error::Parse(format!(
+                    "Invalid spend profile entry from {} - the maximum ({}) is less than \
+                     the minimum ({})",
+                    from, max, min
+                )));
+            }
+        }
+
+        Ok(Self {
+            from: from.clone(),
+            minimum: minimum.cloned(),
+            maximum: maximum.cloned(),
+        })
+    }
+
+    /// An entry that sets no controls: from this date, nothing is required
+    /// and nothing is capped.
+    pub fn no_controls(from: &Date) -> Self {
+        Self {
+            from: from.clone(),
+            minimum: None,
+            maximum: None,
+        }
+    }
+
+    pub fn from(&self) -> &Date {
+        &self.from
+    }
+
+    pub fn minimum(&self) -> Option<&Allocation> {
+        self.minimum.as_ref()
+    }
+
+    pub fn maximum(&self) -> Option<&Allocation> {
+        self.maximum.as_ref()
+    }
+
+    /// True if this entry sets neither a minimum nor a maximum - it ends any
+    /// controls from its date.
+    pub fn has_no_controls(&self) -> bool {
+        self.minimum.is_none() && self.maximum.is_none()
+    }
+}
+
+impl NamedType for SpendProfileEntry {
+    fn type_name() -> String {
+        "SpendProfileEntry".to_string()
+    }
+}
+
+/// Spelled out in words, so that an entry setting no controls reads as what it
+/// means rather than as a date with something missing:
+///
+/// * `from 2027-01-01: spend exactly 100 NHR`
+/// * `from 2027-01-01: spend at least 100 NHR and at most 300 NHR`
+/// * `from 2027-01-01: spend at least 100 NHR`
+/// * `from 2027-01-01: spend at most 300 NHR`
+/// * `from 2027-01-01: no spend controls`
+impl std::fmt::Display for SpendProfileEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (&self.minimum, &self.maximum) {
+            (Some(min), Some(max)) if min == max => {
+                write!(f, "from {}: spend exactly {}", self.from, min)
+            }
+            (Some(min), Some(max)) => write!(
+                f,
+                "from {}: spend at least {} and at most {}",
+                self.from, min, max
+            ),
+            (Some(min), None) => write!(f, "from {}: spend at least {}", self.from, min),
+            (None, Some(max)) => write!(f, "from {}: spend at most {}", self.from, max),
+            (None, None) => write!(f, "from {}: no spend controls", self.from),
+        }
+    }
+}
+
+///
+/// Put a spend profile into its canonical form: sorted by date, with no two
+/// entries sharing a date.
+///
+/// Sorting is the only change made. OpenPortal carries a profile rather than
+/// judging it, so nothing else is checked here - not the units, not the dates
+/// against the award, not the total. A duplicate date is refused because it is
+/// ambiguity in the data itself: two entries from the same day do not say
+/// which applies. Redundant entries - two in a row that set no controls, say -
+/// are not ambiguous, and are kept as sent.
+///
+fn canonical_spend_profile(
+    mut entries: Vec<SpendProfileEntry>,
+) -> Result<Vec<SpendProfileEntry>, Error> {
+    entries.sort_by(|a, b| a.from.cmp(&b.from));
+
+    for pair in entries.windows(2) {
+        if let [a, b] = pair {
+            if a.from == b.from {
+                return Err(Error::Parse(format!(
+                    "Invalid spend profile - two entries share the date {}",
+                    a.from
+                )));
+            }
+        }
+    }
+
+    Ok(entries)
+}
+
+fn deserialize_spend_profile<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<SpendProfileEntry>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<Vec<SpendProfileEntry>>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(entries) => canonical_spend_profile(entries)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+    }
+}
+
 /// Details about a project that exists in a portal.
 /// This holds all data as "option" as not all details
 /// will be set by all portals. Also, using "option" allows
@@ -2231,7 +2537,8 @@ pub struct AwardDetails {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     breakdown: BTreeMap<String, String>,
 
-    /// Link back to the award record on the funding body's system
+    /// The award as made by the awarding portal: its identifier there, and
+    /// in `url` the link to the award's page on the awarding portal
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     award: Option<Link>,
@@ -2241,7 +2548,8 @@ pub struct AwardDetails {
     #[ts(optional)]
     call: Option<Link>,
 
-    /// Link to the project page on the remote/awarding portal
+    /// Link to the project's page on the site portal. Set by the site and
+    /// returned from `get_award`; the awarding portal keeps and shows it
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     project_link: Option<Link>,
@@ -2275,6 +2583,22 @@ pub struct AwardDetails {
     /// those in the list are allowed.
     #[ts(as = "Option<Vec<String>>")]
     allowed_domains: Option<Vec<DomainPattern>>,
+
+    /// The least that should be spent over each period of the award, as an
+    /// agreement between the awarding portal and the site. Carried, not
+    /// interpreted: OpenPortal only ensures it is well formed.
+    ///
+    /// Three states, like `allowed_domains`. Absent (`None`) means no profile -
+    /// or, under a legacy partial update, keep the one held. `Some(vec![])`
+    /// means explicitly no minimums, which is how a profile is removed. A
+    /// non-empty list is the profile, held sorted by date.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_spend_profile"
+    )]
+    #[ts(optional)]
+    spend_profile: Option<Vec<SpendProfileEntry>>,
 }
 
 impl NamedType for AwardDetails {
@@ -2303,6 +2627,7 @@ impl AwardDetails {
             earliest_approve: None,
             membership_control: None,
             allowed_domains: None,
+            spend_profile: None,
         }
     }
 
@@ -2663,6 +2988,24 @@ impl AwardDetails {
         self.allowed_domains = None;
     }
 
+    /// The spend profile, sorted by date. `None` if there is none; an empty
+    /// list if it has been explicitly removed.
+    pub fn spend_profile(&self) -> Option<Vec<SpendProfileEntry>> {
+        self.spend_profile.clone()
+    }
+
+    /// Set the spend profile. Entries are sorted by date; two entries with the
+    /// same date are refused. An empty list explicitly removes a profile.
+    pub fn set_spend_profile(&mut self, entries: Vec<SpendProfileEntry>) -> Result<(), Error> {
+        self.spend_profile = Some(canonical_spend_profile(entries)?);
+        Ok(())
+    }
+
+    /// Forget the spend profile entirely, so the field is absent on the wire.
+    pub fn clear_spend_profile(&mut self) {
+        self.spend_profile = None;
+    }
+
     /// Returns true if the given domain is permitted by the allowed-domains list.
     /// Email patterns in the list are ignored — use `is_email_allowed` for full email checks.
     pub fn is_domain_allowed(&self, domain: &str) -> bool {
@@ -2813,6 +3156,12 @@ impl AwardDetails {
         // purpose.
         if other.allowed_domains.is_some() {
             merged.allowed_domains = other.allowed_domains.clone();
+        }
+
+        // Replaced wholesale too: a profile is one agreement, not a set of
+        // independent entries, and `Some([])` must be able to remove it.
+        if other.spend_profile.is_some() {
+            merged.spend_profile = other.spend_profile.clone();
         }
 
         Ok(merged)
@@ -3083,6 +3432,14 @@ pub enum Instruction {
 
     /// An instruction to get the list of offerings from an agent
     GetOfferings(),
+
+    /// An instruction to ask whether the portal behind an offering supports
+    /// the named feature. Answered by the portal software, not by OpenPortal.
+    IsFeatureSupported(FeatureName),
+
+    /// An instruction to ask the portal behind an offering for the names of
+    /// every feature it supports.
+    GetSupportedFeatures(),
 }
 
 impl Instruction {
@@ -4572,6 +4929,28 @@ impl Instruction {
                 }
             },
             "get_offerings" => Ok(Instruction::GetOfferings()),
+            "is_feature_supported" => match FeatureName::parse(&rest(1)) {
+                Ok(feature) => Ok(Instruction::IsFeatureSupported(feature)),
+                Err(e) => {
+                    tracing::error!("is_feature_supported failed to parse '{}': {}", &rest(1), e);
+                    Err(Error::Parse(format!(
+                        "is_feature_supported failed to parse '{}': {}",
+                        rest(1),
+                        e
+                    )))
+                }
+            },
+            "get_supported_features" => {
+                if parts.len() > 1 {
+                    tracing::error!("get_supported_features takes no arguments: {}", &rest(1));
+                    return Err(Error::Parse(format!(
+                        "get_supported_features takes no arguments: {}",
+                        rest(1)
+                    )));
+                }
+
+                Ok(Instruction::GetSupportedFeatures())
+            }
             _ => {
                 tracing::error!("Invalid instruction: {}", s);
                 Err(Error::Parse(format!("Invalid instruction: {}", s)))
@@ -4653,6 +5032,8 @@ impl Instruction {
             Instruction::AddOfferings(_) => "add_offerings".to_string(),
             Instruction::RemoveOfferings(_) => "remove_offerings".to_string(),
             Instruction::GetOfferings() => "get_offerings".to_string(),
+            Instruction::IsFeatureSupported(_) => "is_feature_supported".to_string(),
+            Instruction::GetSupportedFeatures() => "get_supported_features".to_string(),
         }
     }
 
@@ -4778,6 +5159,8 @@ impl Instruction {
             Instruction::AddOfferings(offerings) => vec![offerings.to_string()],
             Instruction::RemoveOfferings(offerings) => vec![offerings.to_string()],
             Instruction::GetOfferings() => vec![],
+            Instruction::IsFeatureSupported(feature) => vec![feature.to_string()],
+            Instruction::GetSupportedFeatures() => vec![],
         }
     }
 }
@@ -4925,6 +5308,10 @@ impl std::fmt::Display for Instruction {
             Instruction::AddOfferings(offerings) => write!(f, "add_offerings {}", offerings),
             Instruction::RemoveOfferings(offerings) => write!(f, "remove_offerings {}", offerings),
             Instruction::GetOfferings() => write!(f, "get_offerings"),
+            Instruction::IsFeatureSupported(feature) => {
+                write!(f, "is_feature_supported {}", feature)
+            }
+            Instruction::GetSupportedFeatures() => write!(f, "get_supported_features"),
         }
     }
 }
@@ -5416,12 +5803,18 @@ mod tests {
 
         // The variants that genuinely carry no identifier must stay `None` -
         // `Submit` wraps another instruction (checked on its own when parsed),
-        // and the offerings family is addressed by destination, not by portal.
+        // and the offerings family and feature discovery are addressed by
+        // destination, not by portal.
         for instruction in [
             Instruction::GetOfferings(),
             Instruction::AddOfferings(Destinations::default()),
             Instruction::RemoveOfferings(Destinations::default()),
             Instruction::SyncOfferings(Destinations::default()),
+            Instruction::GetSupportedFeatures(),
+            Instruction::IsFeatureSupported(
+                FeatureName::parse("award_spend_maximums")
+                    .unwrap_or_else(|e| unreachable!("feature: {:?}", e)),
+            ),
         ] {
             assert_eq!(
                 owning_portal(&instruction),
@@ -5516,6 +5909,8 @@ mod tests {
             "add_offerings",
             "remove_offerings",
             "sync_offerings",
+            "is_feature_supported",
+            "get_supported_features",
             "not_a_real_instruction",
         ];
 
@@ -5526,6 +5921,77 @@ mod tests {
                 let _ = Instruction::parse(&command);
             }
         }
+    }
+
+    /// Feature names are opaque, so only their shape is checked - and a name
+    /// outside it is refused rather than tidied into something else.
+    #[test]
+    fn test_feature_name_validates_shape_only() {
+        for good in [
+            "award_spend_maximums",
+            "a",
+            "x9",
+            "vendor.feature-2_beta",
+            &format!("a{}", "b".repeat(FeatureName::MAX_LEN - 1)),
+        ] {
+            assert!(FeatureName::parse(good).is_ok(), "should accept {good:?}");
+        }
+
+        for bad in [
+            "",
+            "Award_Spend_Maximums",
+            "award spend profiles",
+            " award_spend_maximums",
+            "award_spend_maximums ",
+            "9lives",
+            "_private",
+            ".dotted",
+            "caf\u{e9}",
+            "semi;colon",
+            "slash/name",
+            &format!("a{}", "b".repeat(FeatureName::MAX_LEN)),
+        ] {
+            assert!(FeatureName::parse(bad).is_err(), "should refuse {bad:?}");
+        }
+
+        #[allow(clippy::unwrap_used)]
+        {
+            let feature = FeatureName::parse("award_spend_maximums").unwrap();
+            let json = serde_json::to_string(&feature).unwrap();
+            assert_eq!(json, "\"award_spend_maximums\"");
+            assert_eq!(serde_json::from_str::<FeatureName>(&json).unwrap(), feature);
+            assert!(serde_json::from_str::<FeatureName>("\"Not Valid\"").is_err());
+        }
+    }
+
+    /// Both discovery instructions survive `to_string` and `parse`, carry the
+    /// feature as their only argument, and refuse what they should.
+    #[test]
+    fn test_feature_discovery_instructions_round_trip() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let ask = Instruction::parse("is_feature_supported award_spend_maximums").unwrap();
+            assert_eq!(
+                ask,
+                Instruction::IsFeatureSupported(
+                    FeatureName::parse("award_spend_maximums").unwrap()
+                )
+            );
+            assert_eq!(ask.command(), "is_feature_supported");
+            assert_eq!(ask.arguments(), vec!["award_spend_maximums".to_string()]);
+            assert_eq!(Instruction::parse(&ask.to_string()).unwrap(), ask);
+
+            let list = Instruction::parse("get_supported_features").unwrap();
+            assert_eq!(list, Instruction::GetSupportedFeatures());
+            assert_eq!(list.command(), "get_supported_features");
+            assert!(list.arguments().is_empty());
+            assert_eq!(Instruction::parse(&list.to_string()).unwrap(), list);
+        }
+
+        assert!(Instruction::parse("is_feature_supported").is_err());
+        assert!(Instruction::parse("is_feature_supported Award_Spend_Maximums").is_err());
+        assert!(Instruction::parse("is_feature_supported two words").is_err());
+        assert!(Instruction::parse("get_supported_features extra").is_err());
     }
 
     #[test]
@@ -6069,6 +6535,288 @@ mod tests {
             let back = AwardDetails::parse(&unset.to_string()).unwrap();
             assert_eq!(back.allowed_domains(), None);
             assert!(back.is_email_allowed("bob@evil.com"));
+        }
+    }
+
+    fn spend_entry(from: &str, minimum: &str) -> SpendProfileEntry {
+        spend_controls(from, Some(minimum), None)
+    }
+
+    fn spend_controls(
+        from: &str,
+        minimum: Option<&str>,
+        maximum: Option<&str>,
+    ) -> SpendProfileEntry {
+        #[allow(clippy::unwrap_used)]
+        SpendProfileEntry::new(
+            &Date::parse(from).unwrap(),
+            minimum.map(|m| Allocation::parse(m).unwrap()).as_ref(),
+            maximum.map(|m| Allocation::parse(m).unwrap()).as_ref(),
+        )
+        .unwrap()
+    }
+
+    /// A spend profile survives the wire intact, in the shape the design
+    /// documents, and comes back held in date order whatever order it was
+    /// written in.
+    #[test]
+    fn test_spend_profile_round_trips_and_is_held_sorted() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let json = r#"{
+                "allocation": "1000 NHR",
+                "start_date": "2027-01-01",
+                "end_date": "2027-12-31",
+                "spend_profile": [
+                    {"from": "2027-07-01", "minimum": "300 NHR"},
+                    {"from": "2027-01-01", "minimum": "100 NHR"},
+                    {"from": "2027-10-01", "minimum": "400 NHR"},
+                    {"from": "2027-04-01", "minimum": "100 NHR"}
+                ]
+            }"#;
+
+            let details = AwardDetails::parse(json).unwrap();
+            let expected = vec![
+                spend_entry("2027-01-01", "100 NHR"),
+                spend_entry("2027-04-01", "100 NHR"),
+                spend_entry("2027-07-01", "300 NHR"),
+                spend_entry("2027-10-01", "400 NHR"),
+            ];
+            assert_eq!(details.spend_profile(), Some(expected.clone()));
+
+            let value: serde_json::Value = serde_json::from_str(&details.to_string()).unwrap();
+            assert_eq!(
+                value.get("spend_profile").and_then(|p| p.get(0)),
+                Some(&serde_json::json!({"from": "2027-01-01", "minimum": "100 NHR"}))
+            );
+
+            let back = AwardDetails::parse(&details.to_string()).unwrap();
+            assert_eq!(back.spend_profile(), Some(expected));
+            assert_eq!(back, details);
+        }
+    }
+
+    /// The profile is carried, not judged: minimums that do not add up to the
+    /// allocation, in other units, or outside the award's dates are all
+    /// accepted. Those are questions for the portals.
+    #[test]
+    fn test_spend_profile_is_not_checked_against_the_award() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let mut details = AwardDetails::default();
+            details.set_allocation(Allocation::parse("1000 NHR").unwrap());
+            details.set_start_date(Date::parse("2027-01-01").unwrap());
+            details.set_end_date(Date::parse("2027-12-31").unwrap());
+
+            let entries = vec![
+                spend_entry("2026-06-01", "5000 NHR"),
+                spend_entry("2028-01-01", "3 GPUHR"),
+            ];
+            details.set_spend_profile(entries.clone()).unwrap();
+            assert_eq!(details.spend_profile(), Some(entries));
+        }
+    }
+
+    /// Two minimums from the same day do not say which applies, so they are
+    /// refused - through the setter and off the wire alike.
+    #[test]
+    fn test_spend_profile_refuses_duplicate_dates() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let mut details = AwardDetails::default();
+            let err = details
+                .set_spend_profile(vec![
+                    spend_entry("2027-04-01", "100 NHR"),
+                    spend_entry("2027-01-01", "100 NHR"),
+                    spend_entry("2027-04-01", "200 NHR"),
+                ])
+                .unwrap_err();
+            assert!(err.to_string().contains("2027-04-01"), "{err}");
+            assert_eq!(details.spend_profile(), None);
+
+            let json = r#"{"spend_profile": [
+                {"from": "2027-01-01", "minimum": "100 NHR"},
+                {"from": "2027-01-01", "minimum": "200 NHR"}
+            ]}"#;
+            assert!(AwardDetails::parse(json).is_err());
+        }
+    }
+
+    /// An entry that is not well formed - a bad date, or an allocation that
+    /// `Allocation` itself refuses - makes the whole award unreadable.
+    #[test]
+    fn test_spend_profile_refuses_malformed_entries() {
+        for entry in [
+            r#"{"from": "not-a-date", "minimum": "100 NHR"}"#,
+            r#"{"from": "2027-01-01", "minimum": "-100 NHR"}"#,
+            r#"{"from": "2027-01-01", "minimum": "lots"}"#,
+            r#"{"minimum": "100 NHR"}"#,
+            r#"{"from": "2027-01-01", "maximum": "-1 NHR"}"#,
+            // "none" is an empty allocation, and as a control it could mean
+            // either "no limit" or "nothing" - so it is refused, not guessed.
+            r#"{"from": "2027-01-01", "minimum": "none"}"#,
+            r#"{"from": "2027-01-01", "maximum": "No allocation"}"#,
+            // Both controls must be comparable, and consistent.
+            r#"{"from": "2027-01-01", "minimum": "100 NHR", "maximum": "400 GPUHR"}"#,
+            r#"{"from": "2027-01-01", "minimum": "100 NHR", "maximum": "99 NHR"}"#,
+        ] {
+            let json = format!(r#"{{"spend_profile": [{entry}]}}"#);
+            assert!(AwardDetails::parse(&json).is_err(), "accepted {json}");
+        }
+    }
+
+    /// Each control is optional, and an entry describes only its own period.
+    /// Nothing is carried from one entry to the next - so the shapes below all
+    /// stay exactly as sent, including the entry that sets no controls at all,
+    /// which ends the controls from its date.
+    #[test]
+    fn test_spend_profile_minimums_maximums_and_no_controls() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let json = r#"{"spend_profile": [
+                {"from": "2027-01-01", "minimum": "100 NHR", "maximum": "100 NHR"},
+                {"from": "2027-04-01", "minimum": "100 NHR", "maximum": "300 NHR"},
+                {"from": "2027-07-01", "maximum": "300 NHR"},
+                {"from": "2027-08-01", "minimum": "node hours 5"},
+                {"from": "2027-09-01"},
+                {"from": "2027-10-01"}
+            ]}"#;
+            // "node hours 5" is not an allocation - check the error, then
+            // carry on with a well-formed profile.
+            assert!(AwardDetails::parse(json).is_err());
+
+            let json = json.replace("node hours 5", "5 node hours");
+            let details = AwardDetails::parse(&json).unwrap();
+            let profile = details.spend_profile().unwrap();
+
+            assert_eq!(
+                profile.iter().map(|e| e.to_string()).collect::<Vec<_>>(),
+                vec![
+                    "from 2027-01-01: spend exactly 100 NHR",
+                    "from 2027-04-01: spend at least 100 NHR and at most 300 NHR",
+                    "from 2027-07-01: spend at most 300 NHR",
+                    "from 2027-08-01: spend at least 5 NHR",
+                    "from 2027-09-01: no spend controls",
+                    "from 2027-10-01: no spend controls",
+                ]
+            );
+
+            // Not carried forward: the cap of 2027-07-01 is not in force in
+            // the period from 2027-08-01, which sets only a minimum.
+            assert!(profile.get(3).unwrap().maximum().is_none());
+            assert!(profile.get(4).unwrap().has_no_controls());
+
+            // Redundant entries are kept, not tidied away.
+            assert_eq!(profile.len(), 6);
+
+            // An unset control is left out of the wire form rather than
+            // written as null, and the whole profile round-trips.
+            let value: serde_json::Value = serde_json::from_str(&details.to_string()).unwrap();
+            assert_eq!(
+                value.get("spend_profile").and_then(|p| p.get(4)),
+                Some(&serde_json::json!({"from": "2027-09-01"}))
+            );
+            assert_eq!(
+                value.get("spend_profile").and_then(|p| p.get(2)),
+                Some(&serde_json::json!({"from": "2027-07-01", "maximum": "300 NHR"}))
+            );
+            assert_eq!(AwardDetails::parse(&details.to_string()).unwrap(), details);
+
+            // A field this version does not know is ignored, as it is
+            // everywhere else in AwardDetails, so a later addition to entries
+            // does not stop an older reader parsing the rest.
+            let newer = AwardDetails::parse(
+                r#"{"spend_profile": [{"from": "2027-01-01", "maximum": "5 NHR", "added_later": 1}]}"#,
+            )
+            .unwrap();
+            assert_eq!(
+                newer.spend_profile(),
+                Some(vec![spend_controls("2027-01-01", None, Some("5 NHR"))])
+            );
+
+            // A maximum equal to the minimum is allowed - it is an exact
+            // spend - and a maximum of zero is a period with no spending.
+            assert_eq!(
+                spend_controls("2027-01-01", Some("0 NHR"), Some("0 NHR")).to_string(),
+                "from 2027-01-01: spend exactly 0 NHR"
+            );
+            assert_eq!(
+                spend_controls("2027-01-01", None, Some("0 NHR")).to_string(),
+                "from 2027-01-01: spend at most 0 NHR"
+            );
+
+            let date = Date::parse("2027-01-01").unwrap();
+            assert!(SpendProfileEntry::no_controls(&date).has_no_controls());
+            assert!(SpendProfileEntry::new(
+                &date,
+                Some(&Allocation::parse("10 NHR").unwrap()),
+                Some(&Allocation::parse("9 NHR").unwrap())
+            )
+            .is_err());
+        }
+    }
+
+    /// Absent, `[]` and a list are three different statements, and each must
+    /// survive a round trip as itself. JSON from a peer that predates the
+    /// field is the absent case.
+    #[test]
+    fn test_spend_profile_absent_empty_and_list_stay_distinct() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let old = AwardDetails::parse(r#"{"name": "old", "allocation": "10 NHR"}"#).unwrap();
+            assert_eq!(old.spend_profile(), None);
+            assert!(!old.to_string().contains("spend_profile"));
+
+            let mut empty = AwardDetails::default();
+            empty.set_spend_profile(vec![]).unwrap();
+            let back = AwardDetails::parse(&empty.to_string()).unwrap();
+            assert_eq!(back.spend_profile(), Some(vec![]));
+
+            let explicit_null = AwardDetails::parse(r#"{"spend_profile": null}"#).unwrap();
+            assert_eq!(explicit_null.spend_profile(), None);
+
+            let mut listed = AwardDetails::default();
+            listed
+                .set_spend_profile(vec![spend_entry("2027-01-01", "1 NHR")])
+                .unwrap();
+            let back = AwardDetails::parse(&listed.to_string()).unwrap();
+            assert_eq!(back.spend_profile().map(|p| p.len()), Some(1));
+
+            listed.clear_spend_profile();
+            assert_eq!(listed.spend_profile(), None);
+        }
+    }
+
+    /// `merge` replaces the profile wholesale, keeps it when the update does
+    /// not mention it, and removes it on `[]`.
+    #[test]
+    fn test_merge_replaces_the_spend_profile() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let mut base = AwardDetails::default();
+            base.set_spend_profile(vec![
+                spend_entry("2027-01-01", "100 NHR"),
+                spend_entry("2027-07-01", "300 NHR"),
+            ])
+            .unwrap();
+
+            let mut replacement = AwardDetails::default();
+            replacement
+                .set_spend_profile(vec![spend_entry("2027-04-01", "50 NHR")])
+                .unwrap();
+            let merged = base.merge(&replacement).unwrap();
+            assert_eq!(
+                merged.spend_profile(),
+                Some(vec![spend_entry("2027-04-01", "50 NHR")])
+            );
+
+            let merged = base.merge(&AwardDetails::default()).unwrap();
+            assert_eq!(merged.spend_profile(), base.spend_profile());
+
+            let mut removal = AwardDetails::default();
+            removal.set_spend_profile(vec![]).unwrap();
+            let merged = base.merge(&removal).unwrap();
+            assert_eq!(merged.spend_profile(), Some(vec![]));
         }
     }
 

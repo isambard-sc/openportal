@@ -301,7 +301,8 @@ enabling partial updates. This type is also accepted under the legacy name
   "notes":              [ { "timestamp": "<RFC 3339>", "author": "<string>", "text": "<string>" } ],
   "earliest_approve":   "<RFC 3339 UTC>",
   "membership_control": "<open|members_only|roles_only|locked>",
-  "allowed_domains":    ["<domain_pattern>", ...]
+  "allowed_domains":    ["<domain_pattern>", ...],
+  "spend_profile":      [ { "from": "<YYYY-MM-DD>", "minimum": "<size> <units>", "maximum": "<size> <units>" }, ... ]
 }
 ```
 
@@ -325,12 +326,14 @@ On `merge` / `update_award`, entries from the incoming object overwrite matching
 keys in the existing map; new keys are added; existing keys not mentioned are
 unchanged.
 
-**`award`**: link back to the award record on the funding body's system (e.g. UKRI GtR).
+**`award`**: the award as made by the awarding portal - its identifier there, and in `url` the link to the award's page on the awarding portal. Set by the awarding portal; a site echoes it.
 
 **`call`**: link to the funding call from which the award was made.
 
-**`project_link`**: link to the project page on the remote/awarding portal,
-so local users can navigate there.
+**`project_link`**: link to the project's page on the **site** portal, so the
+award team can navigate there. The site sets it and returns it from
+`get_award`; the awarding portal keeps and shows it. See
+[site-portal-api.md §4.1.3](site-portal-api.md#413-what-happens-to-your-get_award-reply).
 
 **`renewal`**: link to the page where more time or a renewal can be requested.
 
@@ -361,6 +364,27 @@ Use `"No allocation"` or `"none"` to represent no allocation.
 **`allowed_domains`**: each entry is either an exact domain (`"example.com"`) or
 a single-level wildcard (`"*.example.com"`). `null` means all domains are
 permitted; `[]` means no domains are permitted.
+
+**`spend_profile`**: the controls on spending over each period of the award.
+Each entry sets, from its `from` date, an optional `minimum` (the least that
+should be spent - "use it or lose it"), an optional `maximum` (a cap), both, or
+neither. By convention between the portals, each entry applies from its `from`
+date up to, but not including, the next entry's, and the last until `end_date`.
+**Each entry describes only its own period: nothing carries over**, so a control
+an entry leaves out does not apply in its period, and an entry with neither
+(`{"from": "2027-10-01"}`) means no controls from that date. OpenPortal
+**carries this, and does not interpret it** - shortfalls, caps and units are for
+the two portals to agree. It refuses only what would make the data mean two
+things: an invalid date or allocation, an empty allocation (`"none"`) as a
+control, a minimum and maximum in different units or with the maximum below the
+minimum, and two entries with the same date. Unknown fields are ignored.
+Entries are held sorted by date and otherwise kept exactly as sent. Omitted when
+absent, which means no profile; `[]` explicitly removes one. On `merge` /
+`update_award` a profile present in the incoming object replaces the held one
+wholesale. An agent that predates the field drops it when re-serialising an
+award, so ask `is_feature_supported award_spend_minimums` (or
+`award_spend_maximums`) before relying on one. See
+`docs/plans/award-spend-profiles-and-feature-discovery-design.md`.
 
 ---
 
@@ -1248,6 +1272,44 @@ Returns: `Destinations`
 
 ---
 
+### Feature Discovery Instructions
+
+How one portal asks another what it supports. Both are addressed to an
+**offering** and answered by the portal software behind it, through its bridge -
+`op-portal` only routes them - so the answer can differ from one offering to the
+next. See `docs/plans/award-spend-profiles-and-feature-discovery-design.md`.
+
+A feature name is an opaque string, not an enum: 1-64 characters of lowercase
+ASCII letters, digits, `_`, `-` and `.`, starting with a letter. A name outside
+that shape is refused, not normalised. The well-known names are listed in the
+[site portal API](site-portal-api.md#44-what-a-portal-supports).
+
+#### `is_feature_supported`
+
+Ask whether the portal behind an offering supports the named feature.
+
+```
+is_feature_supported <feature>
+```
+
+Returns: `bool`
+
+#### `get_supported_features`
+
+Ask the portal behind an offering for every feature it supports.
+
+```
+get_supported_features
+```
+
+Returns: `Vec<String>`
+
+An agent too old to know either instruction fails to parse it, and a portal
+that does not implement them answers `OpenPortalUnsupportedCommandError`; both
+mean "not supported". A timeout means "unknown" - ask again later.
+
+---
+
 ## Complete Instruction Reference
 
 | Command | Arguments | Returns | Description |
@@ -1324,6 +1386,8 @@ Returns: `Destinations`
 | `add_offerings` | `<destinations>` | — | Add new offerings |
 | `remove_offerings` | `<destinations>` | — | Remove offerings |
 | `get_offerings` | *(none)* | `Destinations` | Get current offerings |
+| `is_feature_supported` | `<feature>` | `bool` | Ask whether the portal behind an offering supports a feature |
+| `get_supported_features` | *(none)* | `Vec<String>` | Ask the portal behind an offering for every feature it supports |
 
 ---
 
@@ -1365,6 +1429,9 @@ create_project myproject.waldur {"name":"My Project","template":"cpu-cluster","a
 
 # Sync available cluster offerings
 sync_offerings [portal.provider.cluster_a, portal.provider.cluster_b]
+
+# Ask whether the site behind an offering enforces spend caps
+submit allocator.site.cluster1 is_feature_supported award_spend_maximums
 
 # Set a local project quota with a mapped name
 set_local_project_quota myproject.waldur:hpc_myproject scratch 2TB

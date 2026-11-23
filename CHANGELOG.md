@@ -18,6 +18,273 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `op-freeipa` and `op-slurm`, the two agents that hold the most privileged
   credentials. Diagrams are in Mermaid, so they render on GitHub and change
   alongside the text. Linked from the README and both docs indexes.
+- **Award spend profiles.** `AwardDetails` gains an optional `spend_profile`,
+  through which an awarding portal tells a site how an award should be spent
+  over time. Each entry sets, from its date, an optional `minimum` ("use it or
+  lose it"), an optional `maximum` (a cap), both, or neither:
+  `[{"from": "2027-01-01", "minimum": "100 NHR", "maximum": "100 NHR"},
+  {"from": "2027-04-01", "maximum": "300 NHR"}, {"from": "2027-07-01"}]`.
+  An entry applies until the next entry's date, and the last until `end_date`.
+  Each entry describes only its own period, and nothing carries over. So an
+  entry with neither control means "no controls from this date".
+  OpenPortal carries the profile and does not interpret it. Shortfalls, caps
+  and units are for the two portals to agree. OpenPortal refuses only what
+  would make the data ambiguous:
+  - an invalid date or allocation;
+  - `"none"` as a control;
+  - a minimum and maximum in different units, or a maximum below the minimum;
+  - two entries for the same day.
+
+  Entries are held in date order and otherwise kept as sent. Each prints in
+  words, such as `from 2027-07-01: no spend controls`. Absent means no
+  profile, and `[]` removes one. An update replaces the profile wholesale.
+  Supported in the Python module (`SpendProfileEntry`) and the Java client,
+  and both site portal examples carry it through `get_award`. See
+  [`docs/plans/award-spend-profiles-and-feature-discovery-design.md`](docs/plans/award-spend-profiles-and-feature-discovery-design.md).
+- **Feature discovery.** Two new instructions, `is_feature_supported <feature>`
+  (returns `bool`) and `get_supported_features` (returns `Vec<String>`), let one
+  portal ask another what it supports before relying on it. For example, a
+  portal can ask whether a site enforces spend minimums
+  (`award_spend_minimums`) or caps (`award_spend_maximums`). They are separate
+  because a site may well do one and not the other. Both instructions are
+  addressed to an offering, routed by `op-portal` and `op-bridge`, and answered
+  by the site's portal software. Feature names are opaque strings agreed
+  between portals, not an enum, and only their shape is checked. An agent too
+  old to know the instructions answers with an error, which reads correctly as
+  "not supported". The well-known names are listed in the site portal API
+  (§4.4). Both site portal examples answer them, and claim nothing.
+- **Reporting a spend-profile forfeit.** A site that claims
+  `award_spend_minimums` reports a missed minimum (a forfeit) in its existing
+  usage reports. The forfeit is billed to a user and a component both named
+  `forfeit`, in the award's unit, and counted in the totals. It is dated the
+  last day of the period that was missed, and that month stays incomplete
+  until the forfeit has settled. This is a convention between portals, needing
+  no type or wire change; see the site portal API (§4.4.1).
+- **Usage reports say which unit they are in.** A `ProjectUsageReport` gains an
+  optional `usage_unit`, e.g. `{"name": "GBP", "counts_per_unit": 1000000}`.
+  Every consumption figure in the report is a count of that unit, so the
+  awarding portal no longer has to know out of band whether a site reports node
+  hours at 3600 per hour or pounds at a million per pound.
+  - **Component units.** A component can carry its own unit in
+    `component_units`, such as GPU hours beside a report billed in GBP. Billing
+    and limits use `usage_unit` alone.
+  - **Well-known units:** the time units at 3600 counts per hour, plus every
+    ISO 4217 currency code and `£` / `€` at a million per unit. `$` is not
+    accepted, being ambiguous. Any other unit gives its own resolution.
+    `Allocation` canonicalises currencies the same way, and learns `MBHR`.
+  - **Exact amounts.** `UsageUnit::usage_from_decimal("3.20")` (Python:
+    `unit.usage("3.20")`, `Decimal`, or `int`) converts with no floating point.
+    `Amount` prints a figure in its unit, honouring a precision:
+    `f"{total:.2f}"` gives `3.20 GBP`.
+  - **`op-slurm`** now reports in `NHR`, with its `cpu`, `gpu`, `memory` and
+    `billing` components in `CPUHR`, `GPUHR`, `MBHR` and `BHR`. `op-cluster`
+    passes the unit through.
+  - **Both example site portals** report in the award's unit.
+
+  A report from before units (no `usage_unit`) still reads, totals and passes
+  on, but must have its unit declared before figures are added. Migrating
+  cached reports:
+  - an HPC site's reports were time: use `set_time_unit(<the award's
+    allocation unit>)`, so a GPUHR award's reports become GPUHR, not NHR;
+  - a cloud site's reports were micro-currency: use
+    `set_unit(UsageUnit("GBP"))` (or the site's currency). `set_time_unit`
+    refuses a currency, so a migration cannot confuse the two silently.
+
+  Reports combine only in one unit. `convert(to, factor)` changes a
+  report's unit without relabelling its components. Backwards compatible on
+  the wire. See
+  [`docs/plans/usage-units-design.md`](docs/plans/usage-units-design.md).
+
+### Changed
+
+- **Breaking, for code built on the Rust crate, the Python module or the Java
+  client** (the wire format is unchanged):
+  - **A report needs a unit before it holds figures.**
+    `ProjectUsageReport::add_report` / `set_report` now return a `Result` (and
+    raise in Python and Java), refusing a report with no unit. Construct reports
+    with a unit: `ProjectUsageReport::new_in(project, unit)`,
+    `ProjectUsageReport(project, unit=...)` in Python, or
+    `new ProjectUsageReport(project, unit)` in Java.
+  - **Adding reports in different units raises.** In Python and Java, adding
+    two reports in different units raises rather than summing them.
+  - **A `Usage` prints as its raw count**, since what a count is belongs to
+    its report's unit. Use `as_duration()` / `asDuration()` or `in_hours()` for
+    figures that really are time.
+  - **Scaling a `Usage` rounds to the nearest count** (ties to even) rather than
+    truncating, which always rounded down.
+
+- **Breaking, for sites using Lustre default quotas: `unassigned_project_ids`
+  no longer has a default.** It was `[0, 1]`, which assumed every site tags
+  its roots with project ID `1`. It must now be set, and the agent refuses to
+  start if a Lustre volume has a `default_quota` while it is unset, or while a
+  root of that volume does not carry one of the listed IDs with the inherit
+  flag. The start-up error names the root and the fix
+  (`lfs project -p 1 -s <root>`). Running without it is valid when no Lustre
+  volume has a default quota.
+
+  **Upgrade note:** a site that relied on the default, with roots tagged
+  `1 P`, adds this to its Lustre engine and nothing else changes:
+
+  ```toml
+  [quota_engines.lustre]
+  unassigned_project_ids = [1]
+  ```
+
+  Check each root first with `lfs project -d <root>`: it should print
+  `1 P <root>`. A site whose roots are untagged (`0 -`) was never getting
+  default quotas on new directories, and now finds out at start-up. See
+  [`docs/specifications/agent-configuration.md`](docs/specifications/agent-configuration.md)
+  §3.7.4.
+
+### Fixed
+
+- **The filesystem agent's log no longer contradicts itself about an existing
+  directory.** When a directory it was asked to create was already there with
+  a different owner, group or mode, it logged an error for each difference and
+  then "Directory already exists with required permissions." It still leaves
+  the directory as it is, since it may have been changed deliberately, but now
+  logs one warning saying so and listing how it differs, or that it matches.
+  With `exec-prefix` set the same check is made through the prefix; before, it
+  was not made at all.
+
+- **Each Lustre quota engine runs its own `lfs` command.** The pool of `lfs`
+  runners was global and held the command, and each engine replaced it when
+  it was set up. With two Lustre engines configured with different
+  `lfs_command`s, the one set up last ran every engine's commands - against
+  the wrong filesystem. Each `lfs_command` now has its own pool, sized by its
+  engine's `max_runners`. Waiting for a free runner now waits until the job
+  expires, without polling.
+
+- **A Lustre quota is no longer reported as set while its directories are
+  still being walked, and a walk that is interrupted is finished.** Giving an
+  existing directory tree its quota ID (`lfs project -srp`) can take hours.
+  Before, the job waited for up to five hours, far past its two-minute expiry,
+  and `add_local_user` / `add_local_project` then reported success even though
+  the default quota had not been set. A resubmission saw the top directory
+  already tagged - `lfs` tags it first - and skipped the default, so the
+  directory was left with no limit. Now:
+  - **The limit is set first.** It belongs to the quota ID, so it applies to
+    each file as soon as the walk reaches it.
+  - **The walk runs in the background.** The job waits for it until just before
+    it expires, then fails with a "not ready" error. A resubmission joins the
+    same walk (previously a running walk was invisible to the queue, so a
+    resubmission started a second one), and succeeds once the walk has
+    finished. A failed walk fails the job with its error.
+  - **Walks log** when they are queued, start, are still running (every 30
+    minutes), and finish or fail, with how long they took.
+  - **A marker records each walk.** A marker under the volume root (e.g.
+    `/projects/.openportal_quota/proj.toml` for `/projects/proj`) says
+    `started` while a walk runs and `complete` once it has finished, with the
+    UTC times. A tree whose marker still says `started` - the agent restarted
+    mid-walk, or the walk failed - is walked again on the next request. A tree
+    tagged before this release, with no marker, is taken to be complete.
+    Markers live outside the users' directories, in a directory only the
+    agent's user can enter, and one the agent did not write is ignored, so
+    the worst tampering can cause is a repeat walk. With `exec-prefix` set,
+    markers are handled through the prefix like every other file operation.
+  - **`recursive_timeout_secs` is used.** The walk timeout was hard-coded to
+    five hours.
+  - **Failures are reported.** A quota that could not be read or set when
+    applying a default was logged as a warning and the job reported success;
+    it now fails the job.
+  - **A project directory still being walked does not hold up a new member's
+    own directories,** which are created regardless; the job reports "not
+    ready" until both are done.
+
+- **The site portal API says what happens to a `get_award` reply.** A new §4.1.3
+  shows what the reference awarding portal, `waldur-mastermind`, does with
+  each field, so a site developer can tell which fields are worth filling in:
+  - `project_link` is shown as the site's project page;
+  - `allocation` is compared with what was sent, and re-sent until the site
+    reports it set;
+  - `members` is taken as the membership;
+  - `notes` are merged into the award's notes;
+  - the award's terms are the awarding portal's own, to be echoed unchanged.
+
+  It is described as that implementation's behaviour, not the contract.
+  `project_link` is now documented as the site portal's page for the project,
+  set by the site. The old wording, "the project page on the remote/awarding
+  portal", said the opposite. Likewise `award` is now documented as the award as made by
+  the awarding portal, with `url` linking to the award's page there. It was
+  described as a record on the funding body's system.
+- **The bridge walk-through works when followed literally**
+  ([isambard-sc/openportal#45](https://github.com/isambard-sc/openportal/issues/45)).
+  It had two errors:
+  - **Which file `openportal.load_config` reads.** The walk-through pointed it
+    at the bridge agent's own configuration, which it cannot parse. It reads
+    the client file written by `op-bridge bridge --config <file>`.
+  - **Invitation file names.** These are `invite_<issuer>_<zone>.toml`, e.g.
+    `invite_portal_default.toml`, not named after the agent invited.
+
+  The same mistakes are corrected in the Python API reference and the
+  command-line example.
+- **`scale_total` scales the charged-requeue figures.** It kept its own list of
+  consumption figures, which had missed the charged-requeue ones, so after
+  scaling the charged share was in a different unit from the total it is part
+  of.
+- **The Java client sums, scales and remaps the charged-requeue figures.** Its
+  table of report fields did not know them, so `plus`, `times` and user
+  remapping silently skipped them.
+- **Summing two parts of a day keeps it complete when both parts are.**
+  Adding one `DailyProjectUsageReport` to another (`+`, `+=`, and so
+  `ProjectUsageReport.add_report` on a date that already has a report,
+  `combine` and adding two reports) always gave an incomplete day. A site that
+  built a day from two settled parts could never report it settled, so the
+  awarding portal kept asking for it. The sum is now complete exactly when
+  both parts are. The Java client had already summed days this way, but its
+  `addReport` turned a complete day added under a new date incomplete. That
+  affected `plus` and `combine` at both report levels, and is fixed too.
+- **A `bool` result reaches Python as a `bool`.** `Job.result` returned `0`/`1`
+  for a `bool` result. That compared equal to `False`/`True` but failed an
+  `is` check and printed as a number.
+
+## [0.94.2] - 2026-11-11
+
+### Fixed
+
+- **The release build can publish again.** `helm registry login` was given
+  `ghcr.io/<owner>`, which current Helm rejects ("invalid registry") because it
+  accepts only a registry hostname. It now logs in to `ghcr.io`. This is why
+  0.94.1 was tagged but never published: no images, charts, binaries or GitHub
+  release exist for it. This release carries the 0.94.1 changes below.
+
+## [0.94.1] - 2026-11-11
+
+### Fixed
+
+- **Default quotas are applied again to new directories on Lustre whose roots
+  carry a catch-all project ID.** Since 0.93.0 the default quota is only applied
+  after reading the directory's existing quota, and that read accepted only
+  project ID `0` as "not yet assigned". A new directory inherits its parent's
+  project ID when the parent has the inherit (`P`) flag set, so on a filesystem
+  whose roots are tagged with a catch-all project (e.g. `1`) every new user and
+  project directory started at ID `1`, the read failed with "Please run
+  set_user_quota first", and no default quota was set. Retries then skipped the
+  directory as "already there", so it was never fixed. The Lustre engine now has
+  an `unassigned_project_ids` option (default `[0, 1]`) listing the IDs that mean
+  "not assigned yet"; such directories are treated as having no quota. Two
+  things to know: a directory carrying project ID `1` used to be reported as a
+  mismatch and is now re-tagged with its own quota ID, so a site that uses `1`
+  as a real quota ID must set `unassigned_project_ids` explicitly; and only IDs
+  carrying the inherit flag are recognised, so the filesystem roots must be
+  tagged (e.g. `lfs project -p 1 -s /scratch`) for new directories to get the
+  default quota.
+- **Directories left without a quota by the bug above heal themselves.** An
+  existing directory that still carries an unassigned project ID cannot hold a
+  quota of its own, so the next `add_local_user` or `add_local_project` for it
+  now assigns its quota ID and applies the default, rather than skipping it as
+  "already there". Directories that already have their own quota ID are still
+  never given the default again. Assigning the ID walks the whole directory
+  tree inside that job, and the check itself costs one extra `lfs project -d`
+  per existing directory on every repeated `add_local_user` /
+  `add_local_project`.
+- **A configured quota is no longer reported as unlimited when only some of a
+  volume's directories carry the quota ID.** If any directory has the expected
+  ID, the real quota is now read, so a partly-assigned project cannot have a
+  limit set with `set_local_project_quota` overwritten by the default. A
+  directory of that volume which still lacks the quota ID is now given it
+  (the ID only - the limit is not rewritten), so that it counts against the
+  limit rather than staying outside it indefinitely.
 
 ## [0.94.0] - 2026-10-08
 
@@ -2650,6 +2917,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.94.2]: https://github.com/isambard-sc/openportal/releases/tag/0.94.2
+[0.94.1]: https://github.com/isambard-sc/openportal/releases/tag/0.94.1
 [0.94.0]: https://github.com/isambard-sc/openportal/releases/tag/0.94.0
 [0.93.0]: https://github.com/isambard-sc/openportal/releases/tag/0.93.0
 [0.92.0]: https://github.com/isambard-sc/openportal/releases/tag/0.92.0

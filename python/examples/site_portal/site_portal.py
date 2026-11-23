@@ -144,16 +144,32 @@ def conversions_for(offering: str) -> dict[str, float]:
     }
 
 
+def unit_for(name: str) -> openportal.UsageUnit:
+    """
+    The `UsageUnit` a usage report in `name` is written in.
+
+    A unit OpenPortal knows comes at its default resolution: 3600 counts per
+    hour for a time unit such as `GPUHR`, a million per pound for `GBP`. A unit
+    two portals agreed between themselves - `CREDITS`, say - has no default, so
+    this example says what one count of it is: a millionth, as for money. The
+    report carries that, so the awarding portal never has to guess.
+    """
+    try:
+        return openportal.UsageUnit(name)
+    except ValueError:
+        return openportal.UsageUnit(name, counts_per_unit=1_000_000)
+
+
 def converter_for(offering: str, allocation: openportal.Allocation | None):
     """
-    Return a function turning a figure in *our* unit into the award's unit.
+    Return the award's unit, and a function turning a figure in *our* unit into
+    a `Usage` in it.
 
-    **This is what decides what the numbers in a usage report mean.** A `Usage`
-    is a bare number; nothing in it says whether 50 is 50 node hours or 50 GPU
-    hours. The unit is the one the awarding portal allocated in, so a site that
-    reports its own figures unconverted is not reporting slightly differently -
-    it is reporting a different quantity under the same name, and nothing on the
-    wire will catch it.
+    **This is what decides what the numbers in a usage report mean.** A usage
+    report says which unit it is in, and that unit is the one the awarding
+    portal allocated in - so a site that reported its own figures unconverted
+    would be stating a different quantity under the award's name. The report's
+    unit says what the numbers are; this conversion is what makes it true.
 
     Returns `None` when there is no agreed factor, which the caller must treat as
     "we cannot hold this award" rather than as zero or as one-for-one. Guessing
@@ -171,7 +187,9 @@ def converter_for(offering: str, allocation: openportal.Allocation | None):
     if not factor:
         return None
 
-    return lambda hours: openportal.Usage.from_hours(hours * factor)
+    unit = unit_for(str(allocation.units))
+
+    return unit, lambda hours: unit.usage(hours * factor)
 
 
 def to_site_units(offering: str, allocation: openportal.Allocation | None) -> float | None:
@@ -607,9 +625,12 @@ def get_award(job: openportal.Job) -> openportal.AwardDetails:
     award = _require_award(job, job.instruction.arguments[0])
     details = openportal.AwardDetails(json.dumps(award.details))
 
-    # A real portal overlays live project state here - the current member list,
-    # the allocation as actually spent, the current end date - since those may
-    # have moved on from what was last agreed.
+    # A real portal overlays what is its to say here, and echoes the rest
+    # (§4.1.3): the live member list, the allocation actually set for the award
+    # (not usage), and its own page for the project as `project_link` - this example
+    # has no such page, so it leaves the link as it arrived. The dates,
+    # template and the other terms of the award are the awarding portal's, and
+    # go back unchanged.
 
     # `notes` is the one field that accumulates across a merge, which makes it
     # the right place for commentary that is not part of the award itself.
@@ -767,7 +788,16 @@ def build_usage_report(
     `store.Project.final_months` rather than inferred from the calendar. Until a
     month is declared final it is reported incomplete and keeps being asked
     for. See the README for what the allocator does with that.
+
+    **On forfeits.** This portal claims neither spend-profile feature, so it
+    never charges one. A portal that claims `award_spend_minimums` adds each
+    forfeit here as usage by a local user `forfeit`, under a component also
+    named `forfeit`, in the award's unit, dated the last day of the period whose
+    minimum was missed - and keeps that month incomplete until the forfeit has
+    settled. See site-portal-api.md §4.4.1.
     """
+    # No unit yet: if the award turns out not to be here, the answer is an
+    # empty report, and an empty report claims nothing about what it is in.
     report = openportal.ProjectUsageReport(openportal.ProjectIdentifier(project_id))
 
     # **The project may simply not be on this resource.** An awarding portal
@@ -806,9 +836,11 @@ def build_usage_report(
     # a report is not the place to discover it - so it is logged loudly and the
     # figures go out in our own unit, which is at least a number we can name.
     allocation = openportal.AwardDetails(json.dumps(award.details)).allocation
-    convert = converter_for(offering, allocation)
+    converter = converter_for(offering, allocation)
 
-    if convert is None:
+    if converter is not None:
+        unit, convert = converter
+    else:
         logger.error(
             "award %s on %s is allocated in '%s', which this site cannot "
             "account in - reporting our own %s unconverted",
@@ -817,9 +849,12 @@ def build_usage_report(
             allocation,
             SITE_UNIT,
         )
-        convert = lambda hours: openportal.Usage.from_hours(hours)  # noqa: E731
+        unit = unit_for(SITE_UNIT)
+        convert = lambda hours: unit.usage(hours)  # noqa: E731
 
-    report = openportal.ProjectUsageReport(local_project)
+    # The report says which unit it is in, so the awarding portal reads its
+    # figures as what they are rather than assuming hours.
+    report = openportal.ProjectUsageReport(local_project, unit=unit)
     months_with_days: set[str] = set()
     final: set[str] = set()
 
@@ -1013,6 +1048,51 @@ def get_storage_reports(job: openportal.Job) -> openportal.StorageReport:
 
 
 # --------------------------------------------------------------------------
+# Feature discovery
+# --------------------------------------------------------------------------
+
+#: The optional features this portal supports, by name.
+#:
+#: **Empty, deliberately.** A feature named here is a promise about this
+#: portal's business logic, not about what it can store. This example carries
+#: `AwardDetails.spend_profile` intact - it is in the stored details, so
+#: `get_award` hands it back - but it does nothing *with* it: no warnings, no
+#: forfeiting what was not spent, no stopping work at a cap. So it claims
+#: neither `award_spend_minimums` nor `award_spend_maximums`, and an awarding
+#: portal that asks will know to agree another way, such as sending the award
+#: in parts. The two are separate because a site may well enforce one and not
+#: the other - a cap maps onto scheduler limits, a minimum does not.
+#:
+#: Names are opaque, lowercase strings agreed between the portals; the well-known
+#: ones are listed in the site portal API (§4.4). Add one here only once this
+#: portal does what the name promises - on every offering, since this example
+#: gives every offering the same answer. A portal whose resources differ answers
+#: per offering instead, via `_offering_of(job)`.
+SUPPORTED_FEATURES: frozenset[str] = frozenset()
+
+
+def is_feature_supported(job: openportal.Job) -> bool:
+    """
+    `is_feature_supported <feature>` → `bool`
+
+    `False` for anything not in `SUPPORTED_FEATURES` - including names this
+    portal has never heard of, which is the point: an awarding portal can ask
+    about a feature defined after this code was written, and get a correct "no".
+    """
+    return job.instruction.arguments[0] in SUPPORTED_FEATURES
+
+
+def get_supported_features(job: openportal.Job) -> list[str]:
+    """
+    `get_supported_features` → `Vec<String>`
+
+    The same set `is_feature_supported` answers from, so the two can never
+    disagree. Sorted, so the answer is stable from one call to the next.
+    """
+    return sorted(SUPPORTED_FEATURES)
+
+
+# --------------------------------------------------------------------------
 # Dispatch
 # --------------------------------------------------------------------------
 
@@ -1052,6 +1132,9 @@ HANDLERS = {
     "get_usage_reports": get_usage_reports,
     "get_storage_report": get_storage_report,
     "get_storage_reports": get_storage_reports,
+    # What this portal supports.
+    "is_feature_supported": is_feature_supported,
+    "get_supported_features": get_supported_features,
 }
 
 

@@ -578,6 +578,10 @@ example does this — see its `approve` endpoint.
   removed. An `allowed_domains` of `[]` permits nobody, and is distinct from
   omitting the field.
 
+  `spend_profile` is replaced wholesale too, and `[]` removes it. Under a legacy
+  partial update (below) an absent `spend_profile` keeps the one you hold,
+  which is why removal is spelled `[]` rather than by leaving the field out.
+
   Older senders may still deliver a partial update, in which case absent fields
   keep their current values. Do not rely on that: it is being retired, and an
   absent field is far more likely to be a caller that has not been updated than
@@ -606,6 +610,21 @@ portal-to-portal work:
   independently of the awarding portal: `open` (default when absent),
   `members_only`, `roles_only`, `locked`. Honour it — the awarding portal is
   entitled to assume you do.
+* **`spend_profile`**, when present, sets the controls on spending over each
+  period of the award: from each entry's date, an optional `minimum` (the least
+  that should be spent), an optional `maximum` (a cap), both, or neither - such
+  as `[{"from": "2027-01-01", "minimum": "100 NHR", "maximum": "100 NHR"},
+  {"from": "2027-04-01", "maximum": "300 NHR"}, {"from": "2027-07-01"}]`. Each
+  entry applies until the next entry's date and the last until `end_date`.
+  **Each entry describes only its own period: nothing carries over.** A control
+  an entry leaves out does not apply in its period, so in the example the
+  second quarter has a cap and no minimum, and the entry with neither means no
+  controls from July. OpenPortal carries the profile and does not interpret it:
+  what a shortfall means, whether a cap is a hard stop, and how you enforce
+  either, is between you and the awarding portal. Keep it with the award so
+  `get_award` hands it back, whether or not you act on it. Claim
+  `award_spend_minimums` and `award_spend_maximums` (§4.4) only for what you
+  do act on. The full rules are in [json-types.md](json-types.md).
 
 
 #### 4.1.2 `remove_award` disconnects an award; it does not delete a project
@@ -699,6 +718,47 @@ Keep the earlier attachment periods when you do. An award's history is a *list*
 of periods, not a single "attached since" date, and each period owns its own
 days. Collapsing them loses the days before the latest attachment — which are
 exactly the days already reported and billed.
+
+#### 4.1.3 What happens to your `get_award` reply
+
+`get_award` returns the whole `AwardDetails`, but the awarding portal does not
+take every field from it. **OpenPortal does not decide which**: it carries the
+reply, and what the awarding portal does with each field is that portal's
+business. What follows is what the reference implementation, `waldur-mastermind`,
+does with it, so you can tell which fields are worth filling in. Another
+awarding portal may differ.
+
+The rule of thumb, for any awarding portal: **echo what you were sent, and
+change only the fields that are yours to say something about.**
+
+| Field | What `waldur-mastermind` does with it | So a site should |
+|-------|---------------------------------------|------------------|
+| `project_link` | Copies it into its record of the project on your site, on every `get_award`, and shows it as the "Project page" link | Return **your** page for the project, so the award team can navigate to it. See below |
+| `allocation` | Compares it with the allocation it sent. If they differ, it keeps telling you to set its value, re-sending the award until you report that value back | Return the allocation actually set for the award at your site - an absolute amount in the award's unit (§4.3), ideally exactly what was sent (`1000 GPUHR` for `1000 GPUHR`). It is not usage: what has been consumed goes in the usage reports |
+| `members` | Takes it as the award's membership | Return the live membership, with roles in the awarding portal's spelling (§4.2) |
+| `notes` | Merges new notes into the award's append-only notes | Add a note to leave a message for the award team - why an award is pending, say |
+| `start_date`, `end_date`, `template`, `key`, `earliest_approve`, `membership_control`, `allowed_domains` | Keeps its own values: the awarding portal decides these | Echo them unchanged |
+
+Remaining time is not something a site sends. The awarding portal works it out
+from the dates, the allocation and the usage reports you return (§4.3).
+
+**`project_link` is your page, and only you set it.** It is the link to the
+project's page on the *site* portal, whichever direction the details travel:
+you return it in `get_award`, and the awarding portal keeps it and shows it. Do
+not confuse it with `award`, whose `url` is the award's page on the *awarding*
+portal, or with the other links the awarding portal sets (`call`, `renewal`):
+those you echo.
+
+**`allocation` is a setting, not a balance.** The awarding portal sends an
+absolute amount; you report back the amount actually set. A difference is read
+as "not yet applied", and corrected by sending the award again - so a site that
+reported its remaining balance here, rather than the allocation it set, would
+be told to change it on every cycle.
+
+> The `waldur-mastermind` behaviour above comes from its
+> `remote_project_service.py`, `models.py` and `award_pace.py`. It describes
+> that implementation, not the contract. A field it does not list - such as
+> `spend_profile` - follows the rule of thumb: echo it.
 
 ### 4.2 Members
 
@@ -822,10 +882,20 @@ passes anything else through unchanged, which is what lets a pair of portals
 agree a unit of their own. Nothing here requires the unit to be a duration; an
 allocation denominated in money or cloud credits works the same way.
 
+**A report says which unit it is in.** A `ProjectUsageReport` carries a
+`usage_unit` - `{"name": "GPUHR", "counts_per_unit": 3600}` - and every figure in
+it is a count of that unit: 50 GPU hours is 180000 counts, £3.20 is 3200000
+counts of `GBP` at a million per pound. Write the award's unit there, so the
+awarding portal reads your figures as what they are rather than by assumption.
+A component may carry a unit of its own (`component_units`) - GPU hours beside a
+report billed in GBP - but billing and limits use `usage_unit` alone. See
+[json-types.md](json-types.md#usageunit) and `docs/plans/usage-units-design.md`.
+
 Two obligations follow:
 
 * **Convert every figure you report into the award's unit**, per award, because
-  two awards on the same project may be denominated differently.
+  two awards on the same project may be denominated differently - and say so in
+  the report's `usage_unit`.
 * **Refuse an award in a unit you have no agreed factor for.** There is no safe
   default: one-for-one silently misreports by the factor, and zero reports
   nothing, and both are numbers the awarding portal will believe. What is missing
@@ -867,6 +937,10 @@ consequences:
   believed. This is the one way to make the expensive mistake *by accident*. If
   you have no figures for a month and are not asserting that it is settled,
   include an explicit zero-usage day that is **not** marked complete.
+* **A forfeit can arrive after the day it is dated.** A site enforcing spend
+  minimums charges a missed minimum after the period ends, dated the period's
+  last day, so the month holding that day is not settled until the forfeit is
+  (§4.4.1).
 * **A day's attribution can change after the day starts.** Which award a day is
   billed to is decided by the attachment in force during it, and attaching an
   award part-way through a day takes the whole of it (§4.1.2). So a day whose
@@ -881,7 +955,164 @@ consequences:
 > date until it is reported complete. Implement against the rule above; a site
 > portal that does needs no change when the fix lands.
 
-### 4.4 What you will not receive
+### 4.4 What a portal supports
+
+| Instruction | Arguments | Must return | Wire form |
+|-------------|-----------|-------------|-----------|
+| `is_feature_supported` | `<feature>` | `bool` | `true` / `false` |
+| `get_supported_features` | *(none)* | `Vec<String>` | array of strings |
+
+How an awarding portal finds out what you support before relying on it - for
+example, whether you act on an award's `spend_profile`. Both arrive through an
+offering like everything else, so you may answer differently for each
+resource. Answer them from the same set, so that a feature is supported if and
+only if it is in the list.
+
+**Feature names are opaque strings, not an enum.** They are agreed between
+portals, and you may define your own. A name is 1-64 characters of lowercase
+ASCII letters, digits, `_`, `-` and `.`, starting with a letter; a malformed
+one is refused before it reaches you. Answer `false` for any name you do not
+recognise - that is what lets a caller ask about a feature defined after your
+code was written.
+
+**Claim a feature only if your business logic does what it promises**, not
+merely because you can store the data it concerns. A portal that keeps a spend
+profile but does nothing with it supports neither `award_spend_minimums` nor
+`award_spend_maximums`.
+
+The well-known names:
+
+| Feature | Means the site |
+|---------|----------------|
+| `award_spend_minimums` | Understands the `minimum`s in `AwardDetails.spend_profile`, acts on them as agreed with the awarding portal, and reports any forfeit as described in §4.4.1 |
+| `award_spend_maximums` | Understands the `maximum`s in `AwardDetails.spend_profile`, and acts on them as agreed with the awarding portal |
+
+They are separate because a site may enforce one and not the other: a cap maps
+naturally onto scheduler limits, while forfeiting what was not spent is a
+process. Claim each only for what you do.
+
+For the caller, there are three outcomes, not two:
+
+| What comes back | Means |
+|-----------------|-------|
+| `true` | Supported |
+| `false`, or `OpenPortalUnsupportedCommandError` | Not supported |
+| An error from an agent that cannot parse the instruction | Not supported - the site predates feature discovery |
+| A timeout, or the job expiring | **Unknown.** Ask again later; do not treat it as "no" |
+
+Answers are snapshots - sites upgrade - so ask again before relying on one
+rather than remembering it indefinitely. Implementing these is optional (§4.0);
+a portal that declines them is read as supporting nothing. The design is in
+`docs/plans/award-spend-profiles-and-feature-discovery-design.md`.
+
+#### 4.4.1 Reporting a forfeit
+
+A site that enforces spend minimums will at some point charge an award for
+what it did not spend - a **forfeit**. How much, and when, is policy agreed
+between the two portals (an example is below). How the forfeit is *reported*
+is a convention every site and awarding portal shares, so that an awarding
+portal can read any site's forfeits the same way. It needs nothing new on the
+wire: a forfeit travels in the usage reports a site already answers
+(`get_usage_report` / `get_usage_reports`, §4.3), and OpenPortal carries it
+like any other usage without interpreting it.
+
+A site that claims `award_spend_minimums` reports a forfeit like this:
+
+1. **It is billed to a user named `forfeit`.** In the report it is a local user
+   `forfeit`, mapped in `users` to `forfeit.<project>.<portal>` in the
+   awarding portal's namespace, like any other user. Map it rather than leaving
+   it unmapped, so that an awarding portal that flags unattributed usage does
+   not mistake it for an error. No real person may be given that username:
+   if your usernames are derived from something a person chooses (an email's
+   local part, say), map `forfeit@...` to something else.
+2. **It appears under a component named `forfeit`**, for that user, in the
+   same day's `components`.
+3. **It is in the award's unit, like every other figure** (§4.3). A minimum is
+   normally written in the award's unit already, so the shortfall needs no
+   conversion; if it is not, convert it with the factor you agreed, as you do
+   usage. The awarding portal converts nothing.
+4. **It counts in the totals.** It is part of the `forfeit` user's usage in
+   `reports`, and so of the day's and the report's totals. An awarding portal
+   that knows nothing of forfeits therefore still sees the award's true spend,
+   provided it keeps usage from users who are not project members; one that
+   does know can show the `forfeit` user or component specially. It is not a
+   job: it adds nothing to `num_jobs`, `user_job_counts` or the wait and
+   runtime figures.
+5. **It is dated the last day of the period whose minimum was missed**, which
+   for the final period is the award's `end_date`. It belongs to the award it
+   was charged to, so it is reported against that award even if the award has
+   since been detached (§4.1.2) - and even when the forfeit for the final
+   period is only charged after the award has ended.
+6. **A correction replaces it.** Reports are recomputed rather than appended,
+   so if a forfeit is later corrected - because late usage records changed the
+   period's spend, say - report the corrected amount on the same day. The
+   latest report for that day is the truth.
+
+**Keep the month incomplete until the forfeit is settled.** This is the rule
+most likely to go wrong. A forfeit is dated the last day of a period but only
+known after the period has ended - for a quarter, on the first day of the next
+month, dated the last day of the one before. And it is computed from the
+period's usage, so a late usage record changes it too. So do not report the
+month containing that day complete (§4.3, `is_complete`) until the forfeit has
+been charged and the usage it depends on has settled. Point 6 only works while
+the month is incomplete: once you report it complete, the awarding portal stops
+asking, and a correction is never collected.
+
+**A worked example.** An award of `1000 NHR` from 2027-01-01, whose first
+period has a minimum of `250 NHR`:
+
+```json
+"spend_profile": [
+  {"from": "2027-01-01", "minimum": "250 NHR"},
+  {"from": "2027-04-01", "minimum": "250 NHR"},
+  ...
+]
+```
+
+By 2027-03-31, the last day of the first period, the project has used
+`150 NHR`. On 2027-04-01 the site charges the shortfall, `100 NHR`, as a
+forfeit dated 2027-03-31. Its report for that day carries the forfeit
+alongside that day's real usage - 100 NHR is 360000 node-seconds:
+
+```json
+{
+  "project": "myaward1.allocator",
+  "reports": {
+    "2027-03-31": {
+      "reports": {
+        "alice":   {"seconds": 7200},
+        "forfeit": {"seconds": 360000}
+      },
+      "components": {
+        "forfeit": {"forfeit": {"seconds": 360000}}
+      },
+      "num_jobs": 3,
+      "user_job_counts": {"alice": 3},
+      "is_complete": false
+    }
+  },
+  "users": {
+    "alice.myaward1.allocator":   "alice",
+    "forfeit.myaward1.allocator": "forfeit"
+  }
+}
+```
+
+March stays incomplete until the site is sure of both the usage and the
+forfeit, and is reported complete after that.
+
+*The policy behind a forfeit is the two portals' to agree, not part of this
+convention.* For example, one pair of portals has agreed that the shortfall
+charged at the start of each period is the sum of the minimums so far, less
+everything charged so far (usage and earlier forfeits), so that spending above
+one period's minimum counts towards later ones; and that the award behaves as
+if its allocation were the sum of the maximums so far, capped at the award.
+Another pair could agree something quite different and report it the same way.
+Whatever is agreed should say what a period with no `minimum` or no `maximum`
+means under it - in the profile's own terms, that period has no control of that
+kind (json-types.md, `SpendProfileEntry`).
+
+### 4.5 What you will not receive
 
 The bridge board carries only the instructions above. Everything else in the
 `greatwestern` vocabulary — `add_user`, `remove_user`, `add_local_user`,
@@ -956,7 +1187,11 @@ The bridge tries 3 times at 2-second intervals, then logs and drops. Configure
 15. Handle `membership_control`, reject an award with an unknown `template` or
     with none, and reject one with no `allocation` - an award is for a quantity
     (§4.1). Populate `AwardDetails.members` (§4.2).
-16. Fetch and acknowledge notifications (§5).
+16. Answer `is_feature_supported` and `get_supported_features` from one set, and
+    claim a feature only if you act on it - or decline both (§4.4). If you claim
+    `award_spend_minimums`, report forfeits as §4.4.1 describes, and keep a
+    month incomplete until its forfeit has settled.
+17. Fetch and acknowledge notifications (§5).
 
 ---
 ## 7. Source file reference

@@ -1033,9 +1033,11 @@ Everything is up.
          30000).result
 
      print(report)
+     print("total:", f"{{report.total():.1f}}")
      print("complete?", report.is_complete)
      for user in report.users:
-         print(user, report.usage(user), report.user_mapping[user])
+         print(user, report.unit.format(report.usage(user), decimals=1),
+               report.user_mapping[user])
 
    `today` is a keyword the date-range grammar understands, so nothing needs
    substituting on this side. What comes back is in the **awards portal's**
@@ -1043,8 +1045,8 @@ Everything is up.
 
      {award}
      <today>
-       alice.{award}: 2.083 days
-     Daily total: 2.083 days
+       alice.{award}: 50.000 GPUHR
+     Daily total: 50.000 GPUHR
 
    Two translations happened there, and both matter.
 
@@ -1055,9 +1057,9 @@ Everything is up.
    The **unit**: 12.5 went in and 50 came out. The award is allocated in
    `5000 GPUHR` and the two portals agreed that one node hour here is four of
    their GPU hours, so 12.5 of ours *is* 50 of theirs - which is the figure they
-   asked for, in the unit they allocated in. `2.083 days` is 50 hours printed the
-   way `Usage` likes to print itself; `report.total_usage.in_hours()` says
-   `50.000 hours` and `.hours` gives the number.
+   asked for, in the unit they allocated in - and the report says so:
+   `report.unit` is `GPUHR`, so `report.total()` prints as `50.000 GPUHR` and
+   `.value` gives the number.
 
    The same factor runs the other way too: `curl .../awards` shows this award as
    5000 of their units and 1250 of ours - the number a site would enforce a quota

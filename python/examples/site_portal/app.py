@@ -738,6 +738,18 @@ async def push_usage(local_project_id: str, push: UsagePush):
         # A report pushed here is expected to be in *our* namespace, since it
         # came from our accounting. Only the email is kept, so a report built
         # against either namespace flattens the same way.
+        #
+        # And in *our* unit, which the report says. One from before reports
+        # carried a unit has none, and was time - so read as our hours.
+        unit = report.unit or site_portal.unit_for(site_portal.SITE_UNIT)
+
+        if unit != site_portal.unit_for(site_portal.SITE_UNIT):
+            raise HTTPException(
+                status_code=400,
+                detail=f"the report is in {unit.name}, but this site accounts in "
+                f"{site_portal.SITE_UNIT}",
+            )
+
         hours: dict[str, dict[str, float]] = {}
 
         for date in report.dates:
@@ -745,9 +757,9 @@ async def push_usage(local_project_id: str, push: UsagePush):
             per_user = {}
 
             for user, local_name in day.user_mapping.items():
-                seconds = day.usage(user).seconds
-                if seconds:
-                    per_user[local_name] = seconds / 3600.0
+                amount = unit.amount(day.usage(user))
+                if amount:
+                    per_user[local_name] = amount
 
             if per_user:
                 hours[date.isoformat()] = per_user

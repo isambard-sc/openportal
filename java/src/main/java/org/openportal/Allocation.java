@@ -127,6 +127,14 @@ public record Allocation(Double size, String units) implements OpenPortalType {
      * {@code "chr"} is then what the other side compares against.
      */
     public static String canonicalize(String units) {
+        // A currency is named by its ISO 4217 code, in capitals, so that an
+        // award of "5000 gbp" and a usage report in "GBP" are one unit.
+        String currency = UsageUnit.currencyCode(units);
+
+        if (currency != null) {
+            return currency;
+        }
+
         String canonical = units == null ? "" : units.trim().toLowerCase(Locale.ROOT);
 
         return switch (canonical) {
@@ -135,6 +143,7 @@ public record Allocation(Double size, String units) implements OpenPortalType {
             case "cpu hours", "cpu hour", "cpuhr" -> "CPUHR";
             case "core hours", "core hour", "corehr" -> "COREHR";
             case "gb hours", "gb hour", "gbhr" -> "GBHR";
+            case "mb hours", "mb hour", "mbhr" -> "MBHR";
             case "billing hours", "billing hour", "bhr" -> "BHR";
             default -> canonical;
         };

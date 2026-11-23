@@ -37,7 +37,7 @@ use greatwestern::grammar::{Date, DateRange, ProjectIdentifier};
 use greatwestern::usagereport::{DailyProjectUsageReport, ProjectUsageReport, Usage};
 
 use op_slurm::dayquery::{jobs_on_day, DayRecords, JobQuery};
-use op_slurm::sacctmgr::{record_job, set_commands, ReportTotals};
+use op_slurm::sacctmgr::{new_usage_report, record_job, set_commands, ReportTotals};
 use op_slurm::slurm::{RequeuePolicy, SlurmJob, SlurmNode, SlurmNodes};
 
 ///
@@ -292,7 +292,7 @@ async fn collect(options: &Options, nodes: &SlurmNodes) -> Result<Collected> {
             &options.reservation,
             day,
             options.requeue_policy,
-        );
+        )?;
 
         // Both numbers, always: they are how an operator checks whether
         // `--sacct-filter` does what it claims. With it on the two should be
@@ -355,7 +355,7 @@ fn absorb_day(
     reservation: &str,
     day: &Date,
     policy: RequeuePolicy,
-) {
+) -> Result<()> {
     collected.days.push(day.clone());
 
     let start_time = day.day().start_time().and_utc();
@@ -395,9 +395,11 @@ fn absorb_day(
         collected
             .projects
             .entry(project.clone())
-            .or_insert_with(|| ProjectUsageReport::new(&project))
-            .set_report(day, &report);
+            .or_insert(new_usage_report(&project)?)
+            .set_report(day, &report)?;
     }
+
+    Ok(())
 }
 
 /// Projects worst - which is to say largest - first, so the reservation's
@@ -1079,7 +1081,8 @@ mod tests {
                 reservation,
                 &day(start),
                 RequeuePolicy::NoCharge,
-            );
+            )
+            .unwrap();
         }
 
         collected

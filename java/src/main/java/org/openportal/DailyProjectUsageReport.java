@@ -42,17 +42,27 @@ public final class DailyProjectUsageReport implements OpenPortalType {
 
     /** {@code user → usage}. Remapped when local usernames are rewritten. */
     private static final String[] USAGE_MAPS = {
-        "reports", "requeue_reports",
+        "reports", "requeue_reports", "charged_requeue_reports",
     };
 
     /** {@code state → usage} - keyed by a Slurm state, so never remapped. */
     private static final String[] STATE_USAGE_MAPS = {
-        "requeue_state_usage",
+        "requeue_state_usage", "charged_requeue_state_usage",
     };
 
     /** {@code component-or-reservation → user → usage}. Inner keys are users. */
     private static final String[] NESTED_USAGE_MAPS = {
-        "components", "requeue_components", "reservation_reports", "reservation_requeue_usage",
+        "components", "requeue_components", "charged_requeue_components", "reservation_reports",
+        "reservation_requeue_usage",
+    };
+
+    /**
+     * The nested maps holding consumption in the report's own unit - every
+     * nested map but the component breakdowns, which are each in their
+     * component's unit. See {@link #scaleTotals}.
+     */
+    private static final String[] NESTED_CONSUMPTION_MAPS = {
+        "reservation_reports", "reservation_requeue_usage",
     };
 
     /** {@code user → count}. Remapped with the usage maps. */
@@ -60,11 +70,12 @@ public final class DailyProjectUsageReport implements OpenPortalType {
         "user_job_counts", "user_wait_seconds", "user_expansion_milli", "user_runtime_seconds",
         "user_expansion_jobs", "user_allocated_cpus", "user_allocated_gpus",
         "user_requeue_events", "user_requeue_wait_seconds",
+        "user_charged_requeue_events", "user_charged_requeue_wait_seconds",
     };
 
     /** {@code state-or-reservation → count} - not keyed by user. */
     private static final String[] OTHER_COUNTER_MAPS = {
-        "requeue_states", "reservation_jobs",
+        "requeue_states", "charged_requeue_states", "reservation_jobs",
     };
 
     /** Scalar totals, each shadowing one of the user maps above. */
@@ -72,6 +83,7 @@ public final class DailyProjectUsageReport implements OpenPortalType {
         "num_jobs", "total_wait_seconds", "total_expansion_milli", "total_runtime_seconds",
         "num_expansion_jobs", "total_allocated_cpus", "total_allocated_gpus",
         "num_requeue_events", "requeue_wait_seconds",
+        "num_charged_requeue_events", "charged_requeue_wait_seconds",
     };
 
     /**
@@ -415,6 +427,30 @@ public final class DailyProjectUsageReport implements OpenPortalType {
         return scaled;
     }
 
+    /**
+     * A copy with only the consumption figures scaled - the usage, requeue,
+     * charged-requeue and reservation figures, all in the report's own unit -
+     * and the component breakdowns, each in its component's unit, left alone.
+     * This is what a change of the report's unit scales.
+     */
+    DailyProjectUsageReport scaleTotals(double factor) {
+        DailyProjectUsageReport scaled = copy();
+
+        for (String field : USAGE_MAPS) {
+            scaled.scaleUsages(field, factor);
+        }
+
+        for (String field : STATE_USAGE_MAPS) {
+            scaled.scaleUsages(field, factor);
+        }
+
+        for (String field : NESTED_CONSUMPTION_MAPS) {
+            scaled.scaleNestedUsages(field, factor);
+        }
+
+        return scaled;
+    }
+
     /** As {@link #times}, dividing. A zero divisor gives zero rather than throwing. */
     public DailyProjectUsageReport dividedBy(double divisor) {
         if (divisor == 0.0) {
@@ -487,12 +523,14 @@ public final class DailyProjectUsageReport implements OpenPortalType {
         for (String user : localUsers()) {
             long jobs = numJobsForUser(user);
 
-            text.append(user).append(": ").append(usage(user));
+            // A day carries no unit of its own; one printed alone is read as
+            // time, which every report from before units was.
+            text.append(user).append(": ").append(usage(user).asDuration());
 
             if (jobs > 0) {
                 text.append(" | ").append(jobs).append(jobs == 1 ? " job" : " jobs")
                         .append(" | Average wait: ")
-                        .append(new Usage(averageWaitSecondsForUser(user)));
+                        .append(new Usage(averageWaitSecondsForUser(user)).asDuration());
             }
 
             text.append('\n');

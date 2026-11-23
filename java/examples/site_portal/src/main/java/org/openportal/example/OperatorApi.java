@@ -30,6 +30,7 @@ import org.openportal.Notification;
 import org.openportal.ProjectIdentifier;
 import org.openportal.ProjectUsageReport;
 import org.openportal.UserIdentifier;
+import org.openportal.UsageUnit;
 
 /**
  * The HTTP surface: two endpoints OpenPortal calls, and the rest an operator
@@ -743,6 +744,16 @@ public final class OperatorApi {
             throw new HttpError(400, "not a ProjectUsageReport: " + e.getMessage());
         }
 
+        // In *our* unit, which the report says. One from before reports carried
+        // a unit has none, and was time - so it is read as our hours.
+        UsageUnit ours = SitePortal.unitFor(SitePortal.SITE_UNIT);
+        UsageUnit unit = report.unit().orElse(ours);
+
+        if (!unit.equals(ours)) {
+            throw new HttpError(400, "the report is in " + unit.name()
+                    + ", but this site accounts in " + SitePortal.SITE_UNIT);
+        }
+
         Map<LocalDate, Map<String, Double>> hours = new TreeMap<>();
 
         for (LocalDate date : report.dates()) {
@@ -750,10 +761,10 @@ public final class OperatorApi {
             Map<String, Double> perUser = new LinkedHashMap<>();
 
             for (Map.Entry<UserIdentifier, String> mapping : report.userMapping().entrySet()) {
-                long seconds = day.usage(mapping.getValue()).seconds();
+                double amount = unit.amount(day.usage(mapping.getValue()));
 
-                if (seconds != 0) {
-                    perUser.put(mapping.getValue(), seconds / 3600.0);
+                if (amount != 0.0) {
+                    perUser.put(mapping.getValue(), amount);
                 }
             }
 

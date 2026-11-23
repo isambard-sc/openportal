@@ -222,6 +222,32 @@ public final class UsageReport implements OpenPortalType {
         return sum;
     }
 
+    /**
+     * The unit every project's report is in, if they share one. Two awards may
+     * be in different units, so a portal-wide total means something only when
+     * this is present.
+     */
+    public java.util.Optional<UsageUnit> commonUnit() {
+        java.util.Optional<UsageUnit> common = java.util.Optional.empty();
+
+        for (ProjectIdentifier project : projects()) {
+            java.util.Optional<UsageUnit> unit = getReport(project).unit();
+
+            if (unit.isEmpty() || (common.isPresent() && !common.equals(unit))) {
+                return java.util.Optional.empty();
+            }
+
+            common = unit;
+        }
+
+        return common;
+    }
+
+    /** The total across every project, if they share a unit. */
+    public java.util.Optional<Amount> total() {
+        return commonUnit().map(unit -> new Amount(totalUsage(), unit));
+    }
+
     /** Every project's figures scaled. */
     public UsageReport times(double factor) {
         UsageReport scaled = new UsageReport(portal());

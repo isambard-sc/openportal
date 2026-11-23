@@ -27,7 +27,9 @@ import org.openportal.ProjectMapping;
 import org.openportal.ProjectStorageReport;
 import org.openportal.ProjectTemplate;
 import org.openportal.ProjectUsageReport;
+import org.openportal.SpendProfileEntry;
 import org.openportal.UsageReport;
+import org.openportal.UsageUnit;
 
 /**
  * The contract, driven without a bridge.
@@ -389,6 +391,78 @@ class SitePortalTest {
     }
 
     @Test
+    void a_spend_profile_is_carried_through_and_handed_back_by_get_award() {
+        portal.addOffering(OFFERING, List.of("standard"), AGREED);
+        created(details());
+        approve(LOCAL, LocalDate.now());
+
+        // This portal does not act on a spend profile, but it must not lose
+        // one: the profile is part of the award.
+        List<SpendProfileEntry> quarterly = List.of(
+                SpendProfileEntry.minimum("2027-04-01", "500 GPUHR"),
+                SpendProfileEntry.of("2027-01-01", "500 GPUHR", "500 GPUHR"),
+                SpendProfileEntry.maximum("2027-07-01", "1000 GPUHR"),
+                SpendProfileEntry.noControls("2027-10-01"));
+        created(details().setSpendProfile(quarterly));
+
+        AwardDetails read = portal.answer(job("get_award " + AWARD))
+                .result(AwardDetails::fromJson).orElseThrow();
+        assertEquals(
+                List.of("from 2027-01-01: spend exactly 500 GPUHR",
+                        "from 2027-04-01: spend at least 500 GPUHR",
+                        "from 2027-07-01: spend at most 1000 GPUHR",
+                        "from 2027-10-01: no spend controls"),
+                read.spendProfile().orElseThrow().stream()
+                        .map(SpendProfileEntry::toString).toList());
+
+        // An update that does not mention it keeps it; `[]` removes it.
+        created(details());
+        read = portal.answer(job("get_award " + AWARD))
+                .result(AwardDetails::fromJson).orElseThrow();
+        assertEquals(4, read.spendProfile().orElseThrow().size());
+
+        created(details().setSpendProfile(List.of()));
+        read = portal.answer(job("get_award " + AWARD))
+                .result(AwardDetails::fromJson).orElseThrow();
+        assertEquals(List.of(), read.spendProfile().orElseThrow());
+    }
+
+    // ---- what this portal supports -----------------------------------------
+
+    @Test
+    void a_feature_this_portal_does_not_act_on_is_not_supported() {
+        portal.addOffering(OFFERING, List.of("standard"), AGREED);
+
+        // It carries spend profiles but does not act on them, so it does not
+        // claim them - and a name it has never heard of is a plain "no".
+        for (String feature : List.of("award_spend_minimums", "award_spend_maximums", "some_future_feature")) {
+            Job answered = portal.answer(job("is_feature_supported " + feature));
+
+            assertFalse(answered.isError(), answered.errorMessage());
+            assertEquals("bool", answered.resultType().orElseThrow());
+            assertEquals("false", answered.resultText().orElseThrow());
+        }
+
+        Job answered = portal.answer(job("get_supported_features"));
+        assertFalse(answered.isError(), answered.errorMessage());
+        assertEquals("Vec<String>", answered.resultType().orElseThrow());
+        assertEquals("[]", answered.resultText().orElseThrow());
+    }
+
+    @Test
+    void a_supported_feature_is_answered_the_same_way_by_both_questions() {
+        portal.addOffering(OFFERING, List.of("standard"), AGREED);
+        portal.supportedFeatures = java.util.Set.of("award_spend_maximums", "a_feature");
+
+        Job answered = portal.answer(job("is_feature_supported award_spend_maximums"));
+        assertEquals("true", answered.resultText().orElseThrow());
+
+        answered = portal.answer(job("get_supported_features"));
+        assertEquals("[\"a_feature\",\"award_spend_maximums\"]",
+                answered.resultText().orElseThrow());
+    }
+
+    @Test
     void get_projects_answers_mappings_and_a_detached_award_maps_to_None() {
         portal.addOffering(OFFERING, List.of("standard"), AGREED);
         created(details());
@@ -487,7 +561,12 @@ class SitePortalTest {
         // 12.5 of our node hours, at the agreed four to one, is 50 of their GPU
         // hours. Reporting 12.5 would not be reporting slightly differently - it
         // would be reporting a different quantity under the same name.
-        assertEquals(50.0, report.totalUsage().hours(), 0.001);
+        assertEquals(50.0, report.total().orElseThrow().value(), 0.001);
+
+        // ...and the report says so: it is in the award's unit, GPU hours, so
+        // the awarding portal reads 50 as what it is.
+        assertEquals(UsageUnit.parse("GPUHR"), report.unit().orElseThrow());
+        assertEquals("50.0 GPUHR", report.total().orElseThrow().format(1));
 
         // And the report is about *their* award, with our project nowhere in it.
         assertEquals(AWARD, report.project().toString());

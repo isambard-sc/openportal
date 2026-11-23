@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
@@ -24,6 +25,9 @@ import org.junit.jupiter.api.Test;
  * pinned is the <b>strings and JSON the other side actually writes</b>.
  */
 class TypesTest {
+
+    /** The unit usage has always been in on an HPC site: node-seconds. */
+    private static final UsageUnit NHR = UsageUnit.parse("NHR");
 
     // ---- identifiers -------------------------------------------------------
 
@@ -165,20 +169,206 @@ class TypesTest {
 
     // ---- usage -------------------------------------------------------------
 
+    // ---- usage units -------------------------------------------------------
+
+    private static final UsageUnit GBP = UsageUnit.parse("GBP");
+    private static final UsageUnit GPUHR = UsageUnit.parse("gpu hours");
+
+    private static DailyProjectUsageReport cloudDay() {
+        return new DailyProjectUsageReport()
+                .addUsage("alice", GBP.usageFromDecimal("3.20"))
+                .addComponentUsage("gpu", "alice", GPUHR.usage(1.5))
+                .addComponentUsage("egress", "alice", GBP.usageFromDecimal("0.15"));
+    }
+
+    private static ProjectUsageReport cloudReport() {
+        return new ProjectUsageReport(ProjectIdentifier.parse("myaward1.allocator"), GBP)
+                .setComponentUnit("gpu", GPUHR)
+                .addReport(LocalDate.of(2027, 3, 31), cloudDay());
+    }
+
     @Test
-    void usage_prints_in_the_largest_unit_it_reaches() {
-        assertEquals("0 seconds", new Usage(0).toString());
-        assertEquals("1 second", new Usage(1).toString());
-        assertEquals("59 seconds", new Usage(59).toString());
-        assertEquals("1.000 minute", new Usage(60).toString());
-        assertEquals("1.500 minutes", new Usage(90).toString());
-        assertEquals("1.000 hour", new Usage(3600).toString());
-        assertEquals("1.500 hours", new Usage(5400).toString());
-        assertEquals("1.000 day", new Usage(86400).toString());
-        assertEquals("1.042 days", new Usage(90000).toString());
-        assertEquals("1.000 week", new Usage(604800).toString());
-        assertEquals("1.142 months", new Usage(3000000).toString());
-        assertEquals("1.268 years", new Usage(40000000).toString());
+    void well_known_units_parse_at_their_default_resolution() {
+        assertEquals(new UsageUnit("GBP", 1_000_000), UsageUnit.parse("gbp"));
+        assertEquals(new UsageUnit("GBP", 1_000_000), UsageUnit.parse("£"));
+        assertEquals(new UsageUnit("EUR", 1_000_000), UsageUnit.parse("€"));
+        assertEquals(new UsageUnit("GPUHR", 3600), GPUHR);
+        assertEquals("MBHR", UsageUnit.parse("mb hours").name());
+        assertTrue(GBP.isCurrency());
+        assertTrue(GPUHR.isTime());
+
+        for (String unknown : List.of("$", "dollars", "credits", "XXX", "")) {
+            assertThrows(IllegalArgumentException.class, () -> UsageUnit.parse(unknown));
+        }
+
+        assertEquals(100, UsageUnit.of("CREDITS", 100).countsPerUnit());
+        assertThrows(IllegalArgumentException.class, () -> UsageUnit.of("GBP", 0));
+
+        // Allocation canonicalises currencies the same way, so an award and its
+        // report can be compared.
+        assertEquals("GBP", Allocation.parse("5000 gbp").units());
+    }
+
+    @Test
+    void amounts_convert_exactly_or_round_to_the_nearest_count() {
+        assertEquals(3_200_000, GBP.usageFromDecimal("3.20").counts());
+        assertEquals(3_200_000, GBP.usage(new java.math.BigDecimal("3.2")).counts());
+        assertEquals(3_200_000, GBP.usage(3.2).counts());
+        assertEquals(2, GBP.usage(0.0000015).counts()); // ties to even
+        assertEquals(5400, UsageUnit.parse("NHR").usageFromDecimal("1.5").counts());
+
+        assertThrows(IllegalArgumentException.class, () -> GBP.usageFromDecimal("0.0000001"));
+        assertThrows(IllegalArgumentException.class, () -> GBP.usageFromDecimal("-1"));
+        assertThrows(IllegalArgumentException.class, () -> GBP.usageFromDecimal("abc"));
+        assertThrows(IllegalArgumentException.class, () -> GBP.usage(Double.NaN));
+        assertThrows(IllegalArgumentException.class, () -> GBP.usage(-1.0));
+
+        // Scaling rounds rather than truncates.
+        assertEquals(2, new Usage(10).times(0.25).counts()); // 2.5 -> 2
+        assertEquals(4, new Usage(14).times(0.25).counts()); // 3.5 -> 4
+        assertEquals(2, new Usage(3).times(2.0 / 3.0).counts());
+    }
+
+    @Test
+    void an_amount_prints_in_its_unit() {
+        Amount amount = new Amount(GBP.usageFromDecimal("12.34"), GBP);
+        assertEquals("12.340000 GBP", amount.toString());
+        assertEquals("12.34 GBP", amount.format(2));
+        assertEquals("1.500 GPUHR", new Amount(GPUHR.usage(1.5), GPUHR).toString());
+        assertEquals("42 tokens", new Amount(Usage.fromCounts(42), UsageUnit.of("TOKENS", 1)).toString());
+    }
+
+    @Test
+    void a_report_carries_its_unit_and_its_components_units() {
+        ProjectUsageReport report = cloudReport();
+
+        assertEquals(GBP, report.unit().orElseThrow());
+        assertEquals(GPUHR, report.componentUnit("gpu").orElseThrow());
+        assertEquals(GBP, report.componentUnit("egress").orElseThrow());
+        assertEquals("3.20 GBP", report.total().orElseThrow().format(2));
+        assertEquals("1.500 GPUHR", report.componentTotal("gpu").orElseThrow().toString());
+
+        JsonNode json = report.toJson();
+        assertEquals("{\"name\":\"GBP\",\"counts_per_unit\":1000000}",
+                json.get("usage_unit").toString());
+        assertEquals("{\"gpu\":{\"name\":\"GPUHR\",\"counts_per_unit\":3600}}",
+                json.get("component_units").toString());
+
+        ProjectUsageReport back = ProjectUsageReport.fromJson(Json.write(json));
+        assertEquals(report.unit(), back.unit());
+        assertEquals(report.componentUnits(), back.componentUnits());
+        assertEquals(GPUHR, report.getComponent("gpu").unit().orElseThrow());
+    }
+
+    @Test
+    void a_report_from_before_units_must_be_declared_before_it_grows() {
+        ProjectUsageReport legacy = ProjectUsageReport.fromJson("""
+                {"project": "myaward1.allocator",
+                 "reports": {"2027-03-30": {"reports": {"alice": {"seconds": 7200}},
+                                            "is_complete": true}},
+                 "users": {}}""");
+
+        assertTrue(legacy.unit().isEmpty());
+        assertTrue(legacy.total().isEmpty());
+        assertEquals(new Usage(7200), legacy.totalUsage());
+
+        LocalDate day = LocalDate.of(2027, 3, 31);
+        DailyProjectUsageReport more = new DailyProjectUsageReport().addUsage("alice", Usage.fromHours(1));
+        assertThrows(IllegalStateException.class, () -> legacy.addReport(day, more));
+        assertThrows(IllegalStateException.class, () -> legacy.setReport(day, more));
+        assertThrows(IllegalStateException.class, () -> legacy.convert(GBP, 1.0));
+        assertThrows(IllegalArgumentException.class, () -> legacy.setTimeUnit("GBP"));
+
+        legacy.setTimeUnit("GPUHR");
+        assertEquals(GPUHR, legacy.unit().orElseThrow());
+        assertEquals(new Usage(7200), legacy.totalUsage());
+        assertThrows(IllegalStateException.class, () -> legacy.setUnit(GBP));
+
+        legacy.addReport(day, more);
+        assertEquals("3.000 GPUHR", legacy.total().orElseThrow().toString());
+    }
+
+    @Test
+    void converting_a_report_keeps_its_components_meaning() {
+        ProjectUsageReport converted = cloudReport().convert(GPUHR, 0.5);
+
+        assertEquals(GPUHR, converted.unit().orElseThrow());
+        assertEquals("1.600 GPUHR", converted.total().orElseThrow().toString());
+        assertEquals(GPUHR, converted.componentUnit("gpu").orElseThrow());
+        assertEquals(GBP, converted.componentUnit("egress").orElseThrow());
+        assertEquals("0.15 GBP", converted.componentTotal("egress").orElseThrow().format(2));
+        assertFalse(converted.componentUnits().containsKey("gpu"));
+
+        assertThrows(IllegalStateException.class,
+                () -> cloudReport().setComponentUnit("egress", UsageUnit.parse("USD")));
+    }
+
+    @Test
+    void reports_combine_only_in_the_same_unit() {
+        ProjectUsageReport report = cloudReport();
+        assertEquals("6.40 GBP", ProjectUsageReport.combine(List.of(report, report))
+                .total().orElseThrow().format(2));
+
+        ProjectUsageReport usd = new ProjectUsageReport(report.project(), UsageUnit.parse("USD"))
+                .addReport(LocalDate.of(2027, 3, 31), cloudDay());
+        assertThrows(IllegalArgumentException.class, () -> report.plus(usd));
+
+        ProjectUsageReport legacy = ProjectUsageReport.fromJson("""
+                {"project": "myaward1.allocator",
+                 "reports": {"2027-03-29": {"reports": {"alice": {"seconds": 60}}}},
+                 "users": {}}""");
+        assertThrows(IllegalArgumentException.class, () -> report.plus(legacy));
+        assertEquals(new Usage(120), legacy.plus(legacy).totalUsage());
+
+        // An empty report takes the other's unit, at both levels.
+        assertEquals(GBP, new ProjectUsageReport(report.project()).plus(report).unit().orElseThrow());
+        UsageReport portal = new UsageReport(new PortalIdentifier("allocator")).addReport(report);
+        assertEquals(GBP, portal.commonUnit().orElseThrow());
+        assertEquals("3.20 GBP", portal.total().orElseThrow().format(2));
+        assertThrows(IllegalArgumentException.class, () -> portal.addReport(usd));
+    }
+
+    /** The Java client used to leave the charged-requeue figures out of every sum and scaling. */
+    @Test
+    void charged_requeue_figures_are_summed_and_scaled_with_the_rest() {
+        DailyProjectUsageReport day = DailyProjectUsageReport.fromJson(Json.parse("""
+                {"reports": {"alice": {"seconds": 1000}},
+                 "charged_requeue_reports": {"alice": {"seconds": 400}},
+                 "num_charged_requeue_events": 2,
+                 "components": {"gpu": {"alice": {"seconds": 100}}}}"""));
+
+        DailyProjectUsageReport doubled = day.plus(day);
+        assertEquals(800, doubled.toJson().path("charged_requeue_reports").path("alice")
+                .path("seconds").asLong());
+        assertEquals(4, doubled.toJson().path("num_charged_requeue_events").asLong());
+
+        ProjectUsageReport report = new ProjectUsageReport(ProjectIdentifier.parse("p.site"), NHR)
+                .setReport(LocalDate.of(2027, 3, 31), day)
+                .scaleTotal(2.0);
+        JsonNode scaled = report.getReport(LocalDate.of(2027, 3, 31)).toJson();
+        assertEquals(2000, scaled.path("reports").path("alice").path("seconds").asLong());
+        assertEquals(800, scaled.path("charged_requeue_reports").path("alice").path("seconds").asLong());
+        assertEquals(100, scaled.path("components").path("gpu").path("alice").path("seconds").asLong());
+    }
+
+    @Test
+    void usage_prints_as_a_count_and_as_a_duration_on_request() {
+        // A usage is a count; what a count is belongs to its report's unit.
+        assertEquals("5400", new Usage(5400).toString());
+        assertEquals(5400, Usage.fromCounts(5400).counts());
+
+        assertEquals("0 seconds", new Usage(0).asDuration());
+        assertEquals("1 second", new Usage(1).asDuration());
+        assertEquals("59 seconds", new Usage(59).asDuration());
+        assertEquals("1.000 minute", new Usage(60).asDuration());
+        assertEquals("1.500 minutes", new Usage(90).asDuration());
+        assertEquals("1.000 hour", new Usage(3600).asDuration());
+        assertEquals("1.500 hours", new Usage(5400).asDuration());
+        assertEquals("1.000 day", new Usage(86400).asDuration());
+        assertEquals("1.042 days", new Usage(90000).asDuration());
+        assertEquals("1.000 week", new Usage(604800).asDuration());
+        assertEquals("1.142 months", new Usage(3000000).asDuration());
+        assertEquals("1.268 years", new Usage(40000000).asDuration());
     }
 
     @Test
@@ -423,6 +613,112 @@ class TypesTest {
     }
 
     @Test
+    void a_spend_profile_is_carried_sorted_and_omitted_when_absent() {
+        AwardDetails award = AwardDetails.fromJson("""
+                {"allocation": "1000 NHR",
+                 "spend_profile": [
+                   {"from": "2027-07-01", "minimum": "300 NHR"},
+                   {"from": "2027-01-01", "minimum": "100 NHR"}
+                 ]}""");
+
+        assertEquals(
+                List.of(SpendProfileEntry.minimum("2027-01-01", "100 NHR"),
+                        SpendProfileEntry.minimum("2027-07-01", "300 NHR")),
+                award.spendProfile().orElseThrow());
+
+        assertEquals("{\"from\":\"2027-01-01\",\"minimum\":\"100 NHR\"}",
+                award.toJson().get("spend_profile").get(0).toString());
+        assertEquals(award, AwardDetails.fromJson(award.toString()));
+
+        // Absent is left out of the wire form entirely, as the Rust side does;
+        // empty is written, because it means something different.
+        assertFalse(new AwardDetails().toJson().has("spend_profile"));
+        AwardDetails removed = new AwardDetails().setSpendProfile(List.of());
+        assertEquals(List.of(), AwardDetails.fromJson(removed.toString())
+                .spendProfile().orElseThrow());
+    }
+
+    @Test
+    void a_spend_profile_refuses_two_minimums_for_one_day() {
+        assertThrows(IllegalArgumentException.class, () -> new AwardDetails().setSpendProfile(
+                List.of(SpendProfileEntry.minimum("2027-01-01", "100 NHR"),
+                        SpendProfileEntry.minimum("2027-01-01", "200 NHR"))));
+
+        assertThrows(IllegalArgumentException.class, () -> AwardDetails.fromJson("""
+                {"spend_profile": [{"minimum": "100 NHR"}]}"""));
+    }
+
+    @Test
+    void a_spend_profile_entry_sets_a_minimum_a_maximum_both_or_neither() {
+        AwardDetails award = AwardDetails.fromJson("""
+                {"spend_profile": [
+                   {"from": "2027-01-01", "minimum": "100 NHR", "maximum": "100 NHR"},
+                   {"from": "2027-04-01", "minimum": "100 NHR", "maximum": "300 NHR"},
+                   {"from": "2027-07-01", "maximum": "300 NHR"},
+                   {"from": "2027-08-01", "minimum": "5 NHR"},
+                   {"from": "2027-09-01"},
+                   {"from": "2027-10-01"}
+                 ]}""");
+
+        // Printed as words, the same as the Rust side, so an entry with no
+        // controls reads as what it means.
+        assertEquals(List.of(
+                        "from 2027-01-01: spend exactly 100 NHR",
+                        "from 2027-04-01: spend at least 100 NHR and at most 300 NHR",
+                        "from 2027-07-01: spend at most 300 NHR",
+                        "from 2027-08-01: spend at least 5 NHR",
+                        "from 2027-09-01: no spend controls",
+                        "from 2027-10-01: no spend controls"),
+                award.spendProfile().orElseThrow().stream()
+                        .map(SpendProfileEntry::toString).toList());
+
+        // Nothing carries over, and redundant entries are kept as sent.
+        assertTrue(award.spendProfile().orElseThrow().get(3).maximumSpend().isEmpty());
+        assertTrue(award.spendProfile().orElseThrow().get(4).hasNoControls());
+
+        // An unset control is left out of the wire form, as the Rust side does.
+        assertEquals("{\"from\":\"2027-09-01\"}",
+                award.toJson().get("spend_profile").get(4).toString());
+        assertEquals(award, AwardDetails.fromJson(award.toString()));
+    }
+
+    @Test
+    void a_spend_profile_entry_refuses_what_would_mean_two_things() {
+        // "none" as a control could mean no limit or nothing.
+        assertThrows(IllegalArgumentException.class,
+                () -> SpendProfileEntry.maximum("2027-01-01", "none"));
+        // A field this version does not know is ignored, as it is everywhere
+        // else in an award, so a later addition does not stop it parsing.
+        assertEquals(List.of(SpendProfileEntry.maximum("2027-01-01", "5 NHR")),
+                AwardDetails.fromJson("""
+                        {"spend_profile": [
+                          {"from": "2027-01-01", "maximum": "5 NHR", "added_later": 1}
+                        ]}""").spendProfile().orElseThrow());
+        // A minimum and maximum must be comparable, and consistent.
+        assertThrows(IllegalArgumentException.class,
+                () -> SpendProfileEntry.of("2027-01-01", "100 NHR", "400 GPUHR"));
+        assertThrows(IllegalArgumentException.class,
+                () -> SpendProfileEntry.of("2027-01-01", "100 NHR", "99 NHR"));
+
+        // Equal is an exact spend, and a cap of zero is a period with none.
+        assertEquals("from 2027-01-01: spend exactly 0 NHR",
+                SpendProfileEntry.of("2027-01-01", "0 NHR", "0 NHR").toString());
+        assertEquals("from 2027-01-01: spend at most 0 NHR",
+                SpendProfileEntry.maximum("2027-01-01", "0 NHR").toString());
+    }
+
+    @Test
+    void merging_replaces_the_spend_profile_and_keeps_it_when_unmentioned() {
+        AwardDetails held = new AwardDetails().setSpendProfile(
+                List.of(SpendProfileEntry.minimum("2027-01-01", "100 NHR")));
+
+        assertEquals(held.spendProfile(), held.merge(new AwardDetails()).spendProfile());
+
+        AwardDetails removal = new AwardDetails().setSpendProfile(List.of());
+        assertEquals(List.of(), held.merge(removal).spendProfile().orElseThrow());
+    }
+
+    @Test
     void a_link_refuses_a_scheme_that_would_be_dangerous_to_render() {
         // These links are documented as being for a portal UI, and a URL parser
         // accepts javascript: and file: happily.
@@ -505,6 +801,55 @@ class TypesTest {
         assertEquals(Json.parse(PROJECT_REPORT_JSON), report.toJson());
     }
 
+    private static DailyProjectUsageReport day(long hours, boolean complete) {
+        DailyProjectUsageReport day = new DailyProjectUsageReport();
+
+        if (hours > 0) {
+            day.addUsage("alice", Usage.fromHours(hours));
+        }
+
+        return complete ? day.setComplete() : day;
+    }
+
+    @Test
+    void a_summed_day_is_complete_exactly_when_both_parts_are() {
+        ProjectIdentifier project = ProjectIdentifier.parse("myaward1.allocator");
+        LocalDate date = LocalDate.of(2027, 3, 31);
+
+        // Two complete parts of a day, including two empty ones, stay complete.
+        for (long hours : new long[] {0, 1}) {
+            ProjectUsageReport report = new ProjectUsageReport(project, NHR)
+                    .addReport(date, day(hours, true))
+                    .addReport(date, day(hours, true));
+            assertTrue(report.isComplete());
+
+            report.addReport(date, day(hours, false));
+            assertFalse(report.isComplete());
+        }
+
+        // A day added under a date the report does not have yet keeps its own
+        // completeness - it used to be summed with an empty, incomplete day.
+        assertTrue(new ProjectUsageReport(project, NHR)
+                .addReport(date, day(1, true)).isComplete());
+
+        // And so through `plus` and `combine`, at both levels.
+        ProjectUsageReport first = new ProjectUsageReport(project, NHR)
+                .addReport(date, day(1, true));
+        ProjectUsageReport second = new ProjectUsageReport(project, NHR)
+                .addReport(date, day(2, true))
+                .addReport(date.minusDays(1), day(3, true));
+
+        ProjectUsageReport combined = ProjectUsageReport.combine(List.of(first, second));
+        assertTrue(combined.isComplete());
+        assertEquals(Usage.fromHours(6), combined.totalUsage());
+
+        UsageReport portal = UsageReport.combine(List.of(
+                new UsageReport(new PortalIdentifier("allocator")).setReport(first),
+                new UsageReport(new PortalIdentifier("allocator")).setReport(second)));
+        assertTrue(portal.getReport(project).isComplete());
+        assertEquals(Usage.fromHours(6), portal.totalUsage());
+    }
+
     @Test
     void a_report_a_site_builds_carries_the_two_fields_a_0_92_peer_requires() {
         DailyProjectUsageReport day = new DailyProjectUsageReport()
@@ -513,7 +858,7 @@ class TypesTest {
                 .addUnattributedUsage(Usage.fromMinutes(30))
                 .setComplete();
 
-        ProjectUsageReport report = new ProjectUsageReport(ProjectIdentifier.parse("proj.site"))
+        ProjectUsageReport report = new ProjectUsageReport(ProjectIdentifier.parse("proj.site"), NHR)
                 .addMapping(UserMapping.parse("alice.proj.site:alice:grp"))
                 .setReport(LocalDate.of(2026, 9, 1), day);
 
@@ -528,7 +873,8 @@ class TypesTest {
                         + "\"unknown\":{\"seconds\":1800}},"
                         + "\"is_complete\":true,"
                         + "\"components\":{\"cpu\":{\"alice\":{\"seconds\":3600}}}}},"
-                        + "\"users\":{\"alice.proj.site\":\"alice\"}}",
+                        + "\"users\":{\"alice.proj.site\":\"alice\"},"
+                        + "\"usage_unit\":{\"name\":\"NHR\",\"counts_per_unit\":3600}}",
                 Json.write(report.toJson()));
 
         // The 0.92.0 wheel writes four more empty fields for the same input -
@@ -578,7 +924,7 @@ class TypesTest {
     void remapping_two_local_users_onto_one_sums_them_rather_than_losing_one() {
         // Consolidating two local accounts must not silently lose either one's
         // usage - and which one it lost would depend on map order.
-        ProjectUsageReport report = new ProjectUsageReport(ProjectIdentifier.parse("proj.site"))
+        ProjectUsageReport report = new ProjectUsageReport(ProjectIdentifier.parse("proj.site"), NHR)
                 .addMapping(UserMapping.parse("alice.proj.site:alice:grp"))
                 .addMapping(UserMapping.parse("bob.proj.site:bob:grp"))
                 .setReport(LocalDate.of(2026, 9, 1), new DailyProjectUsageReport()
@@ -597,7 +943,7 @@ class TypesTest {
     void remapping_a_project_moves_its_users_with_it() {
         // A UserIdentifier names a user *within* a project, so the mapping keys
         // are stale the moment the project is renamed.
-        ProjectUsageReport report = new ProjectUsageReport(ProjectIdentifier.parse("local.site"))
+        ProjectUsageReport report = new ProjectUsageReport(ProjectIdentifier.parse("local.site"), NHR)
                 .addMapping(UserMapping.parse("alice.local.site:alice:grp"));
 
         ProjectUsageReport remapped =

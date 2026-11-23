@@ -11,8 +11,18 @@ use templemeads::Error;
 use crate::grammar::{
     Allocation, Date, DateRange, Node, ProjectIdentifier, UserIdentifier, UserMapping,
 };
+use crate::usageunit::{Amount, UsageUnit};
 use templemeads::named::NamedType;
 use templemeads::portal_identifier::PortalIdentifier;
+
+/// A scaled figure as a whole count: rounded to the nearest (ties to even, so
+/// that converting many figures carries no bias), never truncated - that
+/// always rounded down, which on money is a systematic loss. The cast clamps
+/// a negative or `NaN` result to zero and a too-large one to `u64::MAX`, as it
+/// always has, rather than panicking.
+fn round_count(value: f64) -> u64 {
+    value.round_ties_even() as u64
+}
 
 impl NamedType for Usage {
     fn type_name() -> String {
@@ -58,8 +68,24 @@ impl std::iter::Sum for Usage {
     }
 }
 
+/// A usage is a bare count: what one count means is set by the unit of the
+/// report it is in, so on its own it prints as a number. Use
+/// [`Usage::as_duration`] or [`Usage::in_hours`] for figures that really are
+/// time, and [`Amount`](crate::usageunit::Amount) for a figure in its unit.
 impl std::fmt::Display for Usage {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.seconds)
+    }
+}
+
+/// Display adapter that formats a [`Usage`] as a human duration, choosing
+/// seconds, minutes, hours or days by size. Obtained via
+/// [`Usage::as_duration`].
+pub struct UsageDurationDisplay(Usage);
+
+impl std::fmt::Display for UsageDurationDisplay {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let usage = &self.0;
         // Returns "unit" or "units" depending on whether the value rounds to 1.000 at 3dp.
         fn unit(value: f64, singular: &'static str, plural: &'static str) -> &'static str {
             if (value - 1.0).abs() < 0.0005 {
@@ -68,55 +94,60 @@ impl std::fmt::Display for Usage {
                 plural
             }
         }
-        match self.seconds() >= 60 {
-            true => match self.minutes() >= 60.0 {
-                true => match self.hours() >= 24.0 {
-                    true => match self.days() >= 7.0 {
-                        true => match self.weeks() >= 4.5 {
-                            true => match self.months() >= 12.0 {
+        match usage.seconds() >= 60 {
+            true => match usage.minutes() >= 60.0 {
+                true => match usage.hours() >= 24.0 {
+                    true => match usage.days() >= 7.0 {
+                        true => match usage.weeks() >= 4.5 {
+                            true => match usage.months() >= 12.0 {
                                 true => write!(
                                     f,
                                     "{:.3} {}",
-                                    self.years(),
-                                    unit(self.years(), "year", "years")
+                                    usage.years(),
+                                    unit(usage.years(), "year", "years")
                                 ),
                                 false => write!(
                                     f,
                                     "{:.3} {}",
-                                    self.months(),
-                                    unit(self.months(), "month", "months")
+                                    usage.months(),
+                                    unit(usage.months(), "month", "months")
                                 ),
                             },
                             false => write!(
                                 f,
                                 "{:.3} {}",
-                                self.weeks(),
-                                unit(self.weeks(), "week", "weeks")
+                                usage.weeks(),
+                                unit(usage.weeks(), "week", "weeks")
                             ),
                         },
                         false => {
-                            write!(f, "{:.3} {}", self.days(), unit(self.days(), "day", "days"))
+                            write!(
+                                f,
+                                "{:.3} {}",
+                                usage.days(),
+                                unit(usage.days(), "day", "days")
+                            )
                         }
                     },
                     false => write!(
                         f,
                         "{:.3} {}",
-                        self.hours(),
-                        unit(self.hours(), "hour", "hours")
+                        usage.hours(),
+                        unit(usage.hours(), "hour", "hours")
                     ),
                 },
                 false => write!(
                     f,
                     "{:.3} {}",
-                    self.minutes(),
-                    unit(self.minutes(), "minute", "minutes")
+                    usage.minutes(),
+                    unit(usage.minutes(), "minute", "minutes")
                 ),
             },
             false => write!(
                 f,
                 "{} {}",
-                self.seconds(),
-                if self.seconds() == 1 {
+                usage.seconds(),
+                if usage.seconds() == 1 {
                     "second"
                 } else {
                     "seconds"
@@ -191,6 +222,26 @@ impl Usage {
         Self { seconds }
     }
 
+    /// A usage of `counts` counts. What a count means is set by the
+    /// [`UsageUnit`](crate::usageunit::UsageUnit) of the report it is in - a
+    /// node-second, a micro-pound - which is why it is still written
+    /// `{"seconds": n}` on the wire, for compatibility, whatever it counts.
+    pub fn from_counts(counts: u64) -> Self {
+        Self { seconds: counts }
+    }
+
+    /// The raw count. See [`Usage::from_counts`].
+    pub fn counts(&self) -> u64 {
+        self.seconds
+    }
+
+    /// Formats this value as a duration - `"3.000 days"`, `"5 seconds"` - for
+    /// figures that really are time: queue waits, runtimes and limits. A
+    /// usage in a report is printed through its report's unit instead.
+    pub fn as_duration(&self) -> UsageDurationDisplay {
+        UsageDurationDisplay(*self)
+    }
+
     /// Returns a display adapter that formats this value in hours only,
     /// e.g. `format!("{}", usage.in_hours())` → `"1.500 hours"`.
     pub fn in_hours(&self) -> UsageHoursDisplay {
@@ -205,7 +256,7 @@ impl Usage {
         match minutes < 0.0 {
             true => Self::default(),
             false => Self {
-                seconds: (minutes * 60.0) as u64,
+                seconds: round_count(minutes * 60.0),
             },
         }
     }
@@ -214,7 +265,7 @@ impl Usage {
         match hours < 0.0 {
             true => Self::default(),
             false => Self {
-                seconds: (hours * 3600.0) as u64,
+                seconds: round_count(hours * 3600.0),
             },
         }
     }
@@ -223,7 +274,7 @@ impl Usage {
         match days < 0.0 {
             true => Self::default(),
             false => Self {
-                seconds: (days * 86400.0) as u64,
+                seconds: round_count(days * 86400.0),
             },
         }
     }
@@ -232,7 +283,7 @@ impl Usage {
         match weeks < 0.0 {
             true => Self::default(),
             false => Self {
-                seconds: (weeks * 604800.0) as u64,
+                seconds: round_count(weeks * 604800.0),
             },
         }
     }
@@ -241,7 +292,7 @@ impl Usage {
         match months < 0.0 {
             true => Self::default(),
             false => Self {
-                seconds: (months * 2628000.0) as u64,
+                seconds: round_count(months * 2628000.0),
             },
         }
     }
@@ -250,7 +301,7 @@ impl Usage {
         match years < 0.0 {
             true => Self::default(),
             false => Self {
-                seconds: (years * 31536000.0) as u64,
+                seconds: round_count(years * 31536000.0),
             },
         }
     }
@@ -308,7 +359,7 @@ impl std::ops::SubAssign for Usage {
 // add the *= operator for Usage
 impl std::ops::MulAssign<f64> for Usage {
     fn mul_assign(&mut self, rhs: f64) {
-        self.seconds = (self.seconds as f64 * rhs) as u64;
+        self.seconds = round_count(self.seconds as f64 * rhs);
     }
 }
 
@@ -320,7 +371,7 @@ impl std::ops::DivAssign<f64> for Usage {
             return;
         }
 
-        self.seconds = (self.seconds as f64 / rhs) as u64;
+        self.seconds = round_count(self.seconds as f64 / rhs);
     }
 }
 
@@ -355,7 +406,7 @@ impl std::ops::Mul<f64> for Usage {
 
     fn mul(self, rhs: f64) -> Self {
         Self {
-            seconds: (self.seconds as f64 * rhs) as u64,
+            seconds: round_count(self.seconds as f64 * rhs),
         }
     }
 }
@@ -370,7 +421,7 @@ impl std::ops::Div<f64> for Usage {
         }
 
         Self {
-            seconds: (self.seconds as f64 / rhs) as u64,
+            seconds: round_count(self.seconds as f64 / rhs),
         }
     }
 }
@@ -385,7 +436,8 @@ pub struct UserUsageReport {
 
 impl std::fmt::Display for UserUsageReport {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}: {}", self.user, self.usage)
+        // A user's report carries no unit; usage before units was time.
+        write!(f, "{}: {}", self.user, self.usage.as_duration())
     }
 }
 
@@ -748,13 +800,13 @@ impl std::fmt::Display for DailyProjectUsageReport {
                     f,
                     "{}: {} | {} {} | Average wait: {}",
                     user,
-                    report,
+                    report.as_duration(),
                     jobs,
                     if jobs == 1 { "job" } else { "jobs" },
-                    Usage::new(self.average_wait_seconds_for_user(user))
+                    Usage::new(self.average_wait_seconds_for_user(user)).as_duration()
                 )?;
             } else {
-                writeln!(f, "{}: {}", user, report)?;
+                writeln!(f, "{}: {}", user, report.as_duration())?;
             }
         }
 
@@ -766,7 +818,7 @@ impl std::fmt::Display for DailyProjectUsageReport {
                         f,
                         "Number of jobs: {} | Average wait: {}",
                         n,
-                        Usage::new(self.total_wait_seconds() / n)
+                        Usage::new(self.total_wait_seconds() / n).as_duration()
                     )?;
                 } else {
                     writeln!(f, "Number of jobs: {}", n)?;
@@ -806,14 +858,18 @@ impl std::fmt::Display for DailyProjectUsageReport {
                 } else {
                     "events"
                 },
-                self.total_requeue_usage(),
-                Usage::new(self.average_requeue_wait_seconds())
+                self.total_requeue_usage().as_duration(),
+                Usage::new(self.average_requeue_wait_seconds()).as_duration()
             )?;
         }
 
         match self.is_complete() {
-            true => writeln!(f, "Total: {}", self.total_usage()),
-            false => writeln!(f, "Total: {} - incomplete", self.total_usage()),
+            true => writeln!(f, "Total: {}", self.total_usage().as_duration()),
+            false => writeln!(
+                f,
+                "Total: {} - incomplete",
+                self.total_usage().as_duration()
+            ),
         }
     }
 }
@@ -2423,7 +2479,12 @@ impl std::ops::Add<DailyProjectUsageReport> for DailyProjectUsageReport {
             new_report.add_reservation_jobs(reservation, *count);
         }
 
-        new_report.is_complete = false; // combine reports are never complete
+        // Complete exactly when both parts are: a total over figures that
+        // will not change will not change either, and a total that includes
+        // an open part is itself provisional. Forcing `false` here meant a
+        // site summing two settled parts of a day could never report it
+        // settled, so the awarding portal kept asking for it.
+        new_report.is_complete = self.is_complete && other.is_complete;
 
         new_report
     }
@@ -2553,7 +2614,8 @@ impl std::ops::AddAssign<DailyProjectUsageReport> for DailyProjectUsageReport {
             self.add_reservation_jobs(reservation, *count);
         }
 
-        self.is_complete = false; // combine reports are never complete
+        // See `Add` above: complete exactly when both parts are.
+        self.is_complete = self.is_complete && other.is_complete;
     }
 }
 
@@ -2605,6 +2667,19 @@ impl std::ops::DivAssign<f64> for DailyProjectUsageReport {
 pub struct ProjectUsageReport {
     #[ts(as = "String")]
     project: ProjectIdentifier,
+    /// What one count of this report's usage means - every figure that
+    /// counts as consumption (`reports`, and the requeue, charged-requeue and
+    /// reservation figures) is in it. Absent only on a report from before
+    /// units, whose figures were 3600 counts per hour of the award's unit; it
+    /// can be declared on such a report with `set_unit` / `set_time_unit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    usage_unit: Option<UsageUnit>,
+    /// The unit of each component that is not in `usage_unit`. A component
+    /// not listed inherits `usage_unit`. Components are information; billing
+    /// and limits use `usage_unit` alone.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    component_units: HashMap<String, UsageUnit>,
     #[ts(as = "HashMap<String, DailyProjectUsageReport>")]
     reports: HashMap<Date, DailyProjectUsageReport>,
     /// See the note on `DailyProjectUsageReport::reports` - written even when
@@ -2617,6 +2692,15 @@ pub struct ProjectUsageReport {
 impl std::fmt::Display for ProjectUsageReport {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         writeln!(f, "{}", self.project())?;
+
+        // Consumption in the report's unit; a report from before units is
+        // time, as every such report was, and prints as a duration.
+        let amount = |usage: Usage| -> String {
+            match &self.usage_unit {
+                Some(unit) => Amount::new(usage, unit).to_string(),
+                None => usage.as_duration().to_string(),
+            }
+        };
 
         let mut dates = self.reports.keys().collect::<Vec<_>>();
 
@@ -2641,7 +2725,7 @@ impl std::fmt::Display for ProjectUsageReport {
 
             for user in report.local_users() {
                 let jobs = report.num_jobs_for_user(&user);
-                let usage_str = report.usage(&user).to_string();
+                let usage_str = amount(report.usage(&user));
                 let label = match users.get(&user) {
                     Some(userid) => format!("  {}", userid),
                     None => format!("  {} - unknown", user),
@@ -2654,7 +2738,7 @@ impl std::fmt::Display for ProjectUsageReport {
                         usage_str,
                         jobs,
                         if jobs == 1 { "job" } else { "jobs" },
-                        Usage::new(report.average_wait_seconds_for_user(&user))
+                        Usage::new(report.average_wait_seconds_for_user(&user)).as_duration()
                     )?;
                 } else {
                     writeln!(f, "{}: {}", label, usage_str)?;
@@ -2669,7 +2753,7 @@ impl std::fmt::Display for ProjectUsageReport {
                             f,
                             "Number of jobs: {} | Average wait: {}",
                             n,
-                            Usage::new(report.total_wait_seconds() / n)
+                            Usage::new(report.total_wait_seconds() / n).as_duration()
                         )?;
                     } else {
                         writeln!(f, "Number of jobs: {}", n)?;
@@ -2708,8 +2792,8 @@ impl std::fmt::Display for ProjectUsageReport {
                     } else {
                         "events"
                     },
-                    report.total_requeue_usage(),
-                    Usage::new(report.average_requeue_wait_seconds())
+                    amount(report.total_requeue_usage()),
+                    Usage::new(report.average_requeue_wait_seconds()).as_duration()
                 )?;
             }
             if report.has_reservations() {
@@ -2718,13 +2802,13 @@ impl std::fmt::Display for ProjectUsageReport {
                         f,
                         "Reservation {}: {} | {} {}",
                         reservation,
-                        usage,
+                        amount(usage),
                         jobs,
                         if jobs == 1 { "job" } else { "jobs" }
                     )?;
                 }
             }
-            writeln!(f, "Daily total: {}", report.total_usage())?;
+            writeln!(f, "Daily total: {}", amount(report.total_usage()))?;
             writeln!(f, "----------------------------------------")?;
         }
 
@@ -2737,7 +2821,7 @@ impl std::fmt::Display for ProjectUsageReport {
                         f,
                         "Number of jobs: {} | Average wait: {}",
                         n,
-                        Usage::new(self.total_wait_seconds() / n)
+                        Usage::new(self.total_wait_seconds() / n).as_duration()
                     )?;
                 } else {
                     writeln!(f, "Number of jobs: {}", n)?;
@@ -2776,20 +2860,20 @@ impl std::fmt::Display for ProjectUsageReport {
                 } else {
                     "events"
                 },
-                self.total_requeue_usage(),
-                Usage::new(self.average_requeue_wait_seconds())
+                amount(self.total_requeue_usage()),
+                Usage::new(self.average_requeue_wait_seconds()).as_duration()
             )?;
         }
         if self.has_reservations() {
             writeln!(
                 f,
                 "In reservations: {} across {}",
-                self.total_reservation_usage(),
+                amount(self.total_reservation_usage()),
                 self.reservations().join(", ")
             )?;
         }
 
-        writeln!(f, "Total: {}", self.total_usage())
+        writeln!(f, "Total: {}", amount(self.total_usage()))
     }
 }
 
@@ -2802,6 +2886,15 @@ impl std::fmt::Display for ProjectUsageReportHoursDisplay<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let report = self.0;
         writeln!(f, "{}", report.project())?;
+
+        // Hours make sense only for a report from before units, which was
+        // time; a report with a unit is printed in it, to three places.
+        let amount = |usage: Usage| -> String {
+            match &report.usage_unit {
+                Some(unit) => format!("{:.3}", Amount::new(usage, unit)),
+                None => usage.in_hours().to_string(),
+            }
+        };
 
         let mut dates = report.reports.keys().collect::<Vec<_>>();
         dates.sort();
@@ -2823,7 +2916,7 @@ impl std::fmt::Display for ProjectUsageReportHoursDisplay<'_> {
 
             for user in daily.local_users() {
                 let jobs = daily.num_jobs_for_user(&user);
-                let usage_str = daily.usage(&user).in_hours().to_string();
+                let usage_str = amount(daily.usage(&user));
                 let label = match users.get(&user) {
                     Some(userid) => format!("  {}", userid),
                     None => format!("  {} - unknown", user),
@@ -2890,7 +2983,7 @@ impl std::fmt::Display for ProjectUsageReportHoursDisplay<'_> {
                     } else {
                         "events"
                     },
-                    daily.total_requeue_usage().in_hours(),
+                    amount(daily.total_requeue_usage()),
                     Usage::new(daily.average_requeue_wait_seconds()).in_hours()
                 )?;
             }
@@ -2900,13 +2993,13 @@ impl std::fmt::Display for ProjectUsageReportHoursDisplay<'_> {
                         f,
                         "Reservation {}: {} | {} {}",
                         reservation,
-                        usage.in_hours(),
+                        amount(usage),
                         jobs,
                         if jobs == 1 { "job" } else { "jobs" }
                     )?;
                 }
             }
-            writeln!(f, "Daily total: {}", daily.total_usage().in_hours())?;
+            writeln!(f, "Daily total: {}", amount(daily.total_usage()))?;
             writeln!(f, "----------------------------------------")?;
         }
 
@@ -2958,7 +3051,7 @@ impl std::fmt::Display for ProjectUsageReportHoursDisplay<'_> {
                 } else {
                     "events"
                 },
-                report.total_requeue_usage().in_hours(),
+                amount(report.total_requeue_usage()),
                 Usage::new(report.average_requeue_wait_seconds()).in_hours()
             )?;
         }
@@ -2966,69 +3059,32 @@ impl std::fmt::Display for ProjectUsageReportHoursDisplay<'_> {
             writeln!(
                 f,
                 "In reservations: {} across {}",
-                report.total_reservation_usage().in_hours(),
+                amount(report.total_reservation_usage()),
                 report.reservations().join(", ")
             )?;
         }
 
-        writeln!(f, "Total: {}", report.total_usage().in_hours())
+        writeln!(f, "Total: {}", amount(report.total_usage()))
     }
 }
 
 impl std::ops::Add<ProjectUsageReport> for ProjectUsageReport {
     type Output = Self;
 
+    /// See [`ProjectUsageReport::try_add`]: reports that cannot be summed -
+    /// different projects or different units - leave `self` unchanged, with a
+    /// warning. Use `try_add` or `combine` to be told.
     fn add(self, other: Self) -> Self {
-        if self.project != other.project {
-            tracing::warn!(
-                "Cannot add reports for different projects: {} and {}",
-                self.project,
-                other.project
-            );
-            return self;
-        }
-
         let mut new_report = self.clone();
-
-        for (date, report) in other.reports {
-            match new_report.reports.get_mut(&date) {
-                Some(existing_report) => *existing_report += report,
-                None => {
-                    new_report.reports.insert(date, report);
-                }
-            }
-        }
-
-        for (user, local_user) in other.users {
-            new_report.users.entry(user).or_insert(local_user);
-        }
-
+        new_report += other;
         new_report
     }
 }
 
 impl std::ops::AddAssign<ProjectUsageReport> for ProjectUsageReport {
     fn add_assign(&mut self, other: Self) {
-        if self.project != other.project {
-            tracing::warn!(
-                "Cannot add reports for different projects: {} and {}",
-                self.project,
-                other.project
-            );
-            return;
-        }
-
-        for (date, report) in other.reports {
-            match self.reports.get_mut(&date) {
-                Some(existing_report) => *existing_report += report,
-                None => {
-                    self.reports.insert(date, report);
-                }
-            }
-        }
-
-        for (user, local_user) in other.users {
-            self.users.entry(user).or_insert(local_user);
+        if let Err(e) = self.try_add(other) {
+            tracing::warn!("{}", e);
         }
     }
 }
@@ -3095,36 +3151,321 @@ impl ProjectUsageReport {
     /// two must stay in the same units. The requeue *component* breakdowns are
     /// left alone for the same reason the base ones are.
     pub fn scale_total(&mut self, factor: f64) {
+        // Each day's `scale_totals` is the one list of which figures are
+        // consumption. This used to keep a second copy of that list here, and
+        // it had missed the charged-requeue figures, which describe a subset
+        // of `reports` and so must scale with it.
         for report in self.reports.values_mut() {
-            for usage in report.reports.values_mut() {
-                *usage *= factor;
-            }
-            // unattributed usage is also in the reports map under a special key
-            for usage in report.requeue_reports.values_mut() {
-                *usage *= factor;
-            }
-            for usage in report.requeue_state_usage.values_mut() {
-                *usage *= factor;
-            }
-            for reports in report.reservation_reports.values_mut() {
-                for usage in reports.values_mut() {
-                    *usage *= factor;
-                }
-            }
-            for reports in report.reservation_requeue_usage.values_mut() {
-                for usage in reports.values_mut() {
-                    *usage *= factor;
-                }
-            }
+            report.scale_totals(factor);
         }
     }
 
+    // ---- units -----------------------------------------------------------
+
+    /// The unit this report's usage is in. `None` only for a report from
+    /// before units: its figures were 3600 counts per hour of the award's
+    /// unit, and it can be declared with [`ProjectUsageReport::set_unit`] or
+    /// [`ProjectUsageReport::set_time_unit`].
+    pub fn unit(&self) -> Option<&UsageUnit> {
+        self.usage_unit.as_ref()
+    }
+
+    /// Fails unless this report has a unit. Figures can be added only to a
+    /// report that says what they are in: a report read from before units
+    /// can still be read, totalled and passed on, but must have its unit
+    /// declared before anything is added to it.
+    pub fn require_unit(&self) -> Result<&UsageUnit, Error> {
+        self.usage_unit.as_ref().ok_or_else(|| {
+            Error::InvalidState(format!(
+                "The usage report for {} has no unit. Set one with set_unit (or \
+                 set_time_unit for a report from before units, which were all time) \
+                 before adding figures to it",
+                self.project
+            ))
+        })
+    }
+
+    ///
+    /// Declare the unit of this report. Allowed only while it has none, so a
+    /// unit is set once: to change it, use [`ProjectUsageReport::convert`],
+    /// which rescales the figures.
+    ///
+    /// On a report that already holds figures - one from before units - this
+    /// declares what those figures already mean, and changes none of them.
+    ///
+    pub fn set_unit(&mut self, unit: &UsageUnit) -> Result<(), Error> {
+        if let Some(existing) = &self.usage_unit {
+            return Err(Error::InvalidState(format!(
+                "The usage report for {} is already in {}. Use convert to change it",
+                self.project,
+                existing.name()
+            )));
+        }
+
+        self.usage_unit = Some(unit.clone());
+        self.normalise_component_units();
+        Ok(())
+    }
+
+    ///
+    /// Declare that this report is in the time unit `name`, at 3600 counts
+    /// per hour - which is what every report from before units was, in the
+    /// unit of its award's allocation. So a migration of cached reports sets
+    /// each one to its award's `allocation.units()`.
+    ///
+    /// Refuses a currency or any unit that is not time, and, like
+    /// [`ProjectUsageReport::set_unit`], a report that already has a unit.
+    ///
+    pub fn set_time_unit(&mut self, name: &str) -> Result<(), Error> {
+        let unit = UsageUnit::parse(name)?;
+
+        if !unit.is_time() {
+            return Err(Error::InvalidState(format!(
+                "'{}' is not a time unit. Use set_unit for a currency or a unit of \
+                 your own",
+                name
+            )));
+        }
+
+        self.set_unit(&unit)
+    }
+
+    /// The unit `component`'s figures are in: its own if it has one, else the
+    /// report's.
+    pub fn component_unit(&self, component: &str) -> Option<UsageUnit> {
+        self.component_units
+            .get(component)
+            .or(self.usage_unit.as_ref())
+            .cloned()
+    }
+
+    /// The components with a unit of their own, and those units.
+    pub fn component_units(&self) -> HashMap<String, UsageUnit> {
+        self.component_units.clone()
+    }
+
+    ///
+    /// Give `component` a unit of its own - GPU hours beside a report in GBP,
+    /// say. A component without one inherits the report's unit.
+    ///
+    /// Refused if the component already has figures in a different unit:
+    /// that would relabel them. Declaring the unit of a component on a report
+    /// from before units is allowed, as [`ProjectUsageReport::set_unit`] is.
+    ///
+    pub fn set_component_unit(&mut self, component: &str, unit: &UsageUnit) -> Result<(), Error> {
+        if let Some(current) = self.component_unit(component) {
+            if &current != unit && self.components().iter().any(|c| c == component) {
+                return Err(Error::InvalidState(format!(
+                    "Component '{}' of the usage report for {} already has figures in {}",
+                    component,
+                    self.project,
+                    current.name()
+                )));
+            }
+        }
+
+        self.component_units
+            .insert(component.to_string(), unit.clone());
+        self.normalise_component_units();
+        Ok(())
+    }
+
+    /// A component whose unit is the report's needs no entry of its own.
+    fn normalise_component_units(&mut self) {
+        if let Some(unit) = &self.usage_unit {
+            self.component_units.retain(|_, u| u != unit);
+        }
+    }
+
+    /// The total usage in the report's unit, or `None` for a report from
+    /// before units.
+    pub fn total(&self) -> Option<Amount> {
+        self.usage_unit
+            .as_ref()
+            .map(|unit| Amount::new(self.total_usage(), unit))
+    }
+
+    /// The total of one component, in that component's unit.
+    pub fn component_total(&self, component: &str) -> Option<Amount> {
+        let unit = self.component_unit(component)?;
+        let total: Usage = self
+            .reports
+            .values()
+            .map(|r| r.get_component(component).total_usage())
+            .sum();
+
+        Some(Amount::new(total, &unit))
+    }
+
+    ///
+    /// Re-express this report in `to`: every consumption figure (the ones
+    /// [`ProjectUsageReport::scale_total`] scales) is multiplied by `factor` -
+    /// how many of `to` one of the current unit is worth - and moved to the
+    /// new resolution, rounding once.
+    ///
+    /// Components keep their meaning. One that was inheriting the old unit is
+    /// given the old unit explicitly first, so that converting a report from
+    /// GBP to GPUHR does not silently relabel its GBP components.
+    ///
+    pub fn convert(&mut self, to: &UsageUnit, factor: f64) -> Result<(), Error> {
+        let from = self.require_unit()?.clone();
+
+        if !factor.is_finite() || factor < 0.0 {
+            return Err(Error::InvalidState(format!(
+                "Cannot convert the usage report for {} by a factor of {}",
+                self.project, factor
+            )));
+        }
+
+        for component in self.components() {
+            self.component_units
+                .entry(component)
+                .or_insert_with(|| from.clone());
+        }
+
+        let scale = factor * to.counts_per_unit() as f64 / from.counts_per_unit() as f64;
+
+        for report in self.reports.values_mut() {
+            report.scale_totals(scale);
+        }
+
+        self.usage_unit = Some(to.clone());
+        self.normalise_component_units();
+        Ok(())
+    }
+
+    /// Every component named by this report, in its figures or its units.
+    fn named_components(&self) -> std::collections::HashSet<String> {
+        let mut names: std::collections::HashSet<String> = self.components().into_iter().collect();
+        names.extend(self.component_units.keys().cloned());
+        names
+    }
+
+    ///
+    /// The units of the sum of this report and `other`, or why they cannot be
+    /// summed:
+    ///
+    /// * the reports' units must be the same - or both absent, so that two
+    ///   reports from before units still combine while agents are upgraded;
+    /// * a report with no figures takes the other's unit, which is what lets
+    ///   `combine` start from an empty report;
+    /// * a component named by both must be in the same unit in each.
+    ///
+    fn merged_units(
+        &self,
+        other: &ProjectUsageReport,
+    ) -> Result<(Option<UsageUnit>, HashMap<String, UsageUnit>), Error> {
+        let unit = match (&self.usage_unit, &other.usage_unit) {
+            (a, b) if a == b => a.clone(),
+            (a, b) if other.reports.is_empty() && other.component_units.is_empty() => {
+                a.clone().or_else(|| b.clone())
+            }
+            (a, b) if self.reports.is_empty() && self.component_units.is_empty() => {
+                b.clone().or_else(|| a.clone())
+            }
+            (a, b) => {
+                let name = |u: &Option<UsageUnit>| {
+                    u.as_ref()
+                        .map(|u| u.to_string())
+                        .unwrap_or_else(|| "no unit".to_string())
+                };
+
+                return Err(Error::Incompatible(format!(
+                    "Cannot combine usage reports for {} in different units: {} and {}",
+                    self.project,
+                    name(a),
+                    name(b)
+                )));
+            }
+        };
+
+        let ours = self.named_components();
+        let theirs = other.named_components();
+        let mut components = HashMap::new();
+
+        for component in ours.union(&theirs) {
+            let mine = self.component_unit(component);
+            let yours = other.component_unit(component);
+
+            let effective = match (ours.contains(component), theirs.contains(component)) {
+                (true, true) if mine != yours => {
+                    return Err(Error::Incompatible(format!(
+                        "Cannot combine usage reports for {}: component '{}' is in {} in \
+                         one and {} in the other",
+                        self.project,
+                        component,
+                        mine.map(|u| u.to_string())
+                            .unwrap_or_else(|| "no unit".into()),
+                        yours
+                            .map(|u| u.to_string())
+                            .unwrap_or_else(|| "no unit".into())
+                    )));
+                }
+                (true, _) => mine,
+                (false, _) => yours,
+            };
+
+            if let Some(effective) = effective {
+                if Some(&effective) != unit.as_ref() {
+                    components.insert(component.clone(), effective);
+                }
+            }
+        }
+
+        Ok((unit, components))
+    }
+
+    ///
+    /// Add `other` into this report, or say why the two cannot be summed -
+    /// different projects, or different units (see `merged_units`). Nothing
+    /// is changed on an error.
+    ///
+    pub fn try_add(&mut self, other: ProjectUsageReport) -> Result<(), Error> {
+        if self.project != other.project {
+            return Err(Error::Incompatible(format!(
+                "Cannot add reports for different projects: {} and {}",
+                self.project, other.project
+            )));
+        }
+
+        let (unit, components) = self.merged_units(&other)?;
+
+        for (date, report) in other.reports {
+            match self.reports.get_mut(&date) {
+                Some(existing_report) => *existing_report += report,
+                None => {
+                    self.reports.insert(date, report);
+                }
+            }
+        }
+
+        for (user, local_user) in other.users {
+            self.users.entry(user).or_insert(local_user);
+        }
+
+        self.usage_unit = unit;
+        self.component_units = components;
+        Ok(())
+    }
+
+    /// A report with no unit yet. It cannot hold figures until it has one -
+    /// see [`ProjectUsageReport::new_in`], which is what new code should use,
+    /// and [`ProjectUsageReport::set_unit`].
     pub fn new(project: &ProjectIdentifier) -> Self {
         Self {
             project: project.clone(),
+            usage_unit: None,
+            component_units: HashMap::new(),
             reports: HashMap::new(),
             users: HashMap::new(),
         }
+    }
+
+    /// A report whose usage is in `unit`.
+    pub fn new_in(project: &ProjectIdentifier, unit: &UsageUnit) -> Self {
+        let mut report = Self::new(project);
+        report.usage_unit = Some(unit.clone());
+        report
     }
 
     pub fn to_json(&self) -> Result<String, Error> {
@@ -3159,6 +3500,8 @@ impl ProjectUsageReport {
 
         Self {
             project: self.project.clone(),
+            usage_unit: self.usage_unit.clone(),
+            component_units: self.component_units.clone(),
             reports,
             users: self.users.clone(),
         }
@@ -4473,11 +4816,28 @@ impl ProjectUsageReport {
         Ok(())
     }
 
-    pub fn set_report(&mut self, date: &Date, report: &DailyProjectUsageReport) {
+    /// Replace one day's figures. Refused until the report has a unit - see
+    /// [`ProjectUsageReport::require_unit`].
+    pub fn set_report(
+        &mut self,
+        date: &Date,
+        report: &DailyProjectUsageReport,
+    ) -> Result<(), Error> {
+        self.require_unit()?;
         self.reports.insert(date.clone(), report.clone());
+        Ok(())
     }
 
-    pub fn add_report(&mut self, date: &Date, report: &DailyProjectUsageReport) {
+    /// Add to one day's figures, summing with whatever is already there.
+    /// Refused until the report has a unit - see
+    /// [`ProjectUsageReport::require_unit`].
+    pub fn add_report(
+        &mut self,
+        date: &Date,
+        report: &DailyProjectUsageReport,
+    ) -> Result<(), Error> {
+        self.require_unit()?;
+
         match self.reports.get_mut(date) {
             Some(existing_report) => {
                 *existing_report += report.clone();
@@ -4486,6 +4846,8 @@ impl ProjectUsageReport {
                 self.reports.insert(date.clone(), report.clone());
             }
         }
+
+        Ok(())
     }
 
     pub fn get_report(&self, date: &Date) -> ProjectUsageReport {
@@ -4496,12 +4858,16 @@ impl ProjectUsageReport {
 
                 ProjectUsageReport {
                     project: self.project.clone(),
+                    usage_unit: self.usage_unit.clone(),
+                    component_units: self.component_units.clone(),
                     reports,
                     users: self.users.clone(),
                 }
             }
             None => ProjectUsageReport {
                 project: self.project.clone(),
+                usage_unit: self.usage_unit.clone(),
+                component_units: self.component_units.clone(),
                 reports: HashMap::new(),
                 users: self.users.clone(),
             },
@@ -4520,8 +4886,12 @@ impl ProjectUsageReport {
             reports.insert(date.clone(), component_report);
         }
 
+        // A component's figures are in the component's own unit, so that is
+        // the unit of a report made of them.
         ProjectUsageReport {
             project: self.project.clone(),
+            usage_unit: self.component_unit(component),
+            component_units: HashMap::new(),
             reports,
             users: self.users.clone(),
         }
@@ -4543,7 +4913,7 @@ impl ProjectUsageReport {
                 )));
             }
 
-            combined += report.clone();
+            combined.try_add(report.clone())?;
         }
 
         Ok(combined)
@@ -4746,7 +5116,15 @@ impl std::fmt::Display for UsageReport {
             writeln!(f, "----------------------------------------")?;
         }
 
-        writeln!(f, "Total: {}", self.total_usage())
+        // A portal-wide total means something only when every project is in
+        // one unit - or none is, a report from before units, which was time.
+        match self.total() {
+            Some(total) => writeln!(f, "Total: {}", total),
+            None if self.reports.values().all(|r| r.unit().is_none()) => {
+                writeln!(f, "Total: {}", self.total_usage().as_duration())
+            }
+            None => writeln!(f, "Total: not shown - the projects are in different units"),
+        }
     }
 }
 
@@ -4770,26 +5148,43 @@ impl std::ops::Add<UsageReport> for UsageReport {
 }
 
 impl std::ops::AddAssign<UsageReport> for UsageReport {
+    /// See [`UsageReport::try_add`]: a clash leaves `self` unchanged, with a
+    /// warning.
     fn add_assign(&mut self, other: Self) {
+        if let Err(e) = self.try_add(other) {
+            tracing::warn!("{}", e);
+        }
+    }
+}
+
+impl UsageReport {
+    ///
+    /// Add `other` into this report, project by project, or say why it cannot
+    /// be - a different portal, or a project whose two reports are in
+    /// different units. Nothing is changed on an error.
+    ///
+    pub fn try_add(&mut self, other: UsageReport) -> Result<(), Error> {
         if self.portal != other.portal {
-            tracing::warn!(
+            return Err(Error::Incompatible(format!(
                 "Cannot add reports for different portals: {} and {}",
-                self.portal,
-                other.portal
-            );
-            return;
+                self.portal, other.portal
+            )));
         }
 
-        for report in other.reports {
-            match self.reports.get_mut(&report.0) {
-                Some(existing_report) => {
-                    *existing_report += report.1;
-                }
+        // Every clash is found before anything is changed.
+        let mut merged = self.reports.clone();
+
+        for (project, report) in other.reports {
+            match merged.get_mut(&project) {
+                Some(existing_report) => existing_report.try_add(report)?,
                 None => {
-                    self.reports.insert(report.0, report.1);
+                    merged.insert(project, report);
                 }
             }
         }
+
+        self.reports = merged;
+        Ok(())
     }
 }
 
@@ -4894,11 +5289,7 @@ impl UsageReport {
         self.reports
             .get(project)
             .cloned()
-            .unwrap_or(ProjectUsageReport {
-                project: project.clone(),
-                reports: HashMap::new(),
-                users: HashMap::new(),
-            })
+            .unwrap_or_else(|| ProjectUsageReport::new(project))
     }
 
     /// Return a copy of this report with every contained `ProjectUsageReport`
@@ -4946,6 +5337,25 @@ impl UsageReport {
 
     pub fn total_usage(&self) -> Usage {
         self.reports.values().map(|r| r.total_usage()).sum()
+    }
+
+    /// The unit every project's report is in, if they share one. Two awards
+    /// may be in different units, so a portal-wide total is meaningful only
+    /// when this is `Some`.
+    pub fn common_unit(&self) -> Option<UsageUnit> {
+        let mut units = self.reports.values().map(|r| r.unit());
+        let first = units.next()??;
+
+        match units.all(|u| u == Some(first)) {
+            true => Some(first.clone()),
+            false => None,
+        }
+    }
+
+    /// The total across every project, if they share a unit.
+    pub fn total(&self) -> Option<Amount> {
+        self.common_unit()
+            .map(|unit| Amount::new(self.total_usage(), &unit))
     }
 
     /// Usage consumed on attempts superseded by a requeue - see
@@ -5169,7 +5579,7 @@ impl UsageReport {
                 )));
             }
 
-            combined += report.clone();
+            combined.try_add(report.clone())?;
         }
 
         Ok(combined)
@@ -5279,6 +5689,367 @@ impl Allocation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The unit every report from before units was in: node-seconds.
+    fn test_nhr() -> UsageUnit {
+        UsageUnit::new("NHR", 3600).unwrap_or_else(|e| unreachable!("{e}"))
+    }
+
+    fn unit(name: &str) -> UsageUnit {
+        UsageUnit::parse(name).unwrap_or_else(|e| unreachable!("{e}"))
+    }
+
+    fn project(name: &str) -> ProjectIdentifier {
+        ProjectIdentifier::parse(name).unwrap_or_else(|e| unreachable!("{e}"))
+    }
+
+    fn date(text: &str) -> Date {
+        Date::parse(text).unwrap_or_else(|e| unreachable!("{e}"))
+    }
+
+    /// A day of a cloud project: billed in GBP, with GPU hours for
+    /// information and an egress charge that inherits GBP.
+    fn cloud_day() -> DailyProjectUsageReport {
+        let gbp = unit("GBP");
+        let mut day = DailyProjectUsageReport::default();
+        day.add_usage("alice", gbp.usage_from_decimal("3.20").unwrap());
+        day.add_component_usage("gpu", "alice", unit("GPUHR").usage(1.5).unwrap());
+        day.add_component_usage("egress", "alice", gbp.usage_from_decimal("0.15").unwrap());
+        day
+    }
+
+    fn cloud_report() -> ProjectUsageReport {
+        let mut report = ProjectUsageReport::new_in(&project("myaward1.allocator"), &unit("GBP"));
+        report.set_component_unit("gpu", &unit("GPUHR")).unwrap();
+        report
+            .add_report(&date("2027-03-31"), &cloud_day())
+            .unwrap();
+        report
+    }
+
+    #[test]
+    fn test_a_usage_is_a_count_and_prints_as_one() {
+        let usage = Usage::from_counts(5400);
+        assert_eq!(usage.counts(), 5400);
+        assert_eq!(usage.seconds(), 5400);
+        assert_eq!(usage.to_string(), "5400");
+        assert_eq!(usage.as_duration().to_string(), "1.500 hours");
+        assert_eq!(usage.in_hours().to_string(), "1.500 hours");
+        assert_eq!(
+            serde_json::to_string(&usage).unwrap(),
+            r#"{"seconds":5400}"#
+        );
+    }
+
+    /// Scaling rounds to the nearest count, ties to even. It used to
+    /// truncate, which always rounded down.
+    #[test]
+    fn test_scaling_a_usage_rounds_rather_than_truncates() {
+        assert_eq!((Usage::from_counts(10) * 0.25).counts(), 2); // 2.5 -> 2
+        assert_eq!((Usage::from_counts(14) * 0.25).counts(), 4); // 3.5 -> 4
+        assert_eq!((Usage::from_counts(3) * (2.0 / 3.0)).counts(), 2); // 1.9999.. -> 2
+        assert_eq!((Usage::from_counts(10) / 3.0).counts(), 3);
+        assert_eq!((Usage::from_counts(10) * -1.0).counts(), 0);
+        assert_eq!(Usage::from_hours(1.0 / 3600.0 * 0.6).counts(), 1);
+        assert_eq!(Usage::from_minutes(0.999).counts(), 60);
+    }
+
+    /// A report says what its counts are, and a component can say otherwise.
+    #[test]
+    fn test_a_report_carries_its_unit_and_its_components_units() {
+        let report = cloud_report();
+
+        assert_eq!(report.unit(), Some(&unit("GBP")));
+        assert_eq!(report.component_unit("gpu"), Some(unit("GPUHR")));
+        assert_eq!(report.component_unit("egress"), Some(unit("GBP")));
+
+        assert_eq!(format!("{:.2}", report.total().unwrap()), "3.20 GBP");
+        assert_eq!(
+            report.component_total("gpu").unwrap().to_string(),
+            "1.500 GPUHR"
+        );
+        assert_eq!(
+            format!("{:.2}", report.component_total("egress").unwrap()),
+            "0.15 GBP"
+        );
+
+        // On the wire: the unit at the top, and only the override listed.
+        let json: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+        assert_eq!(
+            json.get("usage_unit"),
+            Some(&serde_json::json!({"name": "GBP", "counts_per_unit": 1000000}))
+        );
+        assert_eq!(
+            json.get("component_units"),
+            Some(&serde_json::json!({"gpu": {"name": "GPUHR", "counts_per_unit": 3600}}))
+        );
+
+        let back: ProjectUsageReport = serde_json::from_value(json).unwrap();
+        assert_eq!(back.unit(), report.unit());
+        assert_eq!(back.component_units(), report.component_units());
+        assert_eq!(back.total_usage(), report.total_usage());
+
+        // A component's report is in the component's unit.
+        assert_eq!(report.get_component("gpu").unit(), Some(&unit("GPUHR")));
+
+        // And printing uses the unit, not a duration.
+        let printed = report.to_string();
+        assert!(printed.contains("Total: 3.200000 GBP"), "{printed}");
+        assert!(!printed.contains("days"), "{printed}");
+    }
+
+    /// A report from before units still reads, totals and prints as it did,
+    /// but nothing can be added to it until its unit is declared.
+    #[test]
+    fn test_a_report_from_before_units_must_be_declared_before_it_grows() {
+        let legacy_json = r#"{
+            "project": "myaward1.allocator",
+            "reports": {"2027-03-30": {"reports": {"alice": {"seconds": 7200}}, "is_complete": true}},
+            "users": {}
+        }"#;
+
+        let mut legacy: ProjectUsageReport = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(legacy.unit(), None);
+        assert_eq!(legacy.total_usage(), Usage::from_counts(7200));
+        assert!(legacy.total().is_none());
+        assert!(legacy.to_string().contains("Total: 2.000 hours"));
+        assert!(!legacy.to_json().unwrap().contains("usage_unit"));
+
+        let day = {
+            let mut day = DailyProjectUsageReport::default();
+            day.add_usage("alice", Usage::from_hours(1.0));
+            day
+        };
+        assert!(legacy.add_report(&date("2027-03-31"), &day).is_err());
+        assert!(legacy.set_report(&date("2027-03-31"), &day).is_err());
+        assert!(legacy.convert(&unit("GBP"), 1.0).is_err());
+
+        // set_time_unit refuses anything that is not time.
+        assert!(legacy.set_time_unit("GBP").is_err());
+        assert!(legacy.set_time_unit("CREDITS").is_err());
+        assert_eq!(legacy.unit(), None);
+
+        // Declaring it changes no figure, and is allowed only once.
+        legacy.set_time_unit("gpu hours").unwrap();
+        assert_eq!(legacy.unit(), Some(&unit("GPUHR")));
+        assert_eq!(legacy.total_usage(), Usage::from_counts(7200));
+        assert!(legacy.set_time_unit("NHR").is_err());
+        assert!(legacy.set_unit(&unit("GBP")).is_err());
+
+        legacy.add_report(&date("2027-03-31"), &day).unwrap();
+        assert_eq!(format!("{}", legacy.total().unwrap()), "3.000 GPUHR");
+
+        // A cloud site's legacy reports were micro-pounds, not time: those
+        // are declared with set_unit.
+        let mut cloud: ProjectUsageReport = serde_json::from_str(legacy_json).unwrap();
+        cloud.set_unit(&unit("GBP")).unwrap();
+        assert_eq!(cloud.total().unwrap().to_string(), "0.007200 GBP");
+    }
+
+    /// Converting rescales the headline figures once, and pins every
+    /// inheriting component to the unit it was in, so none is relabelled.
+    #[test]
+    fn test_converting_a_report_keeps_its_components_meaning() {
+        let mut report = cloud_report();
+        report.convert(&unit("GPUHR"), 0.5).unwrap(); // 1 GBP is worth 0.5 GPU hours
+
+        assert_eq!(report.unit(), Some(&unit("GPUHR")));
+        assert_eq!(report.total().unwrap().to_string(), "1.600 GPUHR");
+        assert_eq!(report.total_usage(), Usage::from_counts(5760));
+
+        // gpu was GPUHR all along, so it now inherits; egress keeps GBP.
+        assert!(!report.component_units().contains_key("gpu"));
+        assert_eq!(report.component_unit("gpu"), Some(unit("GPUHR")));
+        assert_eq!(report.component_unit("egress"), Some(unit("GBP")));
+        assert_eq!(
+            format!("{:.2}", report.component_total("egress").unwrap()),
+            "0.15 GBP"
+        );
+        assert_eq!(
+            report.component_total("gpu").unwrap().to_string(),
+            "1.500 GPUHR"
+        );
+
+        assert!(report.convert(&unit("GBP"), f64::NAN).is_err());
+        assert!(report.convert(&unit("GBP"), -1.0).is_err());
+    }
+
+    #[test]
+    fn test_a_component_with_figures_is_not_relabelled() {
+        let mut report = cloud_report();
+        assert!(report.set_component_unit("egress", &unit("USD")).is_err());
+        assert!(report.set_component_unit("gpu", &unit("CPUHR")).is_err());
+        report.set_component_unit("gpu", &unit("GPUHR")).unwrap(); // the same: fine
+        report.set_component_unit("storage", &unit("GBHR")).unwrap(); // no figures yet
+        assert_eq!(report.component_unit("storage"), Some(unit("GBHR")));
+
+        // An override equal to the report's unit is not kept.
+        report.set_component_unit("network", &unit("GBP")).unwrap();
+        assert!(!report.component_units().contains_key("network"));
+    }
+
+    /// Reports combine only in the same unit; a report with no figures takes
+    /// the other's; two reports from before units still combine.
+    #[test]
+    fn test_reports_combine_only_in_the_same_unit() {
+        let report = cloud_report();
+
+        let combined = ProjectUsageReport::combine(&[report.clone(), report.clone()]).unwrap();
+        assert_eq!(combined.unit(), Some(&unit("GBP")));
+        assert_eq!(format!("{:.2}", combined.total().unwrap()), "6.40 GBP");
+        assert_eq!(combined.component_unit("gpu"), Some(unit("GPUHR")));
+
+        let mut usd = ProjectUsageReport::new_in(&report.project(), &unit("USD"));
+        usd.add_report(&date("2027-03-31"), &cloud_day()).unwrap();
+        assert!(ProjectUsageReport::combine(&[report.clone(), usd.clone()]).is_err());
+
+        // `+=` refuses too, and leaves the report untouched.
+        let mut target = report.clone();
+        target += usd;
+        assert_eq!(target.total_usage(), report.total_usage());
+
+        // A component in different units in each refuses.
+        let mut other = ProjectUsageReport::new_in(&report.project(), &unit("GBP"));
+        other.add_report(&date("2027-03-30"), &cloud_day()).unwrap(); // gpu inherits GBP
+        assert!(report.clone().try_add(other).is_err());
+
+        // A report from before units only combines with another.
+        let legacy: ProjectUsageReport = serde_json::from_str(
+            r#"{"project": "myaward1.allocator",
+                "reports": {"2027-03-29": {"reports": {"alice": {"seconds": 60}}, "is_complete": true}},
+                "users": {}}"#,
+        )
+        .unwrap();
+        assert!(ProjectUsageReport::combine(&[report.clone(), legacy.clone()]).is_err());
+        let both = ProjectUsageReport::combine(&[legacy.clone(), legacy.clone()]).unwrap();
+        assert_eq!(both.unit(), None);
+        assert_eq!(both.total_usage(), Usage::from_counts(120));
+
+        // An empty report takes the other's unit.
+        let mut empty = ProjectUsageReport::new(&report.project());
+        empty.try_add(report.clone()).unwrap();
+        assert_eq!(empty.unit(), Some(&unit("GBP")));
+    }
+
+    #[test]
+    fn test_a_portal_report_totals_only_in_a_shared_unit() {
+        let gbp = cloud_report();
+        let mut portal = gbp.to_usage_report();
+        assert_eq!(portal.common_unit(), Some(unit("GBP")));
+        assert_eq!(format!("{:.2}", portal.total().unwrap()), "3.20 GBP");
+
+        let mut other = ProjectUsageReport::new_in(&project("myaward2.allocator"), &test_nhr());
+        let mut day = DailyProjectUsageReport::default();
+        day.add_usage("bob", Usage::from_hours(2.0));
+        other.add_report(&date("2027-03-31"), &day).unwrap();
+        portal.set_report(other).unwrap();
+
+        assert_eq!(portal.common_unit(), None);
+        assert!(portal.total().is_none());
+        assert!(portal
+            .to_string()
+            .contains("projects are in different units"));
+
+        // try_add finds a clash before it changes anything.
+        let mut usd = ProjectUsageReport::new_in(&gbp.project(), &unit("USD"));
+        usd.add_report(&date("2027-03-31"), &cloud_day()).unwrap();
+        let before = portal.total_usage();
+        assert!(portal.try_add(usd.to_usage_report()).is_err());
+        assert_eq!(portal.total_usage(), before);
+    }
+
+    /// `scale_total` used to keep its own list of consumption figures, which
+    /// had missed the charged-requeue ones.
+    #[test]
+    fn test_scale_total_scales_the_charged_requeue_figures_too() {
+        let mut day = DailyProjectUsageReport::default();
+        day.add_usage("alice", Usage::from_counts(1000));
+        day.add_charged_requeue_usage("alice", Usage::from_counts(400));
+        day.add_component_usage("gpu", "alice", Usage::from_counts(100));
+
+        let mut report = ProjectUsageReport::new_in(&project("myaward1.allocator"), &test_nhr());
+        report.add_report(&date("2027-03-31"), &day).unwrap();
+        report.scale_total(2.0);
+
+        assert_eq!(report.total_usage(), Usage::from_counts(2000));
+        assert_eq!(
+            report.total_charged_requeue_usage(),
+            Usage::from_counts(800)
+        );
+        // components are left alone, as documented
+        assert_eq!(
+            report.get_component("gpu").total_usage(),
+            Usage::from_counts(100)
+        );
+    }
+
+    fn day(seconds: u64, complete: bool) -> DailyProjectUsageReport {
+        let mut report = DailyProjectUsageReport::default();
+
+        if seconds > 0 {
+            report.add_usage("alice", Usage::new(seconds));
+        }
+
+        if complete {
+            report.set_complete();
+        }
+
+        report
+    }
+
+    /// Summing two parts of a day is complete exactly when both parts are.
+    /// It used to be forced incomplete, so a site that built a day from two
+    /// settled parts could never report it settled, and the awarding portal
+    /// kept asking for it.
+    #[test]
+    fn test_summed_days_are_complete_exactly_when_both_parts_are() {
+        for (a, b) in [(true, true), (true, false), (false, true), (false, false)] {
+            for seconds in [0, 3600] {
+                let sum = day(seconds, a) + day(seconds, b);
+                assert_eq!(sum.is_complete(), a && b, "{a} + {b} ({seconds}s)");
+                assert_eq!(sum.total_usage(), Usage::new(2 * seconds));
+
+                let mut assigned = day(seconds, a);
+                assigned += day(seconds, b);
+                assert_eq!(assigned.is_complete(), a && b, "{a} += {b} ({seconds}s)");
+            }
+        }
+    }
+
+    /// The same through the report-level calls that a site portal uses:
+    /// `add_report` on a date that already has a report, and `combine`.
+    #[test]
+    fn test_adding_to_a_day_keeps_it_complete_when_both_parts_are() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let project = ProjectIdentifier::parse("myaward1.allocator").unwrap();
+            let date = Date::parse("2027-03-31").unwrap();
+
+            let mut report = ProjectUsageReport::new_in(&project, &test_nhr());
+            report.add_report(&date, &day(3600, true)).unwrap();
+            report.add_report(&date, &day(0, true)).unwrap();
+            assert!(report.is_complete());
+            assert_eq!(report.total_usage(), Usage::new(3600));
+
+            report.add_report(&date, &day(60, false)).unwrap();
+            assert!(!report.is_complete());
+
+            let mut first = ProjectUsageReport::new_in(&project, &test_nhr());
+            first.add_report(&date, &day(3600, true)).unwrap();
+            let mut second = ProjectUsageReport::new_in(&project, &test_nhr());
+            second.add_report(&date, &day(1800, true)).unwrap();
+            let other = Date::parse("2027-03-30").unwrap();
+            second.add_report(&other, &day(10, true)).unwrap();
+
+            let combined = ProjectUsageReport::combine(&[first.clone(), second.clone()]).unwrap();
+            assert!(combined.is_complete());
+            assert_eq!(combined.total_usage(), Usage::new(5410));
+
+            let combined =
+                UsageReport::combine(&[first.to_usage_report(), second.to_usage_report()]).unwrap();
+            assert!(combined.get_report(&project).is_complete());
+        }
+    }
 
     /// A daily report with both a base and a requeue figure, as `op-slurm`
     /// builds one: two jobs' worth of base usage and three superseded attempts.
@@ -5835,13 +6606,15 @@ mod tests {
         // Merging a legacy day with a recent one leaves rows with no expansion
         // or size data, and zero is the sentinel for that - not a score.
         let project = ProjectIdentifier::parse("proj.portal").unwrap();
-        let mut report = ProjectUsageReport::new(&project);
+        let mut report = ProjectUsageReport::new_in(&project, &test_nhr());
 
         let mut legacy_day = DailyProjectUsageReport::default();
         legacy_day.add_usage("alice", Usage::new(3600));
         legacy_day.add_jobs("alice", 1);
         legacy_day.add_wait_seconds("alice", 60);
-        report.set_report(&Date::parse("2026-03-01").unwrap(), &legacy_day);
+        report
+            .set_report(&Date::parse("2026-03-01").unwrap(), &legacy_day)
+            .unwrap();
 
         let mut modern_day = DailyProjectUsageReport::default();
         modern_day.add_usage("bob", Usage::new(3600));
@@ -5849,7 +6622,9 @@ mod tests {
         modern_day.add_wait_seconds("bob", 60);
         modern_day.add_expansion("bob", 60, 3600);
         modern_day.add_job_size("bob", 128, 0);
-        report.set_report(&Date::parse("2026-03-02").unwrap(), &modern_day);
+        report
+            .set_report(&Date::parse("2026-03-02").unwrap(), &modern_day)
+            .unwrap();
 
         let dump = report.expansion_factor_report();
 
@@ -5961,7 +6736,7 @@ mod tests {
     /// fighting a job that will not run.
     fn project_report_with_mixed_habits() -> ProjectUsageReport {
         let project = ProjectIdentifier::parse("proj.portal").unwrap();
-        let mut report = ProjectUsageReport::new(&project);
+        let mut report = ProjectUsageReport::new_in(&project, &test_nhr());
 
         let mut day = DailyProjectUsageReport::default();
 
@@ -5989,7 +6764,9 @@ mod tests {
             day.add_job_size("bob", 64, 4);
         }
 
-        report.set_report(&Date::parse("2026-03-01").unwrap(), &day);
+        report
+            .set_report(&Date::parse("2026-03-01").unwrap(), &day)
+            .unwrap();
         report
     }
 
@@ -6153,13 +6930,15 @@ mod tests {
         // the sentinel for "not recorded" - a mean runtime of 0.000 hours would
         // read as a job that took no time at all.
         let project = ProjectIdentifier::parse("proj.portal").unwrap();
-        let mut report = ProjectUsageReport::new(&project);
+        let mut report = ProjectUsageReport::new_in(&project, &test_nhr());
 
         let mut legacy = DailyProjectUsageReport::default();
         legacy.add_usage("alice", Usage::new(3600));
         legacy.add_jobs("alice", 1);
         legacy.add_wait_seconds("alice", 7200);
-        report.set_report(&Date::parse("2026-03-01").unwrap(), &legacy);
+        report
+            .set_report(&Date::parse("2026-03-01").unwrap(), &legacy)
+            .unwrap();
 
         let mut modern = DailyProjectUsageReport::default();
         modern.add_usage("bob", Usage::new(3600));
@@ -6167,7 +6946,9 @@ mod tests {
         modern.add_wait_seconds("bob", 1800);
         modern.add_expansion("bob", 1800, 3600);
         modern.add_job_size("bob", 128, 0);
-        report.set_report(&Date::parse("2026-03-02").unwrap(), &modern);
+        report
+            .set_report(&Date::parse("2026-03-02").unwrap(), &modern)
+            .unwrap();
 
         let dump = report.expansion_factor_report();
 
@@ -6200,7 +6981,7 @@ mod tests {
 
         // the opposite case: one long job that waited, and nothing else
         let project = ProjectIdentifier::parse("proj.portal").unwrap();
-        let mut contended = ProjectUsageReport::new(&project);
+        let mut contended = ProjectUsageReport::new_in(&project, &test_nhr());
         let mut day = DailyProjectUsageReport::default();
 
         day.add_jobs("alice", 1);
@@ -6215,7 +6996,9 @@ mod tests {
             day.add_job_size("carol", 1, 0);
         }
 
-        contended.set_report(&Date::parse("2026-03-01").unwrap(), &day);
+        contended
+            .set_report(&Date::parse("2026-03-01").unwrap(), &day)
+            .unwrap();
         let dump = contended.expansion_factor_report();
 
         assert!(
@@ -6232,7 +7015,7 @@ mod tests {
         // this scale 1.0 means "waited not at all", so 1.02 against 1.04 is a
         // doubling of nothing and must not be announced as a pattern.
         let project = ProjectIdentifier::parse("proj.portal").unwrap();
-        let mut report = ProjectUsageReport::new(&project);
+        let mut report = ProjectUsageReport::new_in(&project, &test_nhr());
         let mut day = DailyProjectUsageReport::default();
 
         for _ in 0..20 {
@@ -6242,7 +7025,9 @@ mod tests {
             day.add_job_size("alice", 128, 0);
         }
 
-        report.set_report(&Date::parse("2026-03-01").unwrap(), &day);
+        report
+            .set_report(&Date::parse("2026-03-01").unwrap(), &day)
+            .unwrap();
         let dump = report.expansion_factor_report();
 
         assert!(!dump.contains("*short* jobs"), "{}", dump);
@@ -6256,7 +7041,7 @@ mod tests {
     #[test]
     fn test_the_expansion_report_is_one_line_when_no_jobs_ran() {
         let project = ProjectIdentifier::parse("proj.portal").unwrap();
-        let report = ProjectUsageReport::new(&project);
+        let report = ProjectUsageReport::new_in(&project, &test_nhr());
 
         assert!(report
             .expansion_factor_report()
@@ -6270,20 +7055,24 @@ mod tests {
     fn test_the_expansion_report_shows_each_day_so_a_change_is_visible() {
         // When the trouble started is as useful as who caused it.
         let project = ProjectIdentifier::parse("proj.portal").unwrap();
-        let mut report = ProjectUsageReport::new(&project);
+        let mut report = ProjectUsageReport::new_in(&project, &test_nhr());
 
         let mut quiet = DailyProjectUsageReport::default();
         quiet.add_jobs("alice", 1);
         quiet.add_expansion("alice", 0, 3600);
         quiet.add_job_size("alice", 128, 0);
-        report.set_report(&Date::parse("2026-03-01").unwrap(), &quiet);
+        report
+            .set_report(&Date::parse("2026-03-01").unwrap(), &quiet)
+            .unwrap();
 
         let mut bad = DailyProjectUsageReport::default();
         bad.add_jobs("alice", 1);
         bad.add_wait_seconds("alice", 36000);
         bad.add_expansion("alice", 36000, 60);
         bad.add_job_size("alice", 128, 0);
-        report.set_report(&Date::parse("2026-03-02").unwrap(), &bad);
+        report
+            .set_report(&Date::parse("2026-03-02").unwrap(), &bad)
+            .unwrap();
 
         let dump = report.expansion_factor_report();
 
@@ -6358,7 +7147,7 @@ mod tests {
     #[test]
     fn test_mean_job_size_is_per_user_and_per_project_over_every_job() {
         let project = ProjectIdentifier::parse("proj.portal").unwrap();
-        let mut report = ProjectUsageReport::new(&project);
+        let mut report = ProjectUsageReport::new_in(&project, &test_nhr());
 
         let mut busy = DailyProjectUsageReport::default();
         for _ in 0..9 {
@@ -6367,12 +7156,16 @@ mod tests {
         }
         busy.add_jobs("bob", 1);
         busy.add_job_size("bob", 256, 8);
-        report.set_report(&Date::parse("2026-03-01").unwrap(), &busy);
+        report
+            .set_report(&Date::parse("2026-03-01").unwrap(), &busy)
+            .unwrap();
 
         let mut quiet = DailyProjectUsageReport::default();
         quiet.add_jobs("alice", 1);
         quiet.add_job_size("alice", 4, 0);
-        report.set_report(&Date::parse("2026-03-02").unwrap(), &quiet);
+        report
+            .set_report(&Date::parse("2026-03-02").unwrap(), &quiet)
+            .unwrap();
 
         // ten four-core jobs and one 256-core job, over eleven jobs
         assert_eq!(report.num_jobs(), 11);
@@ -6497,9 +7290,13 @@ mod tests {
 
         // and the same over a project made of such days
         let project = ProjectIdentifier::parse("proj.portal").unwrap();
-        let mut month = ProjectUsageReport::new(&project);
-        month.set_report(&Date::parse("2026-03-01").unwrap(), &report);
-        month.set_report(&Date::parse("2026-03-02").unwrap(), &report);
+        let mut month = ProjectUsageReport::new_in(&project, &test_nhr());
+        month
+            .set_report(&Date::parse("2026-03-01").unwrap(), &report)
+            .unwrap();
+        month
+            .set_report(&Date::parse("2026-03-02").unwrap(), &report)
+            .unwrap();
 
         assert_eq!(month.num_jobs(), 6);
         assert_eq!(month.expansion_jobs(), 4);
@@ -6588,7 +7385,7 @@ mod tests {
         // Averaging each day's average would let a day with one job weigh as
         // heavily as a day with a hundred.
         let project = ProjectIdentifier::parse("proj.portal").unwrap();
-        let mut report = ProjectUsageReport::new(&project);
+        let mut report = ProjectUsageReport::new_in(&project, &test_nhr());
 
         let mut busy = DailyProjectUsageReport::default();
         for _ in 0..99 {
@@ -6596,13 +7393,17 @@ mod tests {
             busy.add_wait_seconds("alice", 0);
             busy.add_expansion("alice", 0, 3600);
         }
-        report.set_report(&Date::parse("2026-03-01").unwrap(), &busy);
+        report
+            .set_report(&Date::parse("2026-03-01").unwrap(), &busy)
+            .unwrap();
 
         let mut quiet = DailyProjectUsageReport::default();
         quiet.add_jobs("alice", 1);
         quiet.add_wait_seconds("alice", 3600);
         quiet.add_expansion("alice", 3600, 3600);
-        report.set_report(&Date::parse("2026-03-02").unwrap(), &quiet);
+        report
+            .set_report(&Date::parse("2026-03-02").unwrap(), &quiet)
+            .unwrap();
 
         // ninety-nine jobs scored 1.0 and one scored 2.0, so the mean is 1.01
         assert_eq!(report.num_jobs(), 100);
@@ -6632,8 +7433,10 @@ mod tests {
         );
 
         let project = ProjectIdentifier::parse("proj.portal").unwrap();
-        let mut project_report = ProjectUsageReport::new(&project);
-        project_report.set_report(&Date::parse("2026-03-01").unwrap(), &report);
+        let mut project_report = ProjectUsageReport::new_in(&project, &test_nhr());
+        project_report
+            .set_report(&Date::parse("2026-03-01").unwrap(), &report)
+            .unwrap();
         project_report.scale_total(0.5);
 
         assert!((project_report.average_expansion_factor() - 1.5).abs() < 1e-9);
@@ -6659,14 +7462,18 @@ mod tests {
     /// A two-day project report: one day with requeues, one without.
     fn project_report_with_requeues() -> ProjectUsageReport {
         let project = ProjectIdentifier::parse("proj.portal").unwrap();
-        let mut report = ProjectUsageReport::new(&project);
+        let mut report = ProjectUsageReport::new_in(&project, &test_nhr());
 
-        report.set_report(&Date::parse("2026-03-01").unwrap(), &report_with_requeues());
+        report
+            .set_report(&Date::parse("2026-03-01").unwrap(), &report_with_requeues())
+            .unwrap();
 
         let mut quiet_day = DailyProjectUsageReport::default();
         quiet_day.add_usage("alice", Usage::new(3600));
         quiet_day.add_jobs("alice", 1);
-        report.set_report(&Date::parse("2026-03-02").unwrap(), &quiet_day);
+        report
+            .set_report(&Date::parse("2026-03-02").unwrap(), &quiet_day)
+            .unwrap();
 
         report
     }
@@ -6836,11 +7643,13 @@ mod tests {
     #[test]
     fn test_the_reservation_report_says_what_went_in_and_not_how_full_it_was() {
         let project = ProjectIdentifier::parse("proj.portal").unwrap();
-        let mut report = ProjectUsageReport::new(&project);
-        report.set_report(
-            &Date::parse("2026-03-01").unwrap(),
-            &report_with_reservations(),
-        );
+        let mut report = ProjectUsageReport::new_in(&project, &test_nhr());
+        report
+            .set_report(
+                &Date::parse("2026-03-01").unwrap(),
+                &report_with_reservations(),
+            )
+            .unwrap();
 
         let dump = report.reservation_report();
 
@@ -6866,8 +7675,10 @@ mod tests {
     #[test]
     fn test_the_reservation_report_is_one_line_when_nothing_was_reserved() {
         let project = ProjectIdentifier::parse("proj.portal").unwrap();
-        let mut report = ProjectUsageReport::new(&project);
-        report.set_report(&Date::parse("2026-03-01").unwrap(), &report_with_requeues());
+        let mut report = ProjectUsageReport::new_in(&project, &test_nhr());
+        report
+            .set_report(&Date::parse("2026-03-01").unwrap(), &report_with_requeues())
+            .unwrap();
 
         assert!(!report.has_reservations());
         assert!(report
@@ -6930,12 +7741,14 @@ mod tests {
         // The overwhelmingly common case, and it should not print a page of
         // zeroes to say so.
         let project = ProjectIdentifier::parse("proj.portal").unwrap();
-        let mut report = ProjectUsageReport::new(&project);
+        let mut report = ProjectUsageReport::new_in(&project, &test_nhr());
 
         let mut day = DailyProjectUsageReport::default();
         day.add_usage("alice", Usage::new(3600));
         day.add_jobs("alice", 1);
-        report.set_report(&Date::parse("2026-03-01").unwrap(), &day);
+        report
+            .set_report(&Date::parse("2026-03-01").unwrap(), &day)
+            .unwrap();
 
         assert!(!report.has_requeues());
         assert!(report
@@ -6950,13 +7763,15 @@ mod tests {
         // usage is real and the day has plenty to say, but it has no *reported*
         // usage, and the daily listing used to drop anything with a zero total.
         let project = ProjectIdentifier::parse("proj.portal").unwrap();
-        let mut report = ProjectUsageReport::new(&project);
+        let mut report = ProjectUsageReport::new_in(&project, &test_nhr());
 
         let mut day = DailyProjectUsageReport::default();
         day.add_requeue_usage("alice", Usage::new(7200));
         day.add_requeue_state_usage("NODE_FAIL", Usage::new(7200));
         day.add_requeue_events("alice", "NODE_FAIL", 1);
-        report.set_report(&Date::parse("2026-03-01").unwrap(), &day);
+        report
+            .set_report(&Date::parse("2026-03-01").unwrap(), &day)
+            .unwrap();
 
         assert_eq!(report.total_usage(), Usage::default());
         assert_eq!(report.total_requeue_usage(), Usage::new(7200));
@@ -7076,8 +7891,10 @@ mod tests {
         // and `scale_total` at the project level, which is what the Python
         // bindings expose for a credit conversion
         let project = ProjectIdentifier::parse("proj.portal").unwrap();
-        let mut project_report = ProjectUsageReport::new(&project);
-        project_report.set_report(&Date::parse("2026-03-01").unwrap(), &report);
+        let mut project_report = ProjectUsageReport::new_in(&project, &test_nhr());
+        project_report
+            .set_report(&Date::parse("2026-03-01").unwrap(), &report)
+            .unwrap();
         project_report.scale_total(0.5);
 
         assert_eq!(project_report.total_usage(), Usage::new(1200));
@@ -7092,11 +7909,13 @@ mod tests {
         // and `total_usage_including_requeues` then added two different units
         // together. They delegate to the day's own operators now.
         let project = ProjectIdentifier::parse("proj.portal").unwrap();
-        let mut report = ProjectUsageReport::new(&project);
-        report.set_report(
-            &Date::parse("2026-03-01").unwrap(),
-            &report_with_reservations(),
-        );
+        let mut report = ProjectUsageReport::new_in(&project, &test_nhr());
+        report
+            .set_report(
+                &Date::parse("2026-03-01").unwrap(),
+                &report_with_reservations(),
+            )
+            .unwrap();
 
         let base = report.total_usage();
         let requeued = report.total_requeue_usage();

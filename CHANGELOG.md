@@ -60,7 +60,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   last day of the period that was missed, and that month stays incomplete
   until the forfeit has settled. This is a convention between portals, needing
   no type or wire change; see the site portal API (§4.4.1).
-
 - **Usage reports say which unit they are in.** A `ProjectUsageReport` gains an
   optional `usage_unit`, e.g. `{"name": "GBP", "counts_per_unit": 1000000}`.
   Every consumption figure in the report is a count of that unit, so the
@@ -78,13 +77,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
     `Amount` prints a figure in its unit, honouring a precision:
     `f"{total:.2f}"` gives `3.20 GBP`.
   - **`op-slurm`** now reports in `NHR`, with its `cpu`, `gpu`, `memory` and
-    `billing` components in `CPUHR`, `GPUHR`, `MBHR` and `BHR`.
+    `billing` components in `CPUHR`, `GPUHR`, `MBHR` and `BHR`. `op-cluster`
+    passes the unit through.
   - **Both example site portals** report in the award's unit.
 
   A report from before units (no `usage_unit`) still reads, totals and passes
-  on. It must be declared with `set_unit`, or with `set_time_unit(<award's
-  unit>)` for the time-based reports every HPC site sent, before figures are
-  added. Reports combine only in one unit. `convert(to, factor)` changes a
+  on, but must have its unit declared before figures are added. Migrating
+  cached reports:
+  - an HPC site's reports were time: use `set_time_unit(<the award's
+    allocation unit>)`, so a GPUHR award's reports become GPUHR, not NHR;
+  - a cloud site's reports were micro-currency: use
+    `set_unit(UsageUnit("GBP"))` (or the site's currency). `set_time_unit`
+    refuses a currency, so a migration cannot confuse the two silently.
+
+  Reports combine only in one unit. `convert(to, factor)` changes a
   report's unit without relabelling its components. Backwards compatible on
   the wire. See
   [`docs/plans/usage-units-design.md`](docs/plans/usage-units-design.md).

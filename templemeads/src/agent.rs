@@ -204,7 +204,7 @@ struct Registrar {
     zones: Vec<String>,
     engine: String,
     version: String,
-    start_time: chrono::DateTime<chrono::Utc>,
+    start_time: bradshaw::DateTime<bradshaw::Utc>,
     /// Whether this agent should cascade health checks to its peers
     /// Set to false for leaf nodes (e.g., FreeIPA) that bridge zones
     cascade_health: bool,
@@ -224,7 +224,7 @@ impl Registrar {
             zones: Vec::new(),
             engine: String::new(),
             version: String::new(),
-            start_time: chrono::Utc::now(),
+            start_time: bradshaw::Utc::now(),
             cascade_health: true, // Default to cascading
         }
     }
@@ -241,7 +241,7 @@ impl Registrar {
         self.typ = agent_type.clone();
         self.engine = engine.to_string();
         self.version = version.to_string();
-        self.start_time = chrono::Utc::now();
+        self.start_time = bradshaw::Utc::now();
         self.cascade_health = cascade_health;
     }
 
@@ -623,7 +623,7 @@ pub async fn version() -> String {
 ///
 /// Return the start time of this agent
 ///
-pub async fn start_time() -> chrono::DateTime<chrono::Utc> {
+pub async fn start_time() -> bradshaw::DateTime<bradshaw::Utc> {
     REGISTRAR.read().await.start_time
 }
 

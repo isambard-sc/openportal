@@ -3,7 +3,7 @@
 
 use anyhow::Context;
 use anyhow::Result;
-use chrono::{TimeZone, Utc};
+use bradshaw::Utc;
 use greatwestern::grammar::{DateRange, ProjectMapping, UserMapping};
 use greatwestern::usagereport::{ProjectUsageReport, Usage};
 use once_cell::sync::Lazy;
@@ -34,7 +34,7 @@ struct SlurmServer {
     jwt_creation_time: u64,
     version: String,
     num_failed_reconnects: u32,
-    last_failed_reconnect: Option<chrono::DateTime<Utc>>,
+    last_failed_reconnect: Option<bradshaw::DateTime<Utc>>,
 }
 
 impl SlurmServer {
@@ -90,7 +90,7 @@ impl SlurmServer {
 
         if let Some(last_failed) = self.last_failed_reconnect {
             let backoff_duration =
-                chrono::Duration::seconds(20 * self.num_failed_reconnects as i64);
+                bradshaw::Duration::seconds(20 * self.num_failed_reconnects as i64);
             Utc::now() < last_failed + backoff_duration
         } else {
             false
@@ -181,7 +181,7 @@ async fn login(
     user: &str,
     token_command: &str,
     token_lifespan: u32,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<SlurmSession, Error> {
     assert_not_expired(expires)?;
 
@@ -501,7 +501,9 @@ async fn login(
     })
 }
 
-async fn get_connected_server(expires: &chrono::DateTime<Utc>) -> Result<LockedSlurmServer, Error> {
+async fn get_connected_server(
+    expires: &bradshaw::DateTime<Utc>,
+) -> Result<LockedSlurmServer, Error> {
     // get a copy of the servers, so that we don't hold the lock while we
     // try to connect
     assert_not_expired(expires)?;
@@ -600,7 +602,7 @@ async fn call_get(
     backend: &str,
     function: &str,
     query_params: &Vec<(&str, &str)>,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<serde_json::Value, Error> {
     // get a connected server
     tracing::debug!("Getting a connected server...");
@@ -807,7 +809,7 @@ async fn call_post(
     backend: &str,
     function: &str,
     payload: &serde_json::Value,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<(), Error> {
     // get a connected server
     tracing::debug!("Getting a connected server...");
@@ -1015,7 +1017,7 @@ async fn call_post(
 
 async fn force_add_slurm_account(
     account: &SlurmAccount,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<SlurmAccount, Error> {
     // need to POST to /slurm/vX.Y.Z/accounts, using a JSON content
     // with
@@ -1064,7 +1066,7 @@ async fn force_add_slurm_account(
 
 async fn get_account_from_slurm(
     account: &str,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Option<SlurmAccount>, Error> {
     let account = clean_account_name(account)?;
 
@@ -1146,7 +1148,7 @@ async fn get_account_from_slurm(
 
 async fn get_account(
     account: &str,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Option<SlurmAccount>, Error> {
     // need to GET /slurm/vX.Y.Z/accounts/{account.name}
     // and return the account if it exists
@@ -1215,7 +1217,7 @@ async fn get_account(
 
 async fn get_account_create_if_not_exists(
     account: &SlurmAccount,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<SlurmAccount, Error> {
     let existing_account = get_account(account.name(), expires).await?;
 
@@ -1270,7 +1272,7 @@ async fn get_account_create_if_not_exists(
 
 async fn get_user_from_slurm(
     user: &str,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Option<SlurmUser>, Error> {
     let user = clean_user_name(user)?;
 
@@ -1332,7 +1334,10 @@ async fn get_user_from_slurm(
     }
 }
 
-async fn get_user(user: &str, expires: &chrono::DateTime<Utc>) -> Result<Option<SlurmUser>, Error> {
+async fn get_user(
+    user: &str,
+    expires: &bradshaw::DateTime<Utc>,
+) -> Result<Option<SlurmUser>, Error> {
     let cached_user = cache::get_user(user).await?;
 
     if let Some(cached_user) = cached_user {
@@ -1394,7 +1399,7 @@ async fn get_user(user: &str, expires: &chrono::DateTime<Utc>) -> Result<Option<
 
 async fn add_account_association(
     account: &SlurmAccount,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<(), Error> {
     // eventually should check to see if this association already exists,
     // and if so, not to do anything else
@@ -1440,7 +1445,7 @@ async fn add_user_association(
     user: &SlurmUser,
     account: &SlurmAccount,
     make_default: bool,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<SlurmUser, Error> {
     if account.organization() != get_managed_organization() {
         tracing::warn!(
@@ -1538,7 +1543,7 @@ async fn add_user_association(
 
 async fn get_user_create_if_not_exists(
     user: &UserMapping,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<SlurmUser, Error> {
     // first, make sure that the account exists
     let slurm_account = get_account_create_if_not_exists(
@@ -2744,14 +2749,14 @@ pub struct SlurmJob {
     account: String,
     cluster: String,
     node_info: SlurmNode,
-    start_time: chrono::DateTime<chrono::Utc>,
-    original_start_time: chrono::DateTime<chrono::Utc>,
-    eligible_time: chrono::DateTime<chrono::Utc>,
-    end_time: chrono::DateTime<chrono::Utc>,
+    start_time: bradshaw::DateTime<bradshaw::Utc>,
+    original_start_time: bradshaw::DateTime<bradshaw::Utc>,
+    eligible_time: bradshaw::DateTime<bradshaw::Utc>,
+    end_time: bradshaw::DateTime<bradshaw::Utc>,
     /// When this attempt was submitted. With `id` this is `slurmdbd`'s own
     /// primary key for the record, so it both orders a job's attempts and keeps
     /// two unrelated jobs apart if a `slurmctld` reset has reused an id.
-    submission_time: chrono::DateTime<chrono::Utc>,
+    submission_time: bradshaw::DateTime<bradshaw::Utc>,
     /// How many times this job had been requeued when this attempt ran. Counts
     /// from the job's own beginning, *not* from the query window, so the lowest
     /// value among the records returned for a job is not necessarily zero.
@@ -2916,12 +2921,12 @@ impl SlurmJob {
 
         let start_time = match time.get("start") {
             Some(start_time) => match start_time.as_i64() {
-                Some(start_time) => match chrono::Utc.timestamp_opt(start_time, 0).single() {
+                Some(start_time) => match bradshaw::DateTime::from_timestamp(start_time, 0) {
                     Some(start_time) => start_time,
                     None => {
-                        // Slurm can return nonsense times for jobs that haven't run - this could confused chrono
+                        // Slurm can return nonsense times for jobs that haven't run - an out-of-range one is skipped
                         tracing::warn!("Could not get start_time as DateTime from job");
-                        chrono::Utc::now()
+                        bradshaw::Utc::now()
                     }
                 },
                 None => {
@@ -2939,12 +2944,12 @@ impl SlurmJob {
 
         let end_time = match time.get("end") {
             Some(end_time) => match end_time.as_i64() {
-                Some(end_time) => match chrono::Utc.timestamp_opt(end_time, 0).single() {
+                Some(end_time) => match bradshaw::DateTime::from_timestamp(end_time, 0) {
                     Some(end_time) => end_time,
                     None => {
-                        // Slurm can return nonsense times for jobs that haven't run - this could confused chrono
+                        // Slurm can return nonsense times for jobs that haven't run - an out-of-range one is skipped
                         tracing::warn!("Could not get end_time as DateTime from job");
-                        chrono::Utc::now()
+                        bradshaw::Utc::now()
                     }
                 },
                 None => {
@@ -2962,7 +2967,7 @@ impl SlurmJob {
 
         let eligible_time = match time.get("eligible") {
             Some(eligible_time) => match eligible_time.as_i64() {
-                Some(eligible_time) => match chrono::Utc.timestamp_opt(eligible_time, 0).single() {
+                Some(eligible_time) => match bradshaw::DateTime::from_timestamp(eligible_time, 0) {
                     Some(eligible_time) => eligible_time,
                     None => {
                         tracing::warn!("Could not get eligible_time as DateTime from job");
@@ -2980,9 +2985,9 @@ impl SlurmJob {
             None => start_time,
         };
 
-        let duration: chrono::Duration = match time.get("elapsed") {
+        let duration: bradshaw::Duration = match time.get("elapsed") {
             Some(duration) => match duration.as_i64() {
-                Some(duration) => chrono::Duration::seconds(duration),
+                Some(duration) => bradshaw::Duration::seconds(duration),
                 None => {
                     tracing::warn!("Could not get duration as u64 from job: {:?}", duration);
                     return Err(Error::Call(
@@ -3001,7 +3006,7 @@ impl SlurmJob {
             true => duration,
             false => {
                 tracing::warn!("Negative duration for job: {:?}", value);
-                chrono::Duration::seconds(0)
+                bradshaw::Duration::seconds(0)
             }
         };
 
@@ -3058,7 +3063,7 @@ impl SlurmJob {
         // without it the ordering falls back to `restart_cnt` alone and a job-id
         // reset can no longer be detected.
         let submission_time = match time.get("submission").and_then(|t| t.as_i64()) {
-            Some(submission) => match chrono::Utc.timestamp_opt(submission, 0).single() {
+            Some(submission) => match bradshaw::DateTime::from_timestamp(submission, 0) {
                 Some(submission) => submission,
                 None => {
                     tracing::warn!("Could not get submission time as DateTime from job");
@@ -3373,8 +3378,8 @@ impl SlurmJob {
     ///
     pub fn get_consumers(
         value: &serde_json::Value,
-        start_time: &chrono::DateTime<chrono::Utc>,
-        end_time: &chrono::DateTime<chrono::Utc>,
+        start_time: &bradshaw::DateTime<bradshaw::Utc>,
+        end_time: &bradshaw::DateTime<bradshaw::Utc>,
         slurm_nodes: &SlurmNodes,
     ) -> Result<Vec<SlurmJob>, Error> {
         if start_time > end_time {
@@ -3420,7 +3425,7 @@ impl SlurmJob {
                     // does. Asking whether it ended *inside* the window would
                     // call every such attempt unfinished and stop the day it
                     // began in ever being completed.
-                    let now = chrono::Utc::now();
+                    let now = bradshaw::Utc::now();
 
                     for mut job in slurm_jobs {
                         // Before clipping, while the real end time is still
@@ -3571,15 +3576,15 @@ impl SlurmJob {
         &self.node_info
     }
 
-    pub fn start_time(&self) -> &chrono::DateTime<chrono::Utc> {
+    pub fn start_time(&self) -> &bradshaw::DateTime<bradshaw::Utc> {
         &self.start_time
     }
 
-    pub fn original_start_time(&self) -> &chrono::DateTime<chrono::Utc> {
+    pub fn original_start_time(&self) -> &bradshaw::DateTime<bradshaw::Utc> {
         &self.original_start_time
     }
 
-    pub fn eligible_time(&self) -> &chrono::DateTime<chrono::Utc> {
+    pub fn eligible_time(&self) -> &bradshaw::DateTime<bradshaw::Utc> {
         &self.eligible_time
     }
 
@@ -3593,34 +3598,34 @@ impl SlurmJob {
     /// job count, which only counts attempts that started inside the window, so
     /// for those the two starts are the same - but a requeue is counted in the
     /// window where it happened, which is not where the attempt began.
-    pub fn wait_time(&self) -> chrono::Duration {
+    pub fn wait_time(&self) -> bradshaw::Duration {
         let wait = self
             .original_start_time
             .signed_duration_since(self.eligible_time());
         if wait.num_seconds() < 0 {
-            chrono::Duration::seconds(0)
+            bradshaw::Duration::seconds(0)
         } else {
             wait
         }
     }
 
-    pub fn end_time(&self) -> &chrono::DateTime<chrono::Utc> {
+    pub fn end_time(&self) -> &bradshaw::DateTime<bradshaw::Utc> {
         &self.end_time
     }
 
-    pub fn duration(&self) -> chrono::Duration {
+    pub fn duration(&self) -> bradshaw::Duration {
         match self.duration > 0 {
-            false => chrono::Duration::seconds(0),
+            false => bradshaw::Duration::seconds(0),
             // use the actual difference between start and end times
             // as these are trimmed to the query that generated the job
             true => self.end_time.signed_duration_since(self.start_time),
         }
     }
 
-    pub fn total_duration(&self) -> chrono::Duration {
+    pub fn total_duration(&self) -> bradshaw::Duration {
         // return the total duration of the job, including
         // consumption outside the query used to generate the job
-        chrono::Duration::seconds(self.duration as i64)
+        bradshaw::Duration::seconds(self.duration as i64)
     }
 
     /// Every state Slurm reported for this record.
@@ -3653,7 +3658,7 @@ impl SlurmJob {
     }
 
     /// When this attempt was submitted.
-    pub fn submission_time(&self) -> &chrono::DateTime<chrono::Utc> {
+    pub fn submission_time(&self) -> &bradshaw::DateTime<bradshaw::Utc> {
         &self.submission_time
     }
 
@@ -3911,22 +3916,26 @@ pub async fn connect(
     initialise_servers(&servers, &users, &token_commands, &token_lifespans).await?;
 
     // try to login to make sure we can connect
-    let expires = Utc::now() + chrono::Duration::minutes(1);
+    let expires = Utc::now() + bradshaw::Duration::minutes(1);
     get_connected_server(&expires).await?;
 
     Ok(())
 }
 
-pub async fn add_user(user: &UserMapping, expires: &chrono::DateTime<Utc>) -> Result<(), Error> {
+pub async fn add_user(user: &UserMapping, expires: &bradshaw::DateTime<Utc>) -> Result<(), Error> {
     // get a lock for this user, as only a single task should be adding
     // or removing this user at the same time
-    let now = chrono::Utc::now();
+    let now = bradshaw::Utc::now();
 
     let _guard = loop {
         match cache::get_user_mutex(user.user()).await?.try_lock_owned() {
             Ok(guard) => break guard,
             Err(_) => {
-                if chrono::Utc::now().signed_duration_since(now).num_seconds() > 5 {
+                if bradshaw::Utc::now()
+                    .signed_duration_since(now)
+                    .num_seconds()
+                    > 5
+                {
                     tracing::warn!(
                         "Could not get lock to add user {} - another task is adding or removing.",
                         user
@@ -3953,13 +3962,13 @@ pub async fn add_user(user: &UserMapping, expires: &chrono::DateTime<Utc>) -> Re
 
 pub async fn add_project(
     project: &ProjectMapping,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<(), Error> {
     assert_not_expired(expires)?;
 
     // get a lock for this project, as only a single task should be adding
     // or removing this project at the same time
-    let now = chrono::Utc::now();
+    let now = bradshaw::Utc::now();
 
     let _guard = loop {
         match cache::get_project_mutex(project.project())
@@ -3968,7 +3977,11 @@ pub async fn add_project(
         {
             Ok(guard) => break guard,
             Err(_) => {
-                if chrono::Utc::now().signed_duration_since(now).num_seconds() > 5 {
+                if bradshaw::Utc::now()
+                    .signed_duration_since(now)
+                    .num_seconds()
+                    > 5
+                {
                     tracing::warn!(
                         "Could not get lock to add project {} - another task is adding or removing.",
                         project
@@ -4002,7 +4015,7 @@ pub async fn add_project(
 ///
 pub async fn is_local_project_added(
     mapping: &ProjectMapping,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     assert_not_expired(expires)?;
 
@@ -4046,7 +4059,7 @@ pub async fn is_local_project_added(
 ///
 pub async fn is_local_user_added(
     mapping: &UserMapping,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     assert_not_expired(expires)?;
 
@@ -4104,7 +4117,7 @@ pub async fn is_local_user_added(
 ///
 pub async fn is_local_project_removed(
     mapping: &ProjectMapping,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     assert_not_expired(expires)?;
 
@@ -4118,7 +4131,7 @@ pub async fn is_local_project_removed(
 ///
 pub async fn is_local_user_removed(
     mapping: &UserMapping,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     assert_not_expired(expires)?;
 
@@ -4128,7 +4141,7 @@ pub async fn is_local_user_removed(
 pub async fn get_usage_report(
     project: &ProjectMapping,
     dates: &DateRange,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<ProjectUsageReport, Error> {
     assert_not_expired(expires)?;
 
@@ -4138,7 +4151,7 @@ pub async fn get_usage_report(
 
 pub async fn get_limit(
     project: &ProjectMapping,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Usage, Error> {
     assert_not_expired(expires)?;
 
@@ -4149,7 +4162,7 @@ pub async fn get_limit(
 pub async fn set_limit(
     project: &ProjectMapping,
     limit: &Usage,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Usage, Error> {
     assert_not_expired(expires)?;
 
@@ -4176,21 +4189,30 @@ pub(crate) mod test_fixture {
     const DAY_TWO_START: i64 = 1772409600;
     const DAY_THREE_START: i64 = 1772496000;
 
-    pub fn window() -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
+    pub fn window() -> (
+        bradshaw::DateTime<bradshaw::Utc>,
+        bradshaw::DateTime<bradshaw::Utc>,
+    ) {
         day_one()
     }
 
-    pub fn day_one() -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
+    pub fn day_one() -> (
+        bradshaw::DateTime<bradshaw::Utc>,
+        bradshaw::DateTime<bradshaw::Utc>,
+    ) {
         (
-            chrono::Utc.timestamp_opt(DAY_ONE_START, 0).unwrap(),
-            chrono::Utc.timestamp_opt(DAY_TWO_START, 0).unwrap(),
+            bradshaw::DateTime::from_timestamp(DAY_ONE_START, 0).unwrap(),
+            bradshaw::DateTime::from_timestamp(DAY_TWO_START, 0).unwrap(),
         )
     }
 
-    pub fn day_two() -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
+    pub fn day_two() -> (
+        bradshaw::DateTime<bradshaw::Utc>,
+        bradshaw::DateTime<bradshaw::Utc>,
+    ) {
         (
-            chrono::Utc.timestamp_opt(DAY_TWO_START, 0).unwrap(),
-            chrono::Utc.timestamp_opt(DAY_THREE_START, 0).unwrap(),
+            bradshaw::DateTime::from_timestamp(DAY_TWO_START, 0).unwrap(),
+            bradshaw::DateTime::from_timestamp(DAY_THREE_START, 0).unwrap(),
         )
     }
 
@@ -4251,8 +4273,8 @@ pub(crate) mod test_fixture {
     /// places it - its `start` is zero, which is not a time it existed at.
     ///
     pub fn records_in_window(
-        start_time: &chrono::DateTime<chrono::Utc>,
-        end_time: &chrono::DateTime<chrono::Utc>,
+        start_time: &bradshaw::DateTime<bradshaw::Utc>,
+        end_time: &bradshaw::DateTime<bradshaw::Utc>,
     ) -> serde_json::Value {
         let mut fixture = fixture();
 
@@ -4279,7 +4301,10 @@ pub(crate) mod test_fixture {
     }
 
     pub fn consumers_for(
-        window: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>),
+        window: (
+            bradshaw::DateTime<bradshaw::Utc>,
+            bradshaw::DateTime<bradshaw::Utc>,
+        ),
     ) -> Vec<SlurmJob> {
         let (start, end) = window;
         SlurmJob::get_consumers(

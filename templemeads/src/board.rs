@@ -383,7 +383,7 @@ impl<L: Domain> Board<L> {
             for (id, existing_job) in candidate.iter() {
                 {
                     // Check if the original job is too old (older than 10 minutes)
-                    let age = chrono::Utc::now().signed_duration_since(existing_job.created());
+                    let age = bradshaw::Utc::now().signed_duration_since(existing_job.created());
                     if age.num_minutes() > 10 {
                         tracing::warn!(
                             "Not creating duplicate - original job {} is too old ({} minutes)",
@@ -796,7 +796,7 @@ impl<L: Domain> Waiter<L> {
     }
 
     pub async fn try_result(self, timeout_ms: u64) -> Result<Option<Job<L>>, Error> {
-        let now = chrono::Utc::now();
+        let now = bradshaw::Utc::now();
 
         match self {
             Waiter::Pending(mut rx) => loop {
@@ -804,7 +804,7 @@ impl<L: Domain> Waiter<L> {
                     Ok(job) => return Ok(Some(job)),
                     Err(oneshot::error::TryRecvError::Empty) => {
                         if timeout_ms > 0 {
-                            let elapsed = chrono::Utc::now().signed_duration_since(now);
+                            let elapsed = bradshaw::Utc::now().signed_duration_since(now);
                             if elapsed.num_milliseconds() >= timeout_ms as i64 {
                                 return Ok(None);
                             }

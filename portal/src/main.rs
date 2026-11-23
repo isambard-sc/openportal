@@ -269,7 +269,7 @@ async fn main() -> Result<()> {
                             job = job.update(&sender).await?;
 
                             // Wait for the submitted job to complete
-                            let now = chrono::Utc::now();
+                            let now = bradshaw::Utc::now();
                             let mut last_update = now;
 
                             let southbound_job = loop {
@@ -280,12 +280,12 @@ async fn main() -> Result<()> {
                                         }
                                     }
                                     None => {
-                                        let mut elapsed_secs = (chrono::Utc::now() - last_update).num_seconds();
+                                        let mut elapsed_secs = (bradshaw::Utc::now() - last_update).num_seconds();
 
                                         if elapsed_secs >= 10 {
                                             // update the job status every 10 seconds
-                                            last_update = chrono::Utc::now();
-                                            elapsed_secs = (chrono::Utc::now() - now).num_seconds();
+                                            last_update = bradshaw::Utc::now();
+                                            elapsed_secs = (bradshaw::Utc::now() - now).num_seconds();
                                             tracing::debug!("{} : {} : Still processing... ({} seconds elapsed)", destination, instruction, elapsed_secs);
                                             job = job.running(Some(format!("Still processing... ({} seconds elapsed)", elapsed_secs)))?;
                                             job = job.update(&sender).await?;

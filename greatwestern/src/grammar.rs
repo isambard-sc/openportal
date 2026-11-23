@@ -10,7 +10,7 @@ use templemeads::validate::{validate_identifier_component, validate_mapping_targ
 use templemeads::Error;
 
 use anyhow::Context;
-use chrono::{DateTime, Datelike, Timelike, Utc};
+use bradshaw::{DateTime, Datelike, Timelike, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::{hash::Hash, sync::Arc};
@@ -456,7 +456,7 @@ impl From<ProjectMapping> for UserOrProjectMapping {
 ///
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct Hour {
-    hour: chrono::NaiveDateTime,
+    hour: bradshaw::NaiveDateTime,
 }
 
 impl NamedType for Hour {
@@ -466,11 +466,11 @@ impl NamedType for Hour {
 }
 
 impl Hour {
-    pub fn to_chrono(&self) -> chrono::NaiveDateTime {
+    pub fn to_chrono(&self) -> bradshaw::NaiveDateTime {
         self.hour
     }
 
-    pub fn from_chrono(hour: &chrono::NaiveDateTime) -> Result<Self, Error> {
+    pub fn from_chrono(hour: &bradshaw::NaiveDateTime) -> Result<Self, Error> {
         // make sure that this is a valid hour (i.e. minutes and seconds are zero)
         if hour.minute() != 0 || hour.second() != 0 {
             return Err(Error::Parse(format!(
@@ -483,7 +483,7 @@ impl Hour {
     }
 
     pub fn from_timestamp(timestamp: i64) -> Result<Self, Error> {
-        let hour = chrono::DateTime::from_timestamp(timestamp, 0)
+        let hour = bradshaw::DateTime::from_timestamp(timestamp, 0)
             .with_context(|| {
                 format!(
                     "Invalid Hour - cannot convert timestamp '{}' to a valid hour",
@@ -512,7 +512,7 @@ impl Hour {
             )));
         };
 
-        let hour = chrono::NaiveDateTime::parse_from_str(hour, "%Y-%m-%d %H")
+        let hour = bradshaw::NaiveDateTime::parse_from_str(hour, "%Y-%m-%d %H")
             .with_context(|| format!("Invalid Hour - hour cannot be parsed from '{}'", hour))?;
 
         Self::from_chrono(&hour)
@@ -522,29 +522,32 @@ impl Hour {
         self.hour.and_utc().timestamp()
     }
 
+    /// The current hour, in UTC - like every other time in OpenPortal, and
+    /// like the hours usage is collected for. (It was the host's local time,
+    /// which differed from UTC on a host not set to UTC.)
     pub fn now() -> Result<Self, Error> {
-        let now = chrono::Local::now().naive_local();
-        let hour = chrono::NaiveDate::from_ymd_opt(now.year(), now.month(), now.day())
+        let now = bradshaw::Utc::now().naive_utc();
+        let hour = bradshaw::NaiveDate::from_ymd_opt(now.year(), now.month(), now.day())
             .unwrap_or_else(|| {
                 tracing::error!("Invalid date '{}' - cannot convert to an hour", now);
-                chrono::NaiveDate::default()
+                bradshaw::NaiveDate::default()
             })
             .and_hms_opt(now.hour(), 0, 0)
             .unwrap_or_else(|| {
                 tracing::error!("Invalid time '{}' - cannot convert to an hour", now);
-                chrono::NaiveDateTime::default()
+                bradshaw::NaiveDateTime::default()
             });
 
         Self::from_chrono(&hour)
     }
 
     pub fn prev(self: &Hour) -> Result<Self, Error> {
-        let hour = self.hour - chrono::Duration::hours(1);
+        let hour = self.hour - bradshaw::Duration::hours(1);
         Self::from_chrono(&hour)
     }
 
     pub fn next(self: &Hour) -> Result<Self, Error> {
-        let hour = self.hour + chrono::Duration::hours(1);
+        let hour = self.hour + bradshaw::Duration::hours(1);
         Self::from_chrono(&hour)
     }
 
@@ -554,21 +557,21 @@ impl Hour {
         }
     }
 
-    pub fn hour(&self) -> &chrono::NaiveDateTime {
+    pub fn hour(&self) -> &bradshaw::NaiveDateTime {
         &self.hour
     }
 
     // the start time is inclusive, i.e. [start_time, end_time)
-    pub fn start_time(&self) -> chrono::NaiveDateTime {
+    pub fn start_time(&self) -> bradshaw::NaiveDateTime {
         self.hour
     }
 
     // the end time is exclusive, i.e. [start_time, end_time)
-    pub fn end_time(&self) -> chrono::NaiveDateTime {
+    pub fn end_time(&self) -> bradshaw::NaiveDateTime {
         // Checked, so a date at the very top of the representable range cannot
         // panic here - see finding R25.
         self.hour
-            .checked_add_signed(chrono::Duration::hours(1))
+            .checked_add_signed(bradshaw::Duration::hours(1))
             .unwrap_or(self.hour)
     }
 
@@ -615,8 +618,8 @@ impl<'de> Deserialize<'de> for Hour {
 /// for no security benefit, so it truncates instead: the invariant becomes
 /// unconditional rather than merely checked on one of the two paths. See
 /// `docs/specifications/security-review-2.md` (finding R33).
-impl From<chrono::NaiveDateTime> for Hour {
-    fn from(hour: chrono::NaiveDateTime) -> Self {
+impl From<bradshaw::NaiveDateTime> for Hour {
+    fn from(hour: bradshaw::NaiveDateTime) -> Self {
         let truncated = hour.with_minute(0).and_then(|h| h.with_second(0));
 
         match truncated {
@@ -634,7 +637,7 @@ impl From<chrono::NaiveDateTime> for Hour {
     }
 }
 
-impl From<Hour> for chrono::NaiveDateTime {
+impl From<Hour> for bradshaw::NaiveDateTime {
     fn from(hour: Hour) -> Self {
         hour.hour
     }
@@ -645,7 +648,7 @@ impl From<Hour> for chrono::NaiveDateTime {
 ///
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct Date {
-    date: chrono::NaiveDate,
+    date: bradshaw::NaiveDate,
 }
 
 impl NamedType for Date {
@@ -656,8 +659,9 @@ impl NamedType for Date {
 
 /// Earliest and latest year a `Date` may name.
 ///
-/// `chrono`'s `%Y` accepts an unbounded digit count when a sign is present, so
-/// `Date::parse` used to accept chrono's entire representable range - from
+/// `%Y` accepts a long digit count when a sign is present (it did in chrono,
+/// and does, to nine digits, in bradshaw), so `Date::parse` used to accept the
+/// entire representable range - from
 /// `-262143-01-01` to `+262142-12-31`. Nothing rejected a `DateRange` spanning
 /// it either, and a span that wide is a resource bomb rather than a query:
 /// `DateRange::days()` would try to build a 191,491,529-element `Vec`, and the
@@ -677,17 +681,17 @@ const MAX_YEAR: i32 = 2200;
 const MAX_DATE_RANGE_DAYS: i64 = 5 * 366;
 
 impl Date {
-    pub fn to_chrono(&self) -> chrono::NaiveDate {
+    pub fn to_chrono(&self) -> bradshaw::NaiveDate {
         self.date
     }
 
-    pub fn from_chrono(date: &chrono::NaiveDate) -> Self {
+    pub fn from_chrono(date: &bradshaw::NaiveDate) -> Self {
         Self { date: *date }
     }
 
     pub fn from_timestamp(timestamp: i64) -> Self {
         Self {
-            date: chrono::DateTime::from_timestamp(timestamp, 0)
+            date: bradshaw::DateTime::from_timestamp(timestamp, 0)
                 .unwrap_or_default()
                 .date_naive(),
         }
@@ -703,11 +707,11 @@ impl Date {
             )));
         };
 
-        let date = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        let date = bradshaw::NaiveDate::parse_from_str(date, "%Y-%m-%d")
             .with_context(|| format!("Invalid Date - date cannot be parsed from '{}'", date))?;
 
         // `%Y` accepts a signed, unbounded digit count, so without this the
-        // whole chrono range parses - see `MIN_YEAR`/`MAX_YEAR` (finding R25).
+        // whole representable range parses - see `MIN_YEAR`/`MAX_YEAR` (finding R25).
         if date.year() < MIN_YEAR || date.year() > MAX_YEAR {
             return Err(Error::Parse(format!(
                 "Invalid Date - year {} is outside the supported range {}-{} '{}'",
@@ -729,7 +733,7 @@ impl Date {
                     "Invalid date '{}' - cannot convert to a timestamp",
                     self.date
                 );
-                chrono::NaiveDateTime::default()
+                bradshaw::NaiveDateTime::default()
             })
             .and_utc()
             .timestamp()
@@ -741,7 +745,7 @@ impl Date {
         for hour in 0..24 {
             let hour = self.date.and_hms_opt(hour, 0, 0).unwrap_or_else(|| {
                 tracing::error!("Invalid date '{}' - cannot convert to an hour", self.date);
-                chrono::NaiveDateTime::default()
+                bradshaw::NaiveDateTime::default()
             });
             if let Ok(hour) = Hour::from_chrono(&hour) {
                 hours.push(hour);
@@ -753,13 +757,14 @@ impl Date {
 
     pub fn yesterday() -> Self {
         Self {
-            date: Date::today().date - chrono::Duration::days(1),
+            date: Date::today().date - bradshaw::Duration::days(1),
         }
     }
 
+    /// Today's date, in UTC - see `Hour::now`.
     pub fn today() -> Self {
         Self {
-            date: chrono::Local::now().naive_local().into(),
+            date: bradshaw::Utc::now().date_naive(),
         }
     }
 
@@ -778,28 +783,28 @@ impl Date {
 
     pub fn prev(self: &Date) -> Date {
         Date {
-            date: self.date - chrono::Duration::days(1),
+            date: self.date - bradshaw::Duration::days(1),
         }
     }
 
     pub fn next(self: &Date) -> Date {
         Date {
-            date: self.date + chrono::Duration::days(1),
+            date: self.date + bradshaw::Duration::days(1),
         }
     }
 
     pub fn week(self: &Date) -> DateRange {
         let start_date = match self.date.weekday() {
-            chrono::Weekday::Mon => self.date,
-            chrono::Weekday::Tue => self.date - chrono::Duration::days(1),
-            chrono::Weekday::Wed => self.date - chrono::Duration::days(2),
-            chrono::Weekday::Thu => self.date - chrono::Duration::days(3),
-            chrono::Weekday::Fri => self.date - chrono::Duration::days(4),
-            chrono::Weekday::Sat => self.date - chrono::Duration::days(5),
-            chrono::Weekday::Sun => self.date - chrono::Duration::days(6),
+            bradshaw::Weekday::Mon => self.date,
+            bradshaw::Weekday::Tue => self.date - bradshaw::Duration::days(1),
+            bradshaw::Weekday::Wed => self.date - bradshaw::Duration::days(2),
+            bradshaw::Weekday::Thu => self.date - bradshaw::Duration::days(3),
+            bradshaw::Weekday::Fri => self.date - bradshaw::Duration::days(4),
+            bradshaw::Weekday::Sat => self.date - bradshaw::Duration::days(5),
+            bradshaw::Weekday::Sun => self.date - bradshaw::Duration::days(6),
         };
 
-        let end_date = start_date + chrono::Duration::days(6);
+        let end_date = start_date + bradshaw::Duration::days(6);
 
         DateRange {
             start_date: Date { date: start_date },
@@ -809,16 +814,16 @@ impl Date {
 
     pub fn prev_week(self: &Date) -> DateRange {
         let start_date = match self.date.weekday() {
-            chrono::Weekday::Mon => self.date - chrono::Duration::days(7),
-            chrono::Weekday::Tue => self.date - chrono::Duration::days(8),
-            chrono::Weekday::Wed => self.date - chrono::Duration::days(9),
-            chrono::Weekday::Thu => self.date - chrono::Duration::days(10),
-            chrono::Weekday::Fri => self.date - chrono::Duration::days(11),
-            chrono::Weekday::Sat => self.date - chrono::Duration::days(12),
-            chrono::Weekday::Sun => self.date - chrono::Duration::days(13),
+            bradshaw::Weekday::Mon => self.date - bradshaw::Duration::days(7),
+            bradshaw::Weekday::Tue => self.date - bradshaw::Duration::days(8),
+            bradshaw::Weekday::Wed => self.date - bradshaw::Duration::days(9),
+            bradshaw::Weekday::Thu => self.date - bradshaw::Duration::days(10),
+            bradshaw::Weekday::Fri => self.date - bradshaw::Duration::days(11),
+            bradshaw::Weekday::Sat => self.date - bradshaw::Duration::days(12),
+            bradshaw::Weekday::Sun => self.date - bradshaw::Duration::days(13),
         };
 
-        let end_date = start_date + chrono::Duration::days(6);
+        let end_date = start_date + bradshaw::Duration::days(6);
 
         DateRange {
             start_date: Date { date: start_date },
@@ -828,16 +833,16 @@ impl Date {
 
     pub fn next_week(self: &Date) -> DateRange {
         let start_date = match self.date.weekday() {
-            chrono::Weekday::Mon => self.date + chrono::Duration::days(7),
-            chrono::Weekday::Tue => self.date + chrono::Duration::days(6),
-            chrono::Weekday::Wed => self.date + chrono::Duration::days(5),
-            chrono::Weekday::Thu => self.date + chrono::Duration::days(4),
-            chrono::Weekday::Fri => self.date + chrono::Duration::days(3),
-            chrono::Weekday::Sat => self.date + chrono::Duration::days(2),
-            chrono::Weekday::Sun => self.date + chrono::Duration::days(1),
+            bradshaw::Weekday::Mon => self.date + bradshaw::Duration::days(7),
+            bradshaw::Weekday::Tue => self.date + bradshaw::Duration::days(6),
+            bradshaw::Weekday::Wed => self.date + bradshaw::Duration::days(5),
+            bradshaw::Weekday::Thu => self.date + bradshaw::Duration::days(4),
+            bradshaw::Weekday::Fri => self.date + bradshaw::Duration::days(3),
+            bradshaw::Weekday::Sat => self.date + bradshaw::Duration::days(2),
+            bradshaw::Weekday::Sun => self.date + bradshaw::Duration::days(1),
         };
 
-        let end_date = start_date + chrono::Duration::days(6);
+        let end_date = start_date + bradshaw::Duration::days(6);
 
         DateRange {
             start_date: Date { date: start_date },
@@ -856,9 +861,9 @@ impl Date {
         let start_date = self.date.with_day(1).unwrap_or(self.date);
 
         let end_date =
-            chrono::NaiveDate::from_ymd_opt(start_date.year(), start_date.month() + 1, 1)
+            bradshaw::NaiveDate::from_ymd_opt(start_date.year(), start_date.month() + 1, 1)
                 .unwrap_or(
-                    chrono::NaiveDate::from_ymd_opt(start_date.year() + 1, 1, 1)
+                    bradshaw::NaiveDate::from_ymd_opt(start_date.year() + 1, 1, 1)
                         .unwrap_or(start_date),
                 )
                 .pred_opt()
@@ -914,7 +919,7 @@ impl Date {
             .with_day(1)
             .unwrap_or(self.date);
 
-        let end_date = chrono::NaiveDate::from_ymd_opt(start_date.year() + 1, 1, 1)
+        let end_date = bradshaw::NaiveDate::from_ymd_opt(start_date.year() + 1, 1, 1)
             .unwrap_or(start_date)
             .pred_opt()
             .unwrap_or(start_date);
@@ -963,7 +968,7 @@ impl Date {
         Date::today().year()
     }
 
-    pub fn date(&self) -> &chrono::NaiveDate {
+    pub fn date(&self) -> &bradshaw::NaiveDate {
         &self.date
     }
 
@@ -997,13 +1002,13 @@ impl<'de> Deserialize<'de> for Date {
     }
 }
 
-impl From<chrono::NaiveDate> for Date {
-    fn from(date: chrono::NaiveDate) -> Self {
+impl From<bradshaw::NaiveDate> for Date {
+    fn from(date: bradshaw::NaiveDate) -> Self {
         Self { date }
     }
 }
 
-impl From<Date> for chrono::NaiveDate {
+impl From<Date> for bradshaw::NaiveDate {
     fn from(date: Date) -> Self {
         date.date
     }
@@ -1024,7 +1029,7 @@ impl NamedType for DateRange {
 }
 
 impl DateRange {
-    pub fn from_chrono(start_date: &chrono::NaiveDate, end_date: &chrono::NaiveDate) -> Self {
+    pub fn from_chrono(start_date: &bradshaw::NaiveDate, end_date: &bradshaw::NaiveDate) -> Self {
         match start_date < end_date {
             true => Self {
                 start_date: Date { date: *start_date },
@@ -1133,7 +1138,7 @@ impl DateRange {
     }
 
     // the start time is inclusive, i.e. [start_time, end_time)
-    pub fn start_time(&self) -> chrono::NaiveDateTime {
+    pub fn start_time(&self) -> bradshaw::NaiveDateTime {
         self.start_date
             .date
             .and_hms_opt(0, 0, 0)
@@ -1142,12 +1147,12 @@ impl DateRange {
                     "Invalid start date '{}' - cannot convert to a start_time",
                     self.start_date
                 );
-                chrono::NaiveDateTime::default()
+                bradshaw::NaiveDateTime::default()
             })
     }
 
     // the end time is exclusive, i.e. [start_time, end_time)
-    pub fn end_time(&self) -> chrono::NaiveDateTime {
+    pub fn end_time(&self) -> bradshaw::NaiveDateTime {
         // this will finish at midnight on the day after the end date,
         // as we have a half-open interval [start_time, end_time)
         let midnight = self.end_date.date.and_hms_opt(0, 0, 0).unwrap_or_else(|| {
@@ -1155,13 +1160,13 @@ impl DateRange {
                 "Invalid end date '{}' - cannot convert to an end_time",
                 self.end_date
             );
-            chrono::NaiveDateTime::default()
+            bradshaw::NaiveDateTime::default()
         });
 
         // Checked, so an end date at the top of the representable range cannot
         // panic here - see finding R25.
         midnight
-            .checked_add_signed(chrono::Duration::days(1))
+            .checked_add_signed(bradshaw::Duration::days(1))
             .unwrap_or(midnight)
     }
 
@@ -1176,10 +1181,10 @@ impl DateRange {
     /// `DateRange` into a `Vec` on every iteration. See
     /// `docs/specifications/security-review-2.md` (finding R25).
     fn advance_past(
-        current: chrono::NaiveDate,
-        period_end: chrono::NaiveDate,
-    ) -> Option<chrono::NaiveDate> {
-        let next = period_end.checked_add_signed(chrono::Duration::days(1))?;
+        current: bradshaw::NaiveDate,
+        period_end: bradshaw::NaiveDate,
+    ) -> Option<bradshaw::NaiveDate> {
+        let next = period_end.checked_add_signed(bradshaw::Duration::days(1))?;
 
         match next > current {
             true => Some(next),
@@ -1194,11 +1199,11 @@ impl DateRange {
         while current <= self.end_date.date {
             days.push(Date { date: current });
 
-            // Checked: `current + 1 day` overflows at the top of chrono's
+            // Checked: `current + 1 day` overflows at the top of the
             // representable range. `Date::parse` now bounds the year so this is
             // unreachable from a parsed range, but `from_chrono` takes a
             // `NaiveDate` directly. See finding R25.
-            match current.checked_add_signed(chrono::Duration::days(1)) {
+            match current.checked_add_signed(bradshaw::Duration::days(1)) {
                 Some(next) => current = next,
                 None => break,
             }
@@ -1213,18 +1218,18 @@ impl DateRange {
         let mut current = self.start_date.date;
         while current <= self.end_date.date {
             // Both the roll-back to Monday and the roll-forward to Sunday are
-            // checked: at the very edges of chrono's representable range either
+            // checked: at the very edges of the representable range either
             // can overflow, which would abort the process under
             // `panic = "abort"`. See finding R25.
             let days_since_monday = current.weekday().num_days_from_monday() as i64;
 
             let Some(start_date) =
-                current.checked_sub_signed(chrono::Duration::days(days_since_monday))
+                current.checked_sub_signed(bradshaw::Duration::days(days_since_monday))
             else {
                 break;
             };
 
-            let Some(end_date) = start_date.checked_add_signed(chrono::Duration::days(6)) else {
+            let Some(end_date) = start_date.checked_add_signed(bradshaw::Duration::days(6)) else {
                 break;
             };
 
@@ -1250,9 +1255,9 @@ impl DateRange {
             let start_date = current.with_day(1).unwrap_or(current);
 
             let end_date =
-                chrono::NaiveDate::from_ymd_opt(start_date.year(), start_date.month() + 1, 1)
+                bradshaw::NaiveDate::from_ymd_opt(start_date.year(), start_date.month() + 1, 1)
                     .unwrap_or(
-                        chrono::NaiveDate::from_ymd_opt(start_date.year() + 1, 1, 1)
+                        bradshaw::NaiveDate::from_ymd_opt(start_date.year() + 1, 1, 1)
                             .unwrap_or(start_date),
                     )
                     .pred_opt()
@@ -1283,7 +1288,7 @@ impl DateRange {
                 .with_day(1)
                 .unwrap_or(current);
 
-            let end_date = chrono::NaiveDate::from_ymd_opt(start_date.year() + 1, 1, 1)
+            let end_date = bradshaw::NaiveDate::from_ymd_opt(start_date.year() + 1, 1, 1)
                 .unwrap_or(start_date)
                 .pred_opt()
                 .unwrap_or(start_date);
@@ -5446,6 +5451,38 @@ pub fn owning_portal(instruction: &Instruction) -> Option<PortalIdentifier> {
 mod tests {
     use super::*;
 
+    /// An `Hour` is serialised as "2026-11-23 10". With chrono its parser could
+    /// not read that back (chrono's "%Y-%m-%d %H" needs the minutes too), so
+    /// an `Hour` never survived a round trip.
+    #[test]
+    fn test_hour_round_trips() {
+        let hour = Hour::parse("2026-11-23 10").unwrap_or_else(|e| unreachable!("{:?}", e));
+        assert_eq!(hour.to_string(), "2026-11-23 10");
+        assert_eq!(hour.timestamp(), 1_795_428_000);
+
+        let json = serde_json::to_string(&hour).unwrap_or_default();
+        assert_eq!(json, "\"2026-11-23 10\"");
+        let back: Hour = serde_json::from_str(&json).unwrap_or_else(|e| unreachable!("{:?}", e));
+        assert_eq!(back.to_string(), hour.to_string());
+
+        assert!(Hour::parse("2026-11-23 24").is_err());
+        assert!(Hour::parse("2026-11-23").is_err());
+
+        // `now` is UTC (read either side, in case an hour ends in between)
+        let before = bradshaw::Utc::now().format("%Y-%m-%d %H").to_string();
+        let now = Hour::now()
+            .unwrap_or_else(|e| unreachable!("{:?}", e))
+            .to_string();
+        let after = bradshaw::Utc::now().format("%Y-%m-%d %H").to_string();
+        assert!(
+            now == before || now == after,
+            "{} {} {}",
+            before,
+            now,
+            after
+        );
+    }
+
     #[test]
     fn test_user_identifier() {
         #[allow(clippy::unwrap_used)]
@@ -5616,7 +5653,7 @@ mod tests {
     #[test]
     fn test_date_parsing_is_bounded() {
         // Regression test for finding R25. `%Y` accepts a signed, unbounded
-        // digit count, so the whole chrono range used to parse - and a range
+        // digit count, so the whole representable range used to parse - and a range
         // spanning it made `days()` try to build a 191-million-element Vec.
         assert!(Date::parse("2026-07-30").is_ok());
         assert!(Date::parse("1970-01-01").is_ok());
@@ -5659,7 +5696,7 @@ mod tests {
         // iteration. `Date::parse` now bounds the year, but `from_chrono`
         // bypasses that, so the loops must terminate on their own (finding
         // R25).
-        let top = chrono::NaiveDate::MAX;
+        let top = bradshaw::NaiveDate::MAX;
         let range = DateRange::from_chrono(&top, &top);
 
         // Each of these must return, and must not grow without bound.
@@ -5672,7 +5709,7 @@ mod tests {
         let _ = range.end_time();
 
         // The same at the bottom of the range.
-        let bottom = chrono::NaiveDate::MIN;
+        let bottom = bradshaw::NaiveDate::MIN;
         let range = DateRange::from_chrono(&bottom, &bottom);
         assert!(range.days().len() <= 1);
         assert!(range.months().len() <= 1);

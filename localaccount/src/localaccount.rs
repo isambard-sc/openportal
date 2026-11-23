@@ -22,7 +22,7 @@
 //! and a later re-add. See `remove_user`.
 
 use anyhow::Result;
-use chrono::Utc;
+use bradshaw::Utc;
 use greatwestern::grammar::{ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping};
 use once_cell::sync::OnceCell;
 use std::collections::HashMap;
@@ -274,7 +274,7 @@ fn instance_group_name(instance: &Peer) -> String {
 ///
 async fn ensure_group_exists(
     group_name: &str,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<(), Error> {
     assert_not_expired(expires)?;
 
@@ -350,7 +350,7 @@ async fn sync_groups(
     local_user: &str,
     user: &UserIdentifier,
     instance: &Peer,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<(), Error> {
     assert_not_expired(expires)?;
 
@@ -403,7 +403,7 @@ async fn sync_groups(
 ///
 pub async fn add_project(
     project: &ProjectIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<ProjectMapping, Error> {
     assert_not_expired(expires)?;
     assert_not_internal_portal(project)?;
@@ -434,7 +434,7 @@ pub async fn add_project(
 ///
 pub async fn remove_project(
     project: &ProjectIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<ProjectMapping, Error> {
     assert_not_expired(expires)?;
 
@@ -491,7 +491,7 @@ pub async fn add_user(
     user: &UserIdentifier,
     instance: &Peer,
     homedir: &Option<String>,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<UserMapping, Error> {
     assert_not_expired(expires)?;
     assert_not_internal_portal(&user.project_identifier())?;
@@ -591,7 +591,7 @@ pub async fn add_user(
 ///
 pub async fn remove_user(
     user: &UserIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<UserMapping, Error> {
     assert_not_expired(expires)?;
 
@@ -692,7 +692,7 @@ pub async fn remove_user(
 ///
 async fn groups_for_user(
     local_user: &str,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Vec<String>, Error> {
     assert_not_expired(expires)?;
 
@@ -736,7 +736,7 @@ async fn groups_for_user(
 /// the login. `block_user` locks without expiring, which is a gap worth closing
 /// separately - it is not made worse here.
 ///
-async fn disable_user(local_user: &str, expires: &chrono::DateTime<Utc>) -> Result<(), Error> {
+async fn disable_user(local_user: &str, expires: &bradshaw::DateTime<Utc>) -> Result<(), Error> {
     assert_not_expired(expires)?;
 
     let cmds = get_commands()?;
@@ -769,7 +769,7 @@ async fn disable_user(local_user: &str, expires: &chrono::DateTime<Utc>) -> Resu
 /// Re-enable an account that `remove_user` disabled: take it out of the removed group,
 /// unlock it and clear its expiry.
 ///
-async fn enable_user(local_user: &str, expires: &chrono::DateTime<Utc>) -> Result<(), Error> {
+async fn enable_user(local_user: &str, expires: &bradshaw::DateTime<Utc>) -> Result<(), Error> {
     assert_not_expired(expires)?;
 
     let cmds = get_commands()?;
@@ -876,7 +876,7 @@ fn check_homedir(homedir: &str) -> Result<(), Error> {
 pub async fn update_homedir(
     user: &UserIdentifier,
     homedir: &str,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<(), Error> {
     assert_not_expired(expires)?;
     assert_not_internal_portal(&user.project_identifier())?;
@@ -920,7 +920,7 @@ pub async fn update_homedir(
 ///
 pub async fn get_groups(
     portal: &PortalIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Vec<ProjectMapping>, Error> {
     assert_not_expired(expires)?;
 
@@ -980,7 +980,7 @@ pub async fn get_groups(
 ///
 pub async fn get_users(
     project: &ProjectIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Vec<UserMapping>, Error> {
     assert_not_expired(expires)?;
 
@@ -1052,7 +1052,7 @@ pub async fn get_users(
 ///
 pub async fn get_project_mapping(
     project: &ProjectIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<ProjectMapping, Error> {
     assert_not_expired(expires)?;
 
@@ -1069,7 +1069,7 @@ pub async fn get_project_mapping(
 ///
 pub async fn get_user_mapping(
     user: &UserIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<UserMapping, Error> {
     assert_not_expired(expires)?;
 
@@ -1087,7 +1087,7 @@ pub async fn get_user_mapping(
 ///
 pub async fn is_existing_user(
     user: &UserIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     assert_not_expired(expires)?;
 
@@ -1104,7 +1104,7 @@ pub async fn is_existing_user(
 ///
 pub async fn is_existing_project(
     project: &ProjectIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     assert_not_expired(expires)?;
 
@@ -1144,7 +1144,7 @@ fn removed_group_name(cmds: &Commands) -> String {
 async fn is_user_in_group(
     local_user: &str,
     group: &str,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     assert_not_expired(expires)?;
 
@@ -1164,7 +1164,7 @@ async fn is_user_in_group(
 
 pub async fn is_blocked_user(
     user: &UserIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     assert_not_expired(expires)?;
 
@@ -1181,7 +1181,7 @@ pub async fn is_blocked_user(
 ///
 pub async fn is_removed_user(
     user: &UserIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     assert_not_expired(expires)?;
 
@@ -1199,7 +1199,7 @@ pub async fn is_removed_user(
 ///
 pub async fn block_user(
     user: &UserIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<UserMapping, Error> {
     assert_not_expired(expires)?;
 
@@ -1257,7 +1257,7 @@ pub async fn block_user(
 ///
 pub async fn unblock_user(
     user: &UserIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<UserMapping, Error> {
     assert_not_expired(expires)?;
 
@@ -1328,7 +1328,7 @@ const MANAGED_GID_MIN: u64 = 1000;
 ///
 pub async fn is_protected_project(
     project: &ProjectIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     assert_not_expired(expires)?;
 
@@ -1373,7 +1373,7 @@ pub async fn is_protected_project(
 ///
 pub async fn is_protected_user(
     user: &UserIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     assert_not_expired(expires)?;
 
@@ -1412,7 +1412,7 @@ pub async fn is_protected_user(
 pub async fn is_local_user_added(
     mapping: &UserMapping,
     instance: &Peer,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     assert_not_expired(expires)?;
 
@@ -1494,7 +1494,7 @@ pub async fn is_local_user_added(
 pub async fn is_local_user_removed(
     mapping: &UserMapping,
     instance: &Peer,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     assert_not_expired(expires)?;
 
@@ -1551,7 +1551,7 @@ pub async fn is_local_user_removed(
 ///
 pub async fn is_local_project_added(
     mapping: &ProjectMapping,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     assert_not_expired(expires)?;
 
@@ -1582,7 +1582,7 @@ pub async fn is_local_project_added(
 ///
 pub async fn is_local_project_removed(
     mapping: &ProjectMapping,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     assert_not_expired(expires)?;
 

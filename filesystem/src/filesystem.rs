@@ -639,12 +639,16 @@ async fn create_dir_native(
     // use a lock to ensure that only a single task can create directories
     // at a time - this should prevent overloading the filesystem and
     // reduce risk of filesystem-related race conditions
-    let now = chrono::Utc::now();
+    let now = bradshaw::Utc::now();
     let _guard = loop {
         match FS_LOCK.try_lock() {
             Ok(guard) => break guard,
             Err(_) => {
-                if chrono::Utc::now().signed_duration_since(now).num_seconds() > 15 {
+                if bradshaw::Utc::now()
+                    .signed_duration_since(now)
+                    .num_seconds()
+                    > 15
+                {
                     return Err(Error::State(
                         "Could not acquire filesystem lock after 15 seconds".to_string(),
                     ));
@@ -787,12 +791,16 @@ async fn create_dir_remote(
     }
 
     // Serialise directory creation with the same lock used by the native path.
-    let now = chrono::Utc::now();
+    let now = bradshaw::Utc::now();
     let _guard = loop {
         match FS_LOCK.try_lock() {
             Ok(guard) => break guard,
             Err(_) => {
-                if chrono::Utc::now().signed_duration_since(now).num_seconds() > 15 {
+                if bradshaw::Utc::now()
+                    .signed_duration_since(now)
+                    .num_seconds()
+                    > 15
+                {
                     return Err(Error::State(
                         "Could not acquire filesystem lock after 15 seconds".to_string(),
                     ));

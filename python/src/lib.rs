@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use bradshaw::Utc;
 use greatwestern::grammar;
 use greatwestern::storagereport;
 use greatwestern::usagereport;
@@ -2186,7 +2186,7 @@ struct DateRange(grammar::DateRange);
 #[pymethods]
 impl DateRange {
     #[new]
-    fn new(start_date: chrono::NaiveDate, end_date: chrono::NaiveDate) -> PyResult<Self> {
+    fn new(start_date: bradshaw::NaiveDate, end_date: bradshaw::NaiveDate) -> PyResult<Self> {
         Ok(grammar::DateRange::from_chrono(&start_date, &end_date).into())
     }
 
@@ -2259,17 +2259,17 @@ impl DateRange {
     }
 
     #[staticmethod]
-    fn week(date: chrono::NaiveDate) -> PyResult<Self> {
+    fn week(date: bradshaw::NaiveDate) -> PyResult<Self> {
         Ok(grammar::Date::from_chrono(&date).week().into())
     }
 
     #[staticmethod]
-    fn month(date: chrono::NaiveDate) -> PyResult<Self> {
+    fn month(date: bradshaw::NaiveDate) -> PyResult<Self> {
         Ok(grammar::Date::from_chrono(&date).month().into())
     }
 
     #[staticmethod]
-    fn year(date: chrono::NaiveDate) -> PyResult<Self> {
+    fn year(date: bradshaw::NaiveDate) -> PyResult<Self> {
         Ok(grammar::Date::from_chrono(&date).year().into())
     }
 
@@ -3805,7 +3805,7 @@ impl ProjectUsageReport {
         Ok(self.0.usage(&user.0).into())
     }
 
-    fn get_report(&self, date: chrono::NaiveDate) -> PyResult<ProjectUsageReport> {
+    fn get_report(&self, date: bradshaw::NaiveDate) -> PyResult<ProjectUsageReport> {
         Ok(self.0.get_report(&grammar::Date::from_chrono(&date)).into())
     }
 
@@ -3855,7 +3855,7 @@ impl ProjectUsageReport {
 
     fn set_report(
         &mut self,
-        date: chrono::NaiveDate,
+        date: bradshaw::NaiveDate,
         report: &DailyProjectUsageReport,
     ) -> PyResult<()> {
         self.0
@@ -3865,7 +3865,7 @@ impl ProjectUsageReport {
 
     fn add_report(
         &mut self,
-        date: chrono::NaiveDate,
+        date: bradshaw::NaiveDate,
         report: &DailyProjectUsageReport,
     ) -> PyResult<()> {
         self.0
@@ -3888,7 +3888,7 @@ impl ProjectUsageReport {
         Ok(())
     }
 
-    fn set_day_complete(&mut self, date: chrono::NaiveDate) -> PyResult<()> {
+    fn set_day_complete(&mut self, date: bradshaw::NaiveDate) -> PyResult<()> {
         self.0.set_day_complete(&grammar::Date::from_chrono(&date));
         Ok(())
     }
@@ -4062,7 +4062,7 @@ impl ProjectStorageReport {
     /// Return the snapshot for a specific calendar date as a
     /// `ProjectStorageReport`. Returns the top-level data if `date` matches
     /// the current snapshot's date, or an empty report if not found.
-    fn get_report(&self, date: chrono::NaiveDate) -> PyResult<ProjectStorageReport> {
+    fn get_report(&self, date: bradshaw::NaiveDate) -> PyResult<ProjectStorageReport> {
         Ok(self.0.get_report(&grammar::Date::from_chrono(&date)).into())
     }
 
@@ -5490,7 +5490,7 @@ impl SpendProfileEntry {
     #[new]
     #[pyo3(signature = (from_date, minimum=None, maximum=None))]
     fn new(
-        from_date: chrono::NaiveDate,
+        from_date: bradshaw::NaiveDate,
         minimum: Option<AllocationOrStr>,
         maximum: Option<AllocationOrStr>,
     ) -> PyResult<Self> {
@@ -5539,7 +5539,7 @@ impl SpendProfileEntry {
 
     /// The date these controls apply from
     #[getter(from_date)]
-    fn applies_from(&self) -> PyResult<chrono::NaiveDate> {
+    fn applies_from(&self) -> PyResult<bradshaw::NaiveDate> {
         Ok(self.0.from().to_chrono())
     }
 
@@ -6073,12 +6073,12 @@ impl AwardDetails {
     }
 
     #[getter]
-    fn start_date(&self) -> PyResult<Option<chrono::NaiveDate>> {
+    fn start_date(&self) -> PyResult<Option<bradshaw::NaiveDate>> {
         Ok(self.0.start_date().map(|date| date.to_chrono()))
     }
 
     #[setter]
-    fn set_start_date(&mut self, start_date: Option<chrono::NaiveDate>) -> PyResult<()> {
+    fn set_start_date(&mut self, start_date: Option<bradshaw::NaiveDate>) -> PyResult<()> {
         if let Some(date) = start_date {
             self.0.set_start_date(grammar::Date::from_chrono(&date));
         } else {
@@ -6093,12 +6093,12 @@ impl AwardDetails {
     }
 
     #[getter]
-    fn end_date(&self) -> PyResult<Option<chrono::NaiveDate>> {
+    fn end_date(&self) -> PyResult<Option<bradshaw::NaiveDate>> {
         Ok(self.0.end_date().map(|date| date.to_chrono()))
     }
 
     #[setter]
-    fn set_end_date(&mut self, end_date: Option<chrono::NaiveDate>) -> PyResult<()> {
+    fn set_end_date(&mut self, end_date: Option<bradshaw::NaiveDate>) -> PyResult<()> {
         if let Some(date) = end_date {
             self.0.set_end_date(grammar::Date::from_chrono(&date));
         } else {
@@ -6265,7 +6265,10 @@ impl AwardDetails {
     }
 
     #[setter]
-    fn set_earliest_approve(&mut self, dt: Option<chrono::DateTime<chrono::Utc>>) -> PyResult<()> {
+    fn set_earliest_approve(
+        &mut self,
+        dt: Option<bradshaw::DateTime<bradshaw::Utc>>,
+    ) -> PyResult<()> {
         match dt {
             Some(dt) => self.0.set_earliest_approve(dt),
             None => self.0.clear_earliest_approve(),

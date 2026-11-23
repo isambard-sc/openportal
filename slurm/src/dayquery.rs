@@ -87,16 +87,16 @@ pub struct DayRecords {
 /// Ask Slurm for every job that overlapped one window.
 ///
 pub async fn jobs_between(
-    start_time: &chrono::DateTime<chrono::Utc>,
-    end_time: &chrono::DateTime<chrono::Utc>,
+    start_time: &bradshaw::DateTime<bradshaw::Utc>,
+    end_time: &bradshaw::DateTime<bradshaw::Utc>,
     nodes: &SlurmNodes,
     query: &JobQuery,
-    now: &chrono::DateTime<chrono::Utc>,
+    now: &bradshaw::DateTime<bradshaw::Utc>,
     timeout: std::time::Duration,
 ) -> Result<Vec<SlurmJob>> {
     // a long expiry: this is a one-shot tool with a person waiting on it, not
     // an agent servicing a job with a deadline
-    let expires = *now + chrono::Duration::hours(1);
+    let expires = *now + bradshaw::Duration::hours(1);
 
     let mut args = vec![
         "--noconvert".to_string(),
@@ -143,7 +143,7 @@ pub async fn jobs_on_day(
     day: &Date,
     nodes: &SlurmNodes,
     query: &JobQuery,
-    now: &chrono::DateTime<chrono::Utc>,
+    now: &bradshaw::DateTime<bradshaw::Utc>,
 ) -> DayRecords {
     let start_time = day.day().start_time().and_utc();
     let end_time = day.day().end_time().and_utc();

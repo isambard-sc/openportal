@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::Result;
-use chrono::Utc;
+use bradshaw::Utc;
 use std::collections::HashMap;
 
 // import freeipa directory as a module
@@ -278,7 +278,7 @@ async fn get_home_dir(
     me: &str,
     sender: &Peer,
     mapping: &UserMapping,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<String, Error> {
     assert_not_expired(expires)?;
 

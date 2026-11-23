@@ -97,6 +97,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Changed
 
+- **OpenPortal no longer depends on `chrono`**, which RustSec has flagged as
+  unmaintained (RUSTSEC-2026-0543). A new crate, `bradshaw`, provides the
+  small part of a date library OpenPortal uses, on the standard library alone,
+  so no agent depends on a date library whose next release nobody is
+  reviewing. What to know:
+  - **The wire format is unchanged.** Timestamps are still RFC 3339
+    (`"2026-11-23T10:00:00Z"`), dates `"2026-11-23"`, and `Job` times Unix
+    seconds. bradshaw is tested against vectors recorded from chrono 0.4.45:
+    every serialised form, display format and calendar calculation
+    OpenPortal uses.
+  - **Parsing is RFC 3339.** An offset must have its colon (`+01:00`); chrono
+    also took `+0100`. A leap second (`:60`) is read as the start of the next
+    minute.
+  - **"Today" and "this hour" are UTC.** `Date::today()` and `Hour::now()`
+    used the agent host's local time, while every other time, including the
+    hours Slurm usage is collected for, was UTC. On a host set to UTC nothing
+    changes.
+  - **Date and time arithmetic saturates** at the ends of the range instead of
+    panicking, since release builds abort on a panic.
+  - **Python:** a `datetime` in any time zone is now accepted where a UTC time
+    is expected, and converted to UTC; chrono's conversion accepted only
+    `timezone.utc` itself. A naive `datetime` is still refused.
+  - **Rust library users (breaking):** use `bradshaw` where you used `chrono`.
+    The names are the same, except that there is no `Local` or `TimeZone`:
+    use `DateTime::from_timestamp(secs, nanos)` for
+    `Utc.timestamp_opt(secs, nanos).single()`.
+  - **The Python stub generator still uses chrono.** `pyo3-stub-gen` depends
+    on it unconditionally, so it remains in the Python bindings' build, though
+    none of OpenPortal's own code uses it and no agent links it.
+
 - **Breaking, for code built on the Rust crate, the Python module or the Java
   client** (the wire format is unchanged):
   - **A report needs a unit before it holds figures.**
@@ -137,6 +167,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   §3.7.4.
 
 ### Fixed
+
+- **An `Hour` can be read back.** An `Hour` was serialised as `"2026-11-23 10"`,
+  but its parser used chrono's `"%Y-%m-%d %H"`, which chrono cannot parse
+  without the minutes, so deserialising an `Hour` always failed.
 
 - **`Uuid.from_string` raises `ValueError` for an invalid UUID** in the Python
   module. It unwrapped the parse, and release builds abort on a panic, so a

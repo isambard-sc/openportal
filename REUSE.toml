@@ -48,3 +48,8 @@ path = "greatwestern/tests/data/project-usage-report.json"
 SPDX-FileCopyrightText = "© 2026 Christopher Woods <Christopher.Woods@bristol.ac.uk>"
 SPDX-License-Identifier = "CC-BY-SA-4.0"
 
+
+[[annotations]]
+path = ["bradshaw/tests/golden.tsv", "bradshaw/tests/golden_generator.rs.txt"]
+SPDX-FileCopyrightText = "© 2026 Christopher Woods <Christopher.Woods@bristol.ac.uk>"
+SPDX-License-Identifier = "MIT"

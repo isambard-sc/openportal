@@ -113,7 +113,64 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   - **Scaling a `Usage` rounds to the nearest count** (ties to even) rather than
     truncating, which always rounded down.
 
+- **Breaking, for sites using Lustre default quotas: `unassigned_project_ids`
+  no longer has a default.** It was `[0, 1]`, which assumed every site tags
+  its roots with project ID `1`. It must now be set, and the agent refuses to
+  start if a Lustre volume has a `default_quota` while it is unset, or while a
+  root of that volume does not carry one of the listed IDs with the inherit
+  flag. The start-up error names the root and the fix
+  (`lfs project -p 1 -s <root>`). Running without it is valid when no Lustre
+  volume has a default quota.
+
+  **Upgrade note:** a site that relied on the default, with roots tagged
+  `1 P`, adds this to its Lustre engine and nothing else changes:
+
+  ```toml
+  [quota_engines.lustre]
+  unassigned_project_ids = [1]
+  ```
+
+  Check each root first with `lfs project -d <root>`: it should print
+  `1 P <root>`. A site whose roots are untagged (`0 -`) was never getting
+  default quotas on new directories, and now finds out at start-up. See
+  [`docs/specifications/agent-configuration.md`](docs/specifications/agent-configuration.md)
+  §3.7.4.
+
 ### Fixed
+
+- **A Lustre quota is no longer reported as set while its directories are
+  still being walked, and a walk that is interrupted is finished.** Giving an
+  existing directory tree its quota ID (`lfs project -srp`) can take hours.
+  Before, the job waited for up to five hours, far past its two-minute expiry,
+  and `add_local_user` / `add_local_project` then reported success even though
+  the default quota had not been set. A resubmission saw the top directory
+  already tagged - `lfs` tags it first - and skipped the default, so the
+  directory was left with no limit. Now:
+  - **The limit is set first.** It belongs to the quota ID, so it applies to
+    each file as soon as the walk reaches it.
+  - **The walk runs in the background.** The job waits for it until just before
+    it expires, then fails with a "not ready" error. A resubmission joins the
+    same walk (previously a running walk was invisible to the queue, so a
+    resubmission started a second one), and succeeds once the walk has
+    finished. A failed walk fails the job with its error.
+  - **Walks log** when they are queued, start, are still running (every 30
+    minutes), and finish or fail, with how long they took.
+  - **A marker records each walk.** `.openportal_quota` in the top directory
+    says `started` while a walk runs and `complete` once it has finished, with
+    the UTC times. A tree whose marker still says `started` - the agent
+    restarted mid-walk, or the walk failed - is walked again on the next
+    request. A tree tagged before this release, with no marker, is taken to be
+    complete. The marker is written by the agent's user, mode `0400`, and one
+    it did not write is ignored, so the worst a user can do by touching it is
+    cause a repeat walk.
+  - **`recursive_timeout_secs` is used.** The walk timeout was hard-coded to
+    five hours.
+  - **Failures are reported.** A quota that could not be read or set when
+    applying a default was logged as a warning and the job reported success;
+    it now fails the job.
+  - **A project directory still being walked does not hold up a new member's
+    own directories,** which are created regardless; the job reports "not
+    ready" until both are done.
 
 - **The site portal API says what happens to a `get_award` reply.** A new §4.1.3
   shows what the reference awarding portal, `waldur-mastermind`, does with

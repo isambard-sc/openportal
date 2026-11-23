@@ -12,7 +12,7 @@ use rand::seq::IteratorRandom;
 use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use templemeads::job::assert_not_expired;
@@ -20,6 +20,8 @@ use templemeads::Error;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
+
+use crate::quotamarker::{MarkerRead, QuotaMarker};
 
 use crate::volumeconfig::{ProjectVolumeConfig, UserVolumeConfig};
 
@@ -384,23 +386,29 @@ pub struct LustreEngineConfig {
     recursive_timeout_secs: u64,
 
     /// Lustre project IDs that mean "no project ID has been assigned to this
-    /// directory yet" (default: `[0, 1]`).
+    /// directory yet". There is no default: an operator must say which IDs these
+    /// are, because guessing wrong either overwrites a quota or never applies one.
     ///
     /// A new directory inherits the project ID of its parent when the parent has
-    /// the inherit (`P`) flag set. Sites commonly tag the filesystem roots (e.g.
-    /// `/scratch`, `/projects`) with a catch-all project such as `1`, so every
-    /// newly created user or project directory starts out with that ID. A
-    /// directory still carrying one of these IDs has never been given its own
-    /// quota ID, so it is treated as uninitialised: it has no quota of its own,
-    /// and the volume's default quota may be applied to it.
+    /// the inherit (`P`) flag set. Sites tag the volume roots (e.g. `/scratch`,
+    /// `/projects`) with a catch-all project such as `1`
+    /// (`lfs project -p 1 -s /projects`), so every newly created user or project
+    /// directory starts out as `1 P`. A directory still carrying one of these IDs
+    /// has never been given its own quota ID, so it is treated as uninitialised:
+    /// it has no quota of its own, and the volume's default quota may be applied
+    /// to it.
     ///
     /// Only IDs read together with the inherit flag count. A directory under an
     /// untagged root reads as `0 -`, which `get_lustre_id_from_dir` reports as
-    /// `None` - the same as a directory whose quota was explicitly cleared - so
-    /// it is a mismatch, not unassigned. The `0` here therefore only matches the
-    /// `0 P` state (inherit flag set, no ID chosen).
-    #[serde(default = "default_unassigned_project_ids")]
-    unassigned_project_ids: Vec<u64>,
+    /// `None` - the same as a directory whose quota was explicitly cleared - so it
+    /// is never unassigned, whatever is listed here.
+    ///
+    /// Unset, no ID counts as unassigned. That is valid, but a volume that uses
+    /// this engine with a `default_quota` then refuses to start, since the default
+    /// could never be applied; and at start-up each such volume's roots must carry
+    /// one of these IDs with the inherit flag. See `check_default_quota_root`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unassigned_project_ids: Option<Vec<u64>>,
 
     /// Map from volume name to quota ID generation strategy
     ///
@@ -444,10 +452,6 @@ fn default_recursive_timeout() -> u64 {
     18000 // 5 hours
 }
 
-fn default_unassigned_project_ids() -> Vec<u64> {
-    vec![0, 1]
-}
-
 impl Default for LustreEngineConfig {
     fn default() -> Self {
         Self {
@@ -455,7 +459,7 @@ impl Default for LustreEngineConfig {
             max_runners: default_max_runners(),
             command_timeout_secs: default_command_timeout(),
             recursive_timeout_secs: default_recursive_timeout(),
-            unassigned_project_ids: default_unassigned_project_ids(),
+            unassigned_project_ids: None,
             id_strategies: HashMap::new(),
         }
     }
@@ -487,8 +491,14 @@ impl LustreEngineConfig {
     }
 
     /// The Lustre project IDs that mean "not assigned yet" - see the field docs.
+    /// Empty when the operator has not set any.
     pub fn unassigned_project_ids(&self) -> &[u64] {
-        &self.unassigned_project_ids
+        self.unassigned_project_ids.as_deref().unwrap_or_default()
+    }
+
+    /// Whether the operator has set `unassigned_project_ids` at all.
+    pub fn has_unassigned_project_ids(&self) -> bool {
+        self.unassigned_project_ids.is_some()
     }
 }
 
@@ -667,154 +677,361 @@ pub async fn runner(expires: &chrono::DateTime<Utc>) -> Result<LockedRunner, Err
     }
 }
 
-/// Command queue for slow operations (like lfs project -srp)
-/// Commands are deduplicated - if the same command is queued multiple times,
-/// only one instance runs and all waiters are notified when it completes.
+/// How often a walk that is still running says so in the log.
+const WALK_PROGRESS_INTERVAL: Duration = Duration::from_secs(30 * 60);
+
+/// How long before a job expires a caller stops waiting for a walk, so that it
+/// can still report back that the walk is not finished.
+const WALK_WAIT_MARGIN: Duration = Duration::from_secs(15);
+
+/// What a recursive walk of a directory tree does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalkKind {
+    /// `lfs project -srp <id> <dir>`: give the tree the quota ID. Recorded in
+    /// the directory's `.openportal_quota` marker - see `crate::quotamarker`.
+    Assign(u64),
+
+    /// `lfs project -Cr <dir>`: clear the tree's quota ID. Removes the marker.
+    Clear,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WalkStatus {
+    Queued,
+    Running,
+    Finished,
+    Failed(String),
+}
+
+impl WalkStatus {
+    fn is_done(&self) -> bool {
+        matches!(self, WalkStatus::Finished | WalkStatus::Failed(_))
+    }
+}
+
+/// A recursive walk, queued or running.
 #[derive(Debug)]
-struct QueuedCommand {
-    /// The lfs command to run
+struct Walk {
     lfs_command: String,
-    /// The command arguments
     args: Vec<String>,
-    /// Waiters that are notified when the command completes
-    waiters: Vec<tokio::sync::oneshot::Sender<Result<String, Error>>>,
+    directory: PathBuf,
+    kind: WalkKind,
+    timeout: Duration,
+    status: tokio::sync::watch::Sender<WalkStatus>,
 }
 
-/// FIFO queue of commands to run. Only one command runs at a time.
-static COMMAND_QUEUE: Lazy<Arc<Mutex<Vec<QueuedCommand>>>> =
-    Lazy::new(|| Arc::new(Mutex::new(Vec::new())));
-
-/// Flag indicating if the background worker is running
-static WORKER_STARTED: Lazy<Arc<Mutex<bool>>> = Lazy::new(|| Arc::new(Mutex::new(false)));
-
-/// Start the background worker that processes queued commands
-async fn start_queue_worker() {
-    let mut started = WORKER_STARTED.lock().await;
-    if *started {
-        return; // Worker already running
-    }
-    *started = true;
-    drop(started);
-
-    tracing::info!("Starting command queue background worker");
-
-    tokio::spawn(async {
-        loop {
-            // Get next command from queue
-            let mut queue = COMMAND_QUEUE.lock().await;
-            let command = queue.pop();
-            drop(queue);
-
-            match command {
-                Some(mut cmd) => {
-                    // Run the command (without expiry check since this is background)
-                    let lfs_command = cmd.lfs_command.clone();
-
-                    tracing::info!(
-                        "Processing queued command: {} {}",
-                        lfs_command,
-                        cmd.args.join(" ")
-                    );
-
-                    // Build and execute command
-                    let cmd_parts: Vec<&str> = lfs_command.split_whitespace().collect();
-                    let result = if let Some((program, initial_args)) = cmd_parts.split_first() {
-                        let mut command = Command::new(program);
-                        command.args(initial_args);
-                        command.args(&cmd.args);
-
-                        // Use a very long timeout (5 hours)
-                        match timeout(Duration::from_secs(18000), command.output()).await {
-                            Ok(Ok(output)) => {
-                                if output.status.success() {
-                                    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-                                } else {
-                                    let stderr = String::from_utf8_lossy(&output.stderr);
-                                    Err(Error::Failed(format!(
-                                        "Queued lfs command failed: {}",
-                                        stderr.trim()
-                                    )))
-                                }
-                            }
-                            Ok(Err(e)) => Err(Error::Failed(format!(
-                                "Failed to execute queued lfs command: {}",
-                                e
-                            ))),
-                            Err(_) => Err(Error::Timeout(
-                                "Queued lfs command timed out after 5 hours".to_string(),
-                            )),
-                        }
-                    } else {
-                        Err(Error::Misconfigured("lfs_command is empty".to_string()))
-                    };
-
-                    // Notify all waiters
-                    // We need to handle success vs error separately since Error doesn't implement Clone
-                    match &result {
-                        Ok(output) => {
-                            for waiter in cmd.waiters.drain(..) {
-                                let _ = waiter.send(Ok(output.clone()));
-                            }
-                        }
-                        Err(e) => {
-                            let error_msg = e.to_string();
-                            for waiter in cmd.waiters.drain(..) {
-                                let _ = waiter.send(Err(Error::Failed(error_msg.clone())));
-                            }
-                        }
-                    }
-
-                    tracing::debug!(
-                        "Queued command completed: {} {}",
-                        lfs_command,
-                        cmd.args.join(" ")
-                    );
-                }
-                None => {
-                    // Queue is empty, wait a bit
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
+impl Walk {
+    fn describe(&self) -> String {
+        match self.kind {
+            WalkKind::Assign(id) => {
+                format!("assigning quota ID {} to {}", id, self.directory.display())
             }
-        }
-    });
-}
-
-/// Queue a command for background execution
-/// Returns a receiver that will be notified when the command completes
-async fn queue_command(
-    lfs_command: &str,
-    args: Vec<String>,
-) -> tokio::sync::oneshot::Receiver<Result<String, Error>> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-
-    let mut queue = COMMAND_QUEUE.lock().await;
-
-    // Check if this command is already queued
-    for queued_cmd in queue.iter_mut() {
-        if queued_cmd.args == args && queued_cmd.lfs_command == lfs_command {
-            // Command already queued, just add our waiter
-            tracing::debug!(
-                "Command already queued, adding waiter: {} {}",
-                lfs_command,
-                args.join(" ")
-            );
-            queued_cmd.waiters.push(tx);
-            return rx;
+            WalkKind::Clear => format!("clearing the quota ID from {}", self.directory.display()),
         }
     }
+}
 
-    // New command, add to queue
-    tracing::debug!("Queueing new command: {} {}", lfs_command, args.join(" "));
-    queue.insert(
-        0,
-        QueuedCommand {
-            lfs_command: lfs_command.to_string(),
-            args,
-            waiters: vec![tx],
-        },
+/// Every walk that is queued or running, oldest first. A single worker runs
+/// them one at a time, because each one scans a whole directory tree. A walk
+/// stays here, with its status, until it has finished, so that a request for
+/// the same walk - a resubmitted job - joins it rather than queueing another.
+///
+/// This lives only in memory. What survives a restart is the marker each walk
+/// writes - see `crate::quotamarker`.
+static WALKS: Lazy<Mutex<Vec<Arc<Walk>>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+/// Wakes the worker when a walk is queued.
+static WALK_QUEUED: Lazy<tokio::sync::Notify> = Lazy::new(tokio::sync::Notify::new);
+
+/// Whether the worker has been started. It runs on a thread of its own, with
+/// its own runtime, so that it lives as long as the process does whatever
+/// runtime the job that first queued a walk was running on.
+static WALK_WORKER_STARTED: Lazy<std::sync::Mutex<bool>> =
+    Lazy::new(|| std::sync::Mutex::new(false));
+
+fn start_walk_worker() -> Result<(), Error> {
+    let mut started = WALK_WORKER_STARTED
+        .lock()
+        .map_err(|_| Error::Failed("The walk worker lock is poisoned".to_string()))?;
+
+    if *started {
+        return Ok(());
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| Error::Failed(format!("Could not start the walk worker: {}", e)))?;
+
+    std::thread::Builder::new()
+        .name("lustre-walks".to_string())
+        .spawn(move || runtime.block_on(walk_worker()))
+        .map_err(|e| Error::Failed(format!("Could not start the walk worker: {}", e)))?;
+
+    *started = true;
+
+    tracing::info!("Started the Lustre directory walk worker");
+
+    Ok(())
+}
+
+async fn walk_worker() {
+    loop {
+        let next = WALKS
+            .lock()
+            .await
+            .iter()
+            .find(|walk| *walk.status.borrow() == WalkStatus::Queued)
+            .cloned();
+
+        let Some(walk) = next else {
+            WALK_QUEUED.notified().await;
+            continue;
+        };
+
+        walk.status.send_replace(WalkStatus::Running);
+
+        let status = match run_walk(&walk).await {
+            Ok(()) => WalkStatus::Finished,
+            Err(e) => WalkStatus::Failed(e.to_string()),
+        };
+
+        // Publish the result before leaving the registry, so that anyone
+        // who joins in between sees it rather than queueing a repeat.
+        walk.status.send_replace(status);
+
+        WALKS
+            .lock()
+            .await
+            .retain(|queued| !Arc::ptr_eq(queued, &walk));
+    }
+}
+
+/// Run one walk to completion, logging its start, its progress every
+/// `WALK_PROGRESS_INTERVAL`, and how it ended and how long it took.
+async fn run_walk(walk: &Walk) -> Result<(), Error> {
+    let started_at = Utc::now();
+    let clock = tokio::time::Instant::now();
+    let description = walk.describe();
+
+    tracing::info!(
+        "Walk started: {} ({} {}), timeout {}s",
+        description,
+        walk.lfs_command,
+        walk.args.join(" "),
+        walk.timeout.as_secs()
     );
 
-    rx
+    if let WalkKind::Assign(id) = walk.kind {
+        // Without this, an interrupted walk would later look finished - so
+        // the walk does not start unless it can be recorded.
+        crate::quotamarker::write_marker(
+            &walk.directory,
+            &crate::quotamarker::QuotaMarker::started(id, started_at),
+        )
+        .map_err(|e| {
+            tracing::error!("Walk failed before it started: {}: {}", description, e);
+            e
+        })?;
+    }
+
+    let result = run_walk_command(walk, &description, clock).await;
+
+    let elapsed = clock.elapsed().as_secs();
+
+    match &result {
+        Ok(()) => {
+            let recorded = match walk.kind {
+                WalkKind::Assign(id) => crate::quotamarker::write_marker(
+                    &walk.directory,
+                    &crate::quotamarker::QuotaMarker::complete(id, Some(started_at), Utc::now()),
+                ),
+                WalkKind::Clear => crate::quotamarker::remove_marker(&walk.directory),
+            };
+
+            if let Err(e) = recorded {
+                // The walk itself succeeded. The marker still says "started",
+                // so the worst case is that the walk is repeated.
+                tracing::warn!("Walk finished, but could not update its marker: {}", e);
+            }
+
+            tracing::info!("Walk finished after {}s: {}", elapsed, description);
+        }
+        Err(e) => {
+            tracing::error!("Walk failed after {}s: {}: {}", elapsed, description, e);
+        }
+    }
+
+    result
+}
+
+async fn run_walk_command(
+    walk: &Walk,
+    description: &str,
+    clock: tokio::time::Instant,
+) -> Result<(), Error> {
+    let cmd_parts: Vec<&str> = walk.lfs_command.split_whitespace().collect();
+    let (program, initial_args) = cmd_parts
+        .split_first()
+        .ok_or_else(|| Error::Misconfigured("lfs_command is empty".to_string()))?;
+
+    let mut command = Command::new(program);
+    command.args(initial_args);
+    command.args(&walk.args);
+    // so that a walk that times out is stopped, not left running unseen
+    command.kill_on_drop(true);
+
+    let output = command.output();
+    tokio::pin!(output);
+
+    let deadline = tokio::time::sleep(walk.timeout);
+    tokio::pin!(deadline);
+
+    let mut progress =
+        tokio::time::interval_at(clock + WALK_PROGRESS_INTERVAL, WALK_PROGRESS_INTERVAL);
+
+    let output = loop {
+        tokio::select! {
+            output = &mut output => break output,
+            _ = &mut deadline => {
+                return Err(Error::Timeout(format!(
+                    "lfs did not finish within the recursive timeout of {}s",
+                    walk.timeout.as_secs()
+                )));
+            }
+            _ = progress.tick() => {
+                tracing::info!(
+                    "Walk still running after {} minutes: {}",
+                    clock.elapsed().as_secs() / 60,
+                    description
+                );
+            }
+        }
+    };
+
+    let output = output.map_err(|e| Error::Failed(format!("Failed to execute lfs: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+
+        // a walk of a large tree can report a line per file - keep the end
+        let tail: String = {
+            let chars: Vec<char> = stderr.chars().collect();
+            let skip = chars.len().saturating_sub(2000);
+            chars.into_iter().skip(skip).collect()
+        };
+
+        return Err(Error::Failed(format!(
+            "lfs {} failed ({}): {}",
+            walk.args.join(" "),
+            output.status,
+            tail
+        )));
+    }
+
+    Ok(())
+}
+
+/// Queue a walk, or join the identical one that is already queued or running,
+/// and return a handle on its status.
+async fn enqueue_walk(
+    lfs_command: &str,
+    directory: &Path,
+    kind: WalkKind,
+    timeout: Duration,
+) -> Result<tokio::sync::watch::Receiver<WalkStatus>, Error> {
+    let directory_str = directory
+        .to_str()
+        .ok_or_else(|| Error::Incompatible("Directory path contains invalid UTF-8".to_string()))?;
+
+    let args: Vec<String> = match kind {
+        WalkKind::Assign(id) => vec![
+            "project".to_string(),
+            "-srp".to_string(),
+            id.to_string(),
+            directory_str.to_string(),
+        ],
+        WalkKind::Clear => vec![
+            "project".to_string(),
+            "-Cr".to_string(),
+            directory_str.to_string(),
+        ],
+    };
+
+    start_walk_worker()?;
+
+    let mut walks = WALKS.lock().await;
+
+    if let Some(walk) = walks
+        .iter()
+        .find(|walk| walk.lfs_command == lfs_command && walk.args == args)
+    {
+        tracing::info!(
+            "Joining the walk already {}: {}",
+            match *walk.status.borrow() {
+                WalkStatus::Queued => "queued",
+                WalkStatus::Running => "running",
+                _ => "finishing",
+            },
+            walk.describe()
+        );
+        return Ok(walk.status.subscribe());
+    }
+
+    let (status, receiver) = tokio::sync::watch::channel(WalkStatus::Queued);
+
+    let walk = Arc::new(Walk {
+        lfs_command: lfs_command.to_string(),
+        args,
+        directory: directory.to_path_buf(),
+        kind,
+        timeout,
+        status,
+    });
+
+    tracing::info!(
+        "Walk queued behind {} other(s): {}",
+        walks.len(),
+        walk.describe()
+    );
+
+    walks.push(walk);
+    drop(walks);
+
+    WALK_QUEUED.notify_one();
+
+    Ok(receiver)
+}
+
+/// Wait for a walk until shortly before `expires`. Returns `Ok(true)` if it
+/// finished, `Ok(false)` if it is still queued or running (it carries on in the
+/// background), and the error if it failed.
+async fn wait_for_walk(
+    mut status: tokio::sync::watch::Receiver<WalkStatus>,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    let remaining = (*expires - Utc::now())
+        .to_std()
+        .unwrap_or(Duration::ZERO)
+        .saturating_sub(WALK_WAIT_MARGIN);
+
+    let waited = tokio::time::timeout(remaining, async {
+        status
+            .wait_for(WalkStatus::is_done)
+            .await
+            .map(|status| status.clone())
+    })
+    .await;
+
+    match waited {
+        Ok(Ok(WalkStatus::Failed(e))) => Err(Error::Failed(e)),
+        Ok(Ok(_)) => Ok(true),
+        Ok(Err(_)) => Err(Error::Failed(
+            "The directory walk ended without reporting a result".to_string(),
+        )),
+        Err(_) => Ok(false),
+    }
 }
 
 /// Lustre filesystem quota engine implementation.
@@ -841,6 +1058,107 @@ impl LustreEngine {
             self.config.max_runners()
         );
         Ok(())
+    }
+
+    /// Check, at start-up, that a default quota on `volume` can ever be applied
+    /// to the directories created under `root`.
+    ///
+    /// The default is applied only to a directory that still carries one of the
+    /// `unassigned_project_ids`, and a new directory carries an ID only by
+    /// inheriting it from its parent. So the root must carry a listed ID with the
+    /// inherit flag (e.g. `1 P`). An untagged root (`0 -`) or one tagged with an
+    /// unlisted ID would make every new directory look as if its quota had been
+    /// set deliberately, and the default would silently never be applied - so the
+    /// agent refuses to start instead, naming the fix.
+    ///
+    /// A root whose ID cannot be read is also refused: the check has not passed.
+    pub async fn check_default_quota_root(
+        &self,
+        volume: &Volume,
+        root: &Path,
+    ) -> Result<(), Error> {
+        if !self.config.has_unassigned_project_ids() {
+            return Err(Error::Misconfigured(format!(
+                "Volume '{}' has a default_quota on a Lustre quota engine, but the engine \
+                 does not set unassigned_project_ids. The default can only be applied to a \
+                 directory carrying one of those IDs, so say which they are - typically the \
+                 ID the volume roots are tagged with, e.g. unassigned_project_ids = [1].",
+                volume
+            )));
+        }
+
+        if is_dry_run() {
+            tracing::info!(
+                "DRY RUN: not checking the Lustre project ID of root {} of volume '{}'",
+                root.display(),
+                volume
+            );
+            return Ok(());
+        }
+
+        let expires = Utc::now()
+            + chrono::Duration::seconds(
+                i64::try_from(self.config.command_timeout_secs)
+                    .unwrap_or(i64::MAX / 2)
+                    .saturating_add(30)
+                    .min(86400),
+            );
+
+        let unassigned = self.config.unassigned_project_ids();
+
+        let current = self
+            .get_lustre_id_from_dir(root, &expires)
+            .await
+            .map_err(|e| {
+                Error::Misconfigured(format!(
+                    "Could not read the Lustre project ID of root {} of volume '{}', which \
+                     must be checked because the volume has a default_quota: {}",
+                    root.display(),
+                    volume,
+                    e
+                ))
+            })?;
+
+        let fix_id = unassigned.first().copied().unwrap_or(1);
+
+        match current {
+            Some(id) if unassigned.contains(&id) => {
+                tracing::info!(
+                    "Root {} of volume '{}' carries unassigned project ID {} with the inherit \
+                     flag, so new directories under it can be given the default quota.",
+                    root.display(),
+                    volume,
+                    id
+                );
+                Ok(())
+            }
+            Some(id) => Err(Error::Misconfigured(format!(
+                "Root {} of volume '{}' carries Lustre project ID {}, which is not in \
+                 unassigned_project_ids {:?}. Every new directory under it inherits {}, so the \
+                 volume's default_quota would never be applied. Either add {} to \
+                 unassigned_project_ids, or retag the root with \
+                 'lfs project -p {} -s {}'.",
+                root.display(),
+                volume,
+                id,
+                unassigned,
+                id,
+                id,
+                fix_id,
+                root.display()
+            ))),
+            None => Err(Error::Misconfigured(format!(
+                "Root {} of volume '{}' has no Lustre project ID with the inherit flag \
+                 ('lfs project -d' reports '0 -'). New directories under it would carry no \
+                 project ID, which cannot be told apart from one whose quota was cleared, so \
+                 the volume's default_quota would never be applied. Tag the root with \
+                 'lfs project -p {} -s {}'.",
+                root.display(),
+                volume,
+                fix_id,
+                root.display()
+            ))),
+        }
     }
 
     fn get_id_strategy(&self, volume: &Volume) -> Result<&LustreIdStrategy, Error> {
@@ -916,74 +1234,48 @@ impl LustreEngine {
         Ok(output)
     }
 
-    /// Queue an lfs command to be run later
+    /// Walk `directory`'s tree in the background (see `WALKS`), joining the
+    /// same walk if it is already queued or running, and wait for it until
+    /// shortly before `expires`.
     ///
-    /// This queues slow commands (like lfs project -srp) in a FIFO queue.
-    /// Only one queued command runs at a time. If the command completes within
-    /// the timeout, returns Ok(true). If it's still running, returns Ok(false).
-    ///
-    /// Commands are deduplicated - if the same command is already queued,
-    /// we just wait for that one to complete instead of queueing a duplicate.
-    async fn queue_lfs_command(
+    /// Returns `Ok(true)` once the walk has finished, and `Ok(false)` if it is
+    /// still queued or running - it carries on, and a resubmitted job joins it.
+    async fn queue_walk(
         &self,
-        args: &[&str],
-        timeout_duration: Duration,
+        directory: &Path,
+        kind: WalkKind,
         expires: &chrono::DateTime<Utc>,
     ) -> Result<bool, Error> {
         assert_not_expired(expires)?;
 
         if is_dry_run() {
-            let cmd_string = format!("{} {}", self.config.lfs_command(), args.join(" "));
-            tracing::info!("DRY RUN: {}", cmd_string);
+            tracing::info!(
+                "DRY RUN: {} project {:?} {}",
+                self.config.lfs_command(),
+                kind,
+                directory.display()
+            );
             return Ok(true);
         }
 
-        // Ensure background worker is started
-        start_queue_worker().await;
+        let status = enqueue_walk(
+            self.config.lfs_command(),
+            directory,
+            kind,
+            self.config.recursive_timeout(),
+        )
+        .await?;
 
-        // Convert args to owned strings for queuing
-        let args_vec: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let finished = wait_for_walk(status, expires).await?;
 
-        // Queue the command and get a receiver to wait for completion
-        let rx = queue_command(self.config.lfs_command(), args_vec).await;
-
-        // Wait for completion with timeout
-        match tokio::time::timeout(timeout_duration, rx).await {
-            Ok(Ok(Ok(_output))) => {
-                // Command completed successfully within timeout
-                tracing::debug!(
-                    "Queued command completed within timeout: {} {}",
-                    self.config.lfs_command(),
-                    args.join(" ")
-                );
-                Ok(true)
-            }
-            Ok(Ok(Err(e))) => {
-                // Command completed but failed
-                tracing::warn!(
-                    "Queued command failed: {} {}",
-                    self.config.lfs_command(),
-                    args.join(" ")
-                );
-                Err(e)
-            }
-            Ok(Err(_)) => {
-                // Receiver was dropped (shouldn't happen)
-                Err(Error::Failed(
-                    "Queued command receiver dropped unexpectedly".to_string(),
-                ))
-            }
-            Err(_) => {
-                // Timeout - command is still running in background
-                tracing::warn!(
-                    "Queued command still running after {}s, will continue in background: {} {}",
-                    timeout_duration.as_secs(),
-                    self.config.lfs_command(),
-                    args.join(" ")
-                );
-                Ok(false)
-            }
+        if !finished {
+            tracing::info!(
+                "The walk of {} has not finished yet - it continues in the background.",
+                directory.display()
+            );
         }
+
+        Ok(finished)
     }
 
     /// Get the current Lustre ID assigned to a directory
@@ -1070,69 +1362,91 @@ impl LustreEngine {
             return Ok(true);
         }
 
-        let completed: bool = self
-            .queue_lfs_command(
-                &[
-                    "project",
-                    "-Cr",
-                    directory.to_str().ok_or_else(|| {
-                        Error::Incompatible("Directory path contains invalid UTF-8".to_string())
-                    })?,
-                ],
-                self.config.recursive_timeout(),
-                expires,
-            )
-            .await?;
-
-        Ok(completed)
+        self.queue_walk(directory, WalkKind::Clear, expires).await
     }
 
     /// Assign a Lustre ID to a directory recursively
     ///
-    /// Uses `lfs project -srp <id> <directory>` to recursively set the Lustre ID
-    /// This operation can be very slow on large directory trees
+    /// Uses `lfs project -srp <id> <directory>` to recursively set the Lustre ID.
+    /// This can take hours on a large tree, so it runs in the background (see
+    /// `queue_walk`), and `false` is returned if it has not finished by the time
+    /// the job must reply.
+    ///
+    /// The walk tags the top directory first, so the top directory carrying the
+    /// ID does not mean the walk finished. The directory's marker decides - see
+    /// `crate::quotamarker`: a `complete` marker for this ID means done, and a
+    /// `started` marker, one for another ID, or one that cannot be trusted means
+    /// the walk was interrupted, so it is walked again. No marker at all means
+    /// the ID was assigned before markers existed, which is taken as done and
+    /// recorded.
     async fn assign_lustre_id(
         &self,
         directory: &Path,
         lustre_id: u64,
         expires: &chrono::DateTime<Utc>,
     ) -> Result<bool, Error> {
-        tracing::info!(
-            "Assigning Lustre ID {} to directory {} (this may take a while)",
-            lustre_id,
-            directory.display()
-        );
-
-        // see if this directory already has the correct lustre id
         let current_id = self.get_lustre_id_from_dir(directory, expires).await?;
 
-        if current_id == Some(lustre_id) {
-            tracing::info!(
-                "Directory {} already has Lustre ID {}, skipping assignment",
-                directory.display(),
-                lustre_id
-            );
+        if current_id == Some(lustre_id) && !is_dry_run() {
+            match crate::quotamarker::read_marker(directory) {
+                MarkerRead::Ours(marker) if marker.is_complete_for(lustre_id) => {
+                    tracing::debug!(
+                        "Directory {} already has Lustre ID {} ({})",
+                        directory.display(),
+                        lustre_id,
+                        marker
+                    );
+                    return Ok(true);
+                }
+                MarkerRead::Absent => {
+                    tracing::info!(
+                        "Directory {} already has Lustre ID {} and no walk marker, so the ID \
+                         was assigned before markers were kept - treating it as complete.",
+                        directory.display(),
+                        lustre_id
+                    );
+
+                    if let Err(e) = crate::quotamarker::write_marker(
+                        directory,
+                        &QuotaMarker::complete(lustre_id, None, Utc::now()),
+                    ) {
+                        tracing::warn!("Could not record the earlier assignment: {}", e);
+                    }
+
+                    return Ok(true);
+                }
+                MarkerRead::Ours(marker) => {
+                    tracing::info!(
+                        "Directory {} has Lustre ID {}, but its marker records a {} - walking \
+                         it (again) so that the whole tree carries the ID.",
+                        directory.display(),
+                        lustre_id,
+                        marker
+                    );
+                }
+                MarkerRead::Untrusted(reason) => {
+                    tracing::warn!(
+                        "Directory {} has Lustre ID {}, but its walk marker is ignored ({}) - \
+                         walking it again so that the whole tree carries the ID.",
+                        directory.display(),
+                        lustre_id,
+                        reason
+                    );
+                }
+            }
+        } else if current_id == Some(lustre_id) {
             return Ok(true);
+        } else {
+            tracing::info!(
+                "Assigning Lustre ID {} to directory {} (currently {:?})",
+                lustre_id,
+                directory.display(),
+                current_id
+            );
         }
 
-        // we now need to set the ID - this is very slow, so we will queue
-        // this command
-        let completed: bool = self
-            .queue_lfs_command(
-                &[
-                    "project",
-                    "-srp",
-                    &lustre_id.to_string(),
-                    directory.to_str().ok_or_else(|| {
-                        Error::Incompatible("Directory path contains invalid UTF-8".to_string())
-                    })?,
-                ],
-                self.config.recursive_timeout(),
-                expires,
-            )
-            .await?;
-
-        Ok(completed)
+        self.queue_walk(directory, WalkKind::Assign(lustre_id), expires)
+            .await
     }
 
     /// Clear quota limits for a project ID
@@ -1543,15 +1857,30 @@ impl LustreEngine {
         // Get inode limit (use configured value or large default)
         let inode_limit = volume_config.default_inode_limit().unwrap_or(1_000_000);
 
-        // loop over all path configs and set lustre ids
-        let mut all_set = true;
+        // The limit belongs to the quota ID, not to the files, so it is set
+        // first: it then applies to each file as soon as the walk below tags it,
+        // and a walk that takes hours does not hold the limit back.
+        if !is_lustre_id_only() {
+            self.set_lustre_quota_limits(quota_id, limit, inode_limit, mount_point, expires)
+                .await?;
+        }
+
+        let mut walking = Vec::new();
 
         for path_config in volume_config.path_configs() {
             let path = path_config.path(mapping.clone().into())?;
-            let set = self.assign_lustre_id(&path, quota_id, expires).await?;
-            if !set {
-                all_set = false;
+            if !self.assign_lustre_id(&path, quota_id, expires).await? {
+                walking.push(path.display().to_string());
             }
+        }
+
+        if !walking.is_empty() {
+            return Err(Error::NotReady(format!(
+                "The quota limit for quota ID {} is set, but the ID is still being assigned \
+                 to {} in the background. Resubmit to check again.",
+                quota_id,
+                walking.join(", ")
+            )));
         }
 
         if is_lustre_id_only() {
@@ -1564,22 +1893,7 @@ impl LustreEngine {
             ));
         }
 
-        if !all_set {
-            // we can't set the quota yet because some lustre ids are still being assigned
-            return Err(Error::NotReady(
-                "Lustre IDs are still being assigned, cannot set quota limits yet".to_string(),
-            ));
-        }
-
-        // Set the quota limits
-        self.set_lustre_quota_limits(quota_id, limit, inode_limit, mount_point, expires)
-            .await?;
-
-        // Query the current usage and return the quota
-        let quota = self
-            .query_user_quota(quota_id, mount_point, expires)
-            .await?;
-        Ok(quota)
+        self.query_user_quota(quota_id, mount_point, expires).await
     }
 
     pub async fn clear_project_quota(
@@ -1665,15 +1979,30 @@ impl LustreEngine {
         // Get inode limit (use configured value or large default)
         let inode_limit = volume_config.default_inode_limit().unwrap_or(1_000_000);
 
-        // loop over all path configs and set lustre ids
-        let mut all_set = true;
+        // The limit belongs to the quota ID, not to the files, so it is set
+        // first: it then applies to each file as soon as the walk below tags it,
+        // and a walk that takes hours does not hold the limit back.
+        if !is_lustre_id_only() {
+            self.set_lustre_quota_limits(quota_id, limit, inode_limit, mount_point, expires)
+                .await?;
+        }
+
+        let mut walking = Vec::new();
 
         for path_config in volume_config.path_configs() {
             let path = path_config.project_path(mapping)?;
-            let set = self.assign_lustre_id(&path, quota_id, expires).await?;
-            if !set {
-                all_set = false;
+            if !self.assign_lustre_id(&path, quota_id, expires).await? {
+                walking.push(path.display().to_string());
             }
+        }
+
+        if !walking.is_empty() {
+            return Err(Error::NotReady(format!(
+                "The quota limit for quota ID {} is set, but the ID is still being assigned \
+                 to {} in the background. Resubmit to check again.",
+                quota_id,
+                walking.join(", ")
+            )));
         }
 
         if is_lustre_id_only() {
@@ -1686,22 +2015,53 @@ impl LustreEngine {
             ));
         }
 
-        if !all_set {
-            // we can't set the quota yet because some lustre ids are still being assigned
-            return Err(Error::Timeout(
-                "Lustre IDs are still being assigned, cannot set quota limits yet".to_string(),
-            ));
-        }
+        self.query_project_quota(quota_id, mount_point, expires)
+            .await
+    }
 
-        // Now set the quota limit
-        self.set_lustre_quota_limits(quota_id, limit, inode_limit, mount_point, expires)
-            .await?;
+    /// The quota set on this user's quota ID, whether or not their directories
+    /// carry that ID yet. Unlike `get_user_quota`, which reports a user whose
+    /// directories have not been assigned the ID as unlimited, this says
+    /// whether a limit is already in place for the ID.
+    pub async fn get_user_quota_by_id(
+        &self,
+        mapping: &UserMapping,
+        volume: &Volume,
+        volume_config: &UserVolumeConfig,
+        expires: &chrono::DateTime<Utc>,
+    ) -> Result<Quota, Error> {
+        let quota_id = self.compute_user_quota_id(volume, mapping).await?;
 
-        // Step 3: Query the current usage and return the quota
-        let quota = self
-            .query_project_quota(quota_id, mount_point, expires)
-            .await?;
-        Ok(quota)
+        let mount_point = volume_config.mount_point().ok_or_else(|| {
+            Error::Misconfigured(format!(
+                "Volume '{}' does not have a mount_point configured, which is required for Lustre quotas",
+                volume
+            ))
+        })?;
+
+        self.query_user_quota(quota_id, mount_point, expires).await
+    }
+
+    /// The quota set on this project's quota ID, whether or not its
+    /// directories carry that ID yet - see `get_user_quota_by_id`.
+    pub async fn get_project_quota_by_id(
+        &self,
+        mapping: &ProjectMapping,
+        volume: &Volume,
+        volume_config: &ProjectVolumeConfig,
+        expires: &chrono::DateTime<Utc>,
+    ) -> Result<Quota, Error> {
+        let quota_id = self.compute_project_quota_id(volume, mapping).await?;
+
+        let mount_point = volume_config.mount_point().ok_or_else(|| {
+            Error::Misconfigured(format!(
+                "Volume '{}' does not have a mount_point configured, which is required for Lustre quotas",
+                volume
+            ))
+        })?;
+
+        self.query_project_quota(quota_id, mount_point, expires)
+            .await
     }
 
     async fn check_user_lustre_ids(
@@ -1796,15 +2156,16 @@ impl LustreEngine {
     /// Give this user's directories on the volume their quota ID, **without**
     /// touching the quota limit.
     ///
-    /// Only directories that still carry an unassigned project ID (see
-    /// `unassigned_project_ids`) are tagged. One that already has the quota ID is
-    /// left alone, and so is one with some other ID or none at all - that was
-    /// either cleared deliberately or belongs to someone else. This is what brings
-    /// a straggler under a limit that is already set, where `set_user_quota`
-    /// would have to rewrite that limit to do the same.
+    /// A directory that still carries an unassigned project ID (see
+    /// `unassigned_project_ids`) is walked, and so is one that carries the quota
+    /// ID but whose last walk was interrupted (see `assign_lustre_id`). One with
+    /// some other ID, or none at all, is left alone - it was either cleared
+    /// deliberately or belongs to someone else. This is what brings a straggler
+    /// under a limit that is already set, where `set_user_quota` would have to
+    /// rewrite that limit to do the same.
     ///
-    /// Returns `false` if a recursive assignment is still running in the
-    /// background when the wait for it ends.
+    /// Returns `false` if a walk is still running in the background when the
+    /// wait for it ends.
     pub async fn assign_user_ids(
         &self,
         mapping: &UserMapping,
@@ -1820,14 +2181,19 @@ impl LustreEngine {
             let path = path_config.path(mapping.clone().into())?;
             let current_lustre_id = self.get_lustre_id_from_dir(&path, expires).await?;
 
-            if let LustreIdState::Unassigned(_) = classify_lustre_id(
+            match classify_lustre_id(
                 current_lustre_id,
                 quota_id,
                 self.config.unassigned_project_ids(),
             ) {
-                if !self.assign_lustre_id(&path, quota_id, expires).await? {
-                    all_set = false;
+                // an assigned directory is walked again only if its marker
+                // says the last walk did not finish - see `assign_lustre_id`
+                LustreIdState::Unassigned(_) | LustreIdState::Assigned => {
+                    if !self.assign_lustre_id(&path, quota_id, expires).await? {
+                        all_set = false;
+                    }
                 }
+                LustreIdState::Mismatch(_) => {}
             }
         }
 
@@ -1967,15 +2333,16 @@ impl LustreEngine {
     /// Give this project's directories on the volume their quota ID, **without**
     /// touching the quota limit.
     ///
-    /// Only directories that still carry an unassigned project ID (see
-    /// `unassigned_project_ids`) are tagged. One that already has the quota ID is
-    /// left alone, and so is one with some other ID or none at all - that was
-    /// either cleared deliberately or belongs to someone else. This is what brings
-    /// a straggler under a limit that is already set, where `set_project_quota`
-    /// would have to rewrite that limit to do the same.
+    /// A directory that still carries an unassigned project ID (see
+    /// `unassigned_project_ids`) is walked, and so is one that carries the quota
+    /// ID but whose last walk was interrupted (see `assign_lustre_id`). One with
+    /// some other ID, or none at all, is left alone - it was either cleared
+    /// deliberately or belongs to someone else. This is what brings a straggler
+    /// under a limit that is already set, where `set_project_quota` would have to
+    /// rewrite that limit to do the same.
     ///
-    /// Returns `false` if a recursive assignment is still running in the
-    /// background when the wait for it ends.
+    /// Returns `false` if a walk is still running in the background when the
+    /// wait for it ends.
     pub async fn assign_project_ids(
         &self,
         mapping: &ProjectMapping,
@@ -1991,14 +2358,19 @@ impl LustreEngine {
             let path = path_config.project_path(mapping)?;
             let current_lustre_id = self.get_lustre_id_from_dir(&path, expires).await?;
 
-            if let LustreIdState::Unassigned(_) = classify_lustre_id(
+            match classify_lustre_id(
                 current_lustre_id,
                 quota_id,
                 self.config.unassigned_project_ids(),
             ) {
-                if !self.assign_lustre_id(&path, quota_id, expires).await? {
-                    all_set = false;
+                // an assigned directory is walked again only if its marker
+                // says the last walk did not finish - see `assign_lustre_id`
+                LustreIdState::Unassigned(_) | LustreIdState::Assigned => {
+                    if !self.assign_lustre_id(&path, quota_id, expires).await? {
+                        all_set = false;
+                    }
                 }
+                LustreIdState::Mismatch(_) => {}
             }
         }
 
@@ -2364,7 +2736,7 @@ mod tests {
 
     #[test]
     fn test_classify_lustre_id() {
-        let unassigned = default_unassigned_project_ids();
+        let unassigned = vec![0, 1];
 
         assert_eq!(
             classify_lustre_id(Some(928602), 928602, &unassigned),
@@ -2405,7 +2777,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unassigned_project_ids_default() {
+    fn test_unassigned_project_ids_unset_by_default() {
         let toml_str = r#"
             lfs_command = "lfs"
             scratch = "{UID-1483800000}02"
@@ -2417,12 +2789,23 @@ mod tests {
 
         #[allow(clippy::unwrap_used)]
         let config = result.unwrap();
-        assert_eq!(config.unassigned_project_ids(), &[0, 1]);
+        // there is no default: unset means no ID counts as unassigned
+        assert!(!config.has_unassigned_project_ids());
+        assert!(config.unassigned_project_ids().is_empty());
         assert_eq!(config.id_strategies.len(), 2);
+        assert!(!LustreEngineConfig::default().has_unassigned_project_ids());
+
+        // so nothing is ever unassigned, not even the IDs that used to be
         assert_eq!(
-            LustreEngineConfig::default().unassigned_project_ids(),
-            &[0, 1]
+            classify_lustre_id(Some(1), 928602, config.unassigned_project_ids()),
+            LustreIdState::Mismatch(Some(1))
         );
+
+        // set but empty is different from unset
+        let config: LustreEngineConfig =
+            toml::from_str("unassigned_project_ids = []\nprojects = \"{GID}\"").unwrap();
+        assert!(config.has_unassigned_project_ids());
+        assert!(config.unassigned_project_ids().is_empty());
     }
 
     #[test]
@@ -2439,6 +2822,7 @@ mod tests {
 
         #[allow(clippy::unwrap_used)]
         let config = result.unwrap();
+        assert!(config.has_unassigned_project_ids());
         assert_eq!(config.unassigned_project_ids(), &[0, 7]);
         // the option must not be mistaken for a volume's ID strategy
         assert_eq!(config.id_strategies.len(), 2);
@@ -2470,73 +2854,147 @@ mod tests {
         }
     }
 
-    /// `assign_project_ids` must tag only the directories that still carry an
-    /// unassigned ID - not one that already has the quota ID, not one that has
-    /// been cleared, and not one carrying somebody else's ID.
-    ///
-    /// `lfs` is replaced by `tests/fake_lfs.sh`, which keeps each directory's
-    /// project line in a file and logs every recursive assignment it is asked for.
-    #[tokio::test]
-    #[allow(clippy::unwrap_used)]
-    async fn test_assign_project_ids_only_tags_unassigned() {
-        let dir = std::env::temp_dir().join(format!("op-fake-lfs-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    /// A Lustre stand-in for the engine tests: `lfs` is replaced by
+    /// `tests/fake_lfs.sh`, which keeps each directory's project line, and each
+    /// quota ID's limit, in files under a state directory, and logs every walk
+    /// and every limit it is asked for. The project directories also exist for
+    /// real, so that the walk markers can be written into them.
+    struct FakeLustre {
+        dir: std::path::PathBuf,
+        _serial: tokio::sync::OwnedMutexGuard<()>,
+    }
 
-        let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake_lfs.sh");
+    /// The `lfs` runners are global - `initialize` sets the command they run -
+    /// so the tests that use them take turns.
+    static FAKE_LUSTRE_TESTS: Lazy<Arc<Mutex<()>>> = Lazy::new(|| Arc::new(Mutex::new(())));
 
-        let root = |name: &str| format!("{}/{}", dir.display(), name);
-        let set = |name: &str, id: &str, flag: &str| {
-            let path = format!("{}/proj", root(name));
+    const FAKE_LFS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake_lfs.sh");
+
+    impl FakeLustre {
+        async fn new(name: &str) -> Self {
+            let serial = FAKE_LUSTRE_TESTS.clone().lock_owned().await;
+            let dir =
+                std::env::temp_dir().join(format!("op-fake-lfs-{}-{}", name, std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self {
+                dir,
+                _serial: serial,
+            }
+        }
+
+        fn root(&self, name: &str) -> String {
+            format!("{}/{}", self.dir.display(), name)
+        }
+
+        /// The project directory under a root, created for real.
+        fn project_dir(&self, root: &str) -> std::path::PathBuf {
+            let path = std::path::PathBuf::from(format!("{}/proj", self.root(root)));
+            std::fs::create_dir_all(&path).unwrap();
+            path
+        }
+
+        fn seed(&self, path: &str, id: &str, flag: &str) {
             let status = std::process::Command::new("sh")
-                .arg(script)
-                .arg(&dir)
-                .args(["seed", &path, id, flag])
+                .arg(FAKE_LFS)
+                .arg(&self.dir)
+                .args(["seed", path, id, flag])
                 .status()
                 .unwrap();
             assert!(status.success());
-        };
-        let read = |name: &str| {
-            let path = format!("{}/proj", root(name));
-            std::fs::read_to_string(dir.join(path.replace('/', "_"))).unwrap()
-        };
+        }
 
-        // the group "root" has GID 0, so the quota ID is 500
-        set("has_id", "500", "P");
-        set("inherited", "1", "P");
-        set("cleared", "0", "-");
-        set("foreign", "777", "P");
+        /// Seed the project directory under `root`, and return it.
+        fn seed_project(&self, root: &str, id: &str, flag: &str) -> std::path::PathBuf {
+            let path = self.project_dir(root);
+            self.seed(path.to_str().unwrap(), id, flag);
+            path
+        }
 
-        let config: LustreEngineConfig = toml::from_str(&format!(
-            r#"
-            lfs_command = "sh {} {}"
-            projects = "{{GID+500}}"
-            "#,
-            script,
-            dir.display()
-        ))
-        .unwrap();
+        fn line(&self, path: &Path) -> String {
+            std::fs::read_to_string(self.dir.join(path.to_str().unwrap().replace('/', "_")))
+                .unwrap()
+        }
 
-        let volume_config: ProjectVolumeConfig = toml::from_str(&format!(
-            r#"
-            roots = ["{}", "{}", "{}", "{}"]
-            quota_engine = "lustre"
-            mount_point = "{}"
-            "#,
-            root("has_id"),
-            root("inherited"),
-            root("cleared"),
-            root("foreign"),
-            dir.display()
-        ))
-        .unwrap();
+        fn log(&self, name: &str) -> String {
+            std::fs::read_to_string(self.dir.join(name)).unwrap_or_default()
+        }
+
+        fn touch(&self, name: &str, contents: &str) {
+            use std::io::Write;
+            std::fs::File::create(self.dir.join(name))
+                .unwrap()
+                .write_all(contents.as_bytes())
+                .unwrap();
+        }
+
+        fn engine(&self, extra: &str) -> LustreEngine {
+            let config: LustreEngineConfig = toml::from_str(&format!(
+                "lfs_command = \"sh {} {}\"\n{}\nprojects = \"{{GID+500}}\"\n",
+                FAKE_LFS,
+                self.dir.display(),
+                extra
+            ))
+            .unwrap();
+            LustreEngine::new(config).unwrap()
+        }
+
+        fn volume(&self, roots: &[&str]) -> ProjectVolumeConfig {
+            let roots: Vec<String> = roots
+                .iter()
+                .map(|r| format!("\"{}\"", self.root(r)))
+                .collect();
+            toml::from_str(&format!(
+                "roots = [{}]\nquota_engine = \"lustre\"\nmount_point = \"{}\"\n",
+                roots.join(", "),
+                self.dir.display()
+            ))
+            .unwrap()
+        }
+    }
+
+    impl Drop for FakeLustre {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn expires_in(seconds: i64) -> chrono::DateTime<Utc> {
+        Utc::now() + chrono::Duration::seconds(seconds)
+    }
+
+    // the group "root" has GID 0, so the quota ID is 500
+    fn proj_mapping() -> ProjectMapping {
+        ProjectMapping::parse("proj.portal:root").unwrap()
+    }
+
+    fn marker(path: &Path) -> QuotaMarker {
+        match crate::quotamarker::read_marker(path) {
+            MarkerRead::Ours(marker) => marker,
+            other => panic!("expected a marker in {}, got {:?}", path.display(), other),
+        }
+    }
+
+    /// `assign_project_ids` must walk only the directories that still carry an
+    /// unassigned ID - not one that already has the quota ID, not one that has
+    /// been cleared, and not one carrying somebody else's ID - and must record
+    /// each walk in the directory's marker.
+    #[tokio::test]
+    async fn test_assign_project_ids_only_tags_unassigned() {
+        let lustre = FakeLustre::new("assign").await;
+
+        let has_id = lustre.seed_project("has_id", "500", "P");
+        let inherited = lustre.seed_project("inherited", "1", "P");
+        let cleared = lustre.seed_project("cleared", "0", "-");
+        let foreign = lustre.seed_project("foreign", "777", "P");
+
+        let engine = lustre.engine("unassigned_project_ids = [1]");
+        engine.initialize().await.unwrap();
 
         let volume = Volume::new("projects");
-        let mapping = ProjectMapping::parse("proj.portal:root").unwrap();
-        let expires = Utc::now() + chrono::Duration::minutes(5);
-
-        let engine = LustreEngine::new(config).unwrap();
-        engine.initialize().await.unwrap();
+        let volume_config = lustre.volume(&["has_id", "inherited", "cleared", "foreign"]);
+        let mapping = proj_mapping();
+        let expires = expires_in(300);
 
         assert!(engine
             .project_dirs_unassigned(&mapping, &volume, &volume_config, &expires)
@@ -2548,29 +3006,412 @@ mod tests {
             .await
             .unwrap());
 
-        // exactly one recursive assignment, for the directory with the inherited ID
-        let log = std::fs::read_to_string(dir.join("assigned.log")).unwrap();
-        assert_eq!(log, format!("500 {}/proj\n", root("inherited")));
+        // exactly one walk, for the directory with the inherited ID
+        assert_eq!(
+            lustre.log("assigned.log"),
+            format!("500 {}\n", inherited.display())
+        );
 
-        assert!(read("has_id").starts_with("500 P "));
-        assert!(read("inherited").starts_with("500 P "));
-        assert!(read("cleared").starts_with("0 - "));
-        assert!(read("foreign").starts_with("777 P "));
+        assert!(lustre.line(&has_id).starts_with("500 P "));
+        assert!(lustre.line(&inherited).starts_with("500 P "));
+        assert!(lustre.line(&cleared).starts_with("0 - "));
+        assert!(lustre.line(&foreign).starts_with("777 P "));
+
+        // the walk is recorded as started and completed
+        let walked = marker(&inherited);
+        assert!(walked.is_complete_for(500));
+        assert!(walked.started.is_some());
+        assert!(walked.completed >= walked.started);
+
+        // the directory that already had the ID, with no marker, was assigned
+        // before markers were kept: it is taken as complete, and recorded so
+        let earlier = marker(&has_id);
+        assert!(earlier.is_complete_for(500));
+        assert!(earlier.started.is_none());
+
+        // directories that are not ours to walk get no marker
+        assert_eq!(
+            crate::quotamarker::read_marker(&cleared),
+            MarkerRead::Absent
+        );
+        assert_eq!(
+            crate::quotamarker::read_marker(&foreign),
+            MarkerRead::Absent
+        );
 
         assert!(!engine
             .project_dirs_unassigned(&mapping, &volume, &volume_config, &expires)
             .await
             .unwrap());
 
-        // nothing left to do, so a second call assigns nothing
+        // nothing left to do, so a second call walks nothing
         assert!(engine
             .assign_project_ids(&mapping, &volume, &volume_config, &expires)
             .await
             .unwrap());
-        let log = std::fs::read_to_string(dir.join("assigned.log")).unwrap();
-        assert_eq!(log.lines().count(), 1);
+        assert_eq!(lustre.log("assigned.log").lines().count(), 1);
+    }
 
-        let _ = std::fs::remove_dir_all(&dir);
+    /// A directory that carries its quota ID, but whose walk did not finish -
+    /// the marker still says "started", is for another ID, or is not one the
+    /// agent wrote - is walked again.
+    #[tokio::test]
+    async fn test_interrupted_walk_is_repeated() {
+        let lustre = FakeLustre::new("interrupted").await;
+
+        let started = lustre.seed_project("started", "500", "P");
+        let other_id = lustre.seed_project("other_id", "500", "P");
+        let planted = lustre.seed_project("planted", "500", "P");
+        let complete = lustre.seed_project("complete", "500", "P");
+
+        crate::quotamarker::write_marker(&started, &QuotaMarker::started(500, Utc::now())).unwrap();
+        crate::quotamarker::write_marker(&other_id, &QuotaMarker::complete(499, None, Utc::now()))
+            .unwrap();
+        std::os::unix::fs::symlink("/dev/null", crate::quotamarker::marker_path(&planted)).unwrap();
+        crate::quotamarker::write_marker(&complete, &QuotaMarker::complete(500, None, Utc::now()))
+            .unwrap();
+
+        let engine = lustre.engine("unassigned_project_ids = [1]");
+        engine.initialize().await.unwrap();
+
+        let volume = Volume::new("projects");
+        let volume_config = lustre.volume(&["started", "other_id", "planted", "complete"]);
+        let mapping = proj_mapping();
+
+        // no directory is unassigned, so this is only finishing walks
+        assert!(!engine
+            .project_dirs_unassigned(&mapping, &volume, &volume_config, &expires_in(300))
+            .await
+            .unwrap());
+
+        assert!(engine
+            .assign_project_ids(&mapping, &volume, &volume_config, &expires_in(300))
+            .await
+            .unwrap());
+
+        let log = lustre.log("assigned.log");
+        assert_eq!(log.lines().count(), 3, "{}", log);
+        assert!(log.contains(&format!("500 {}\n", started.display())));
+        assert!(log.contains(&format!("500 {}\n", other_id.display())));
+        assert!(log.contains(&format!("500 {}\n", planted.display())));
+        assert!(!log.contains(&complete.display().to_string()));
+
+        for path in [&started, &other_id, &planted, &complete] {
+            assert!(marker(path).is_complete_for(500), "{}", path.display());
+        }
+    }
+
+    /// `set_project_quota` sets the limit before the walk, does not wait past
+    /// the job's expiry for a long walk, and reports NotReady while it runs. A
+    /// resubmission joins the running walk instead of starting another.
+    #[tokio::test]
+    async fn test_set_project_quota_sets_limit_first_and_is_not_ready_while_walking() {
+        let lustre = FakeLustre::new("limit-first").await;
+        lustre.touch("delay", "3");
+
+        let dir = lustre.seed_project("root", "1", "P");
+
+        let engine = lustre.engine("unassigned_project_ids = [1]");
+        engine.initialize().await.unwrap();
+
+        let volume = Volume::new("projects");
+        let volume_config = lustre.volume(&["root"]);
+        let mapping = proj_mapping();
+        let limit = QuotaLimit::Limited(StorageSize::from_gigabytes(10.0));
+
+        // the job expires just after the wait margin, so it can only wait ~1s
+        let result = engine
+            .set_project_quota(
+                &mapping,
+                &volume,
+                &volume_config,
+                &limit,
+                &(Utc::now()
+                    + chrono::Duration::from_std(WALK_WAIT_MARGIN).unwrap()
+                    + chrono::Duration::seconds(1)),
+            )
+            .await;
+
+        assert!(matches!(result, Err(Error::NotReady(_))), "{:?}", result);
+
+        // the limit is already in place, and the walk is under way
+        assert_eq!(lustre.log("setquota.log"), "500 10240M\n");
+        assert_eq!(lustre.log("assigned.log"), "");
+        assert_eq!(marker(&dir).state, crate::quotamarker::WalkState::Started);
+
+        // a resubmission joins the walk, and returns the quota once it is done
+        let quota = engine
+            .set_project_quota(&mapping, &volume, &volume_config, &limit, &expires_in(60))
+            .await
+            .unwrap();
+
+        assert_eq!(quota.limit(), &limit);
+        assert_eq!(lustre.log("assigned.log").lines().count(), 1);
+        assert!(marker(&dir).is_complete_for(500));
+    }
+
+    /// A walk that fails is reported as a failure, not as success or as still
+    /// running, and leaves the marker saying it did not finish.
+    #[tokio::test]
+    async fn test_failed_walk_is_an_error() {
+        let lustre = FakeLustre::new("failed").await;
+        lustre.touch("fail", "");
+
+        let dir = lustre.seed_project("root", "1", "P");
+
+        let engine = lustre.engine("unassigned_project_ids = [1]");
+        engine.initialize().await.unwrap();
+
+        let result = engine
+            .assign_project_ids(
+                &proj_mapping(),
+                &Volume::new("projects"),
+                &lustre.volume(&["root"]),
+                &expires_in(60),
+            )
+            .await;
+
+        assert!(matches!(result, Err(Error::Failed(_))), "{:?}", result);
+        assert_eq!(marker(&dir).state, crate::quotamarker::WalkState::Started);
+
+        // once the cause is fixed, the next attempt walks again
+        std::fs::remove_file(lustre.dir.join("fail")).unwrap();
+
+        assert!(engine
+            .assign_project_ids(
+                &proj_mapping(),
+                &Volume::new("projects"),
+                &lustre.volume(&["root"]),
+                &expires_in(60),
+            )
+            .await
+            .unwrap());
+        assert!(marker(&dir).is_complete_for(500));
+    }
+
+    /// Clearing a quota walks the tree to clear the ID, and removes the marker.
+    #[tokio::test]
+    async fn test_clear_project_quota_removes_marker() {
+        let lustre = FakeLustre::new("clear").await;
+
+        let dir = lustre.seed_project("root", "500", "P");
+        crate::quotamarker::write_marker(&dir, &QuotaMarker::complete(500, None, Utc::now()))
+            .unwrap();
+
+        let engine = lustre.engine("unassigned_project_ids = [1]");
+        engine.initialize().await.unwrap();
+
+        engine
+            .clear_project_quota(
+                &proj_mapping(),
+                &Volume::new("projects"),
+                &lustre.volume(&["root"]),
+                &expires_in(60),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(lustre.log("cleared.log"), format!("{}\n", dir.display()));
+        assert!(lustre.line(&dir).starts_with("0 - "));
+        // and the limit is reset (`setquota -p 500 -D <mount>`)
+        assert_eq!(
+            lustre.log("setquota.log"),
+            format!("500 {}\n", lustre.dir.display())
+        );
+        assert_eq!(crate::quotamarker::read_marker(&dir), MarkerRead::Absent);
+    }
+
+    /// At start-up, a volume with a default quota must have roots tagged with
+    /// one of the unassigned IDs, with the inherit flag.
+    #[tokio::test]
+    async fn test_check_default_quota_root() {
+        let lustre = FakeLustre::new("roots").await;
+        let volume = Volume::new("projects");
+
+        let tagged = lustre.root("tagged");
+        let untagged = lustre.root("untagged");
+        let other = lustre.root("other");
+        lustre.seed(&tagged, "1", "P");
+        lustre.seed(&untagged, "0", "-");
+        lustre.seed(&other, "5", "P");
+
+        let engine = lustre.engine("unassigned_project_ids = [1]");
+        engine.initialize().await.unwrap();
+
+        engine
+            .check_default_quota_root(&volume, Path::new(&tagged))
+            .await
+            .unwrap();
+
+        let error = engine
+            .check_default_quota_root(&volume, Path::new(&untagged))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!("lfs project -p 1 -s {}", untagged)),
+            "{}",
+            error
+        );
+
+        let error = engine
+            .check_default_quota_root(&volume, Path::new(&other))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("project ID 5"), "{}", error);
+
+        // a root that cannot be read has not passed the check
+        assert!(engine
+            .check_default_quota_root(&volume, Path::new(&lustre.root("missing")))
+            .await
+            .is_err());
+
+        // unset, nothing counts as unassigned, so no root can pass
+        let engine = lustre.engine("");
+        let error = engine
+            .check_default_quota_root(&volume, Path::new(&tagged))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unassigned_project_ids"), "{}", error);
+    }
+
+    /// The agent's rules for a volume's default quota, end to end through its
+    /// configuration: the start-up check of the roots, then each row of the
+    /// table in `set_default_project_quotas`.
+    #[tokio::test]
+    async fn test_default_project_quota_rules() {
+        let lustre = FakeLustre::new("default-rules").await;
+        let mapping = proj_mapping();
+        let none = std::collections::HashSet::new();
+
+        let config = |extra: &str| -> crate::volumeconfig::FilesystemConfig {
+            toml::from_str(&format!(
+                r#"
+                [quota_engines.lustre]
+                type = "lustre"
+                lfs_command = "sh {} {}"
+                {}
+                projects = "{{GID+500}}"
+
+                [project_volumes.projects]
+                roots = ["{}"]
+                quota_engine = "lustre"
+                default_quota = "1.00 GB"
+                mount_point = "{}"
+                "#,
+                FAKE_LFS,
+                lustre.dir.display(),
+                extra,
+                lustre.root("projects"),
+                lustre.dir.display()
+            ))
+            .unwrap()
+        };
+
+        // refused at start-up: unset, then an untagged root
+        let error = crate::cache::set_filesystem_config(config(""))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unassigned_project_ids"), "{}", error);
+
+        lustre.seed(&lustre.root("projects"), "0", "-");
+        let error = crate::cache::set_filesystem_config(config("unassigned_project_ids = [1]"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("lfs project -p 1 -s"), "{}", error);
+
+        // a tagged root passes
+        lustre.seed(&lustre.root("projects"), "1", "P");
+        crate::cache::set_filesystem_config(config("unassigned_project_ids = [1]"))
+            .await
+            .unwrap();
+
+        // a new directory inherits the root's "1 P" (which the fake can't do)
+        let dir = lustre.seed_project("projects", "1", "P");
+
+        // unassigned, no limit: the default is set, then the ID is assigned
+        crate::set_default_project_quotas(&mapping, &none, &expires_in(60))
+            .await
+            .unwrap();
+        assert_eq!(lustre.log("setquota.log").lines().count(), 1);
+        assert_eq!(lustre.log("assigned.log").lines().count(), 1);
+        assert!(marker(&dir).is_complete_for(500));
+
+        // repeated: nothing to do
+        crate::set_default_project_quotas(&mapping, &none, &expires_in(60))
+            .await
+            .unwrap();
+        assert_eq!(lustre.log("setquota.log").lines().count(), 1);
+        assert_eq!(lustre.log("assigned.log").lines().count(), 1);
+
+        // interrupted walk: walked again, the limit is not touched
+        crate::quotamarker::write_marker(&dir, &QuotaMarker::started(500, Utc::now())).unwrap();
+        crate::set_default_project_quotas(&mapping, &none, &expires_in(60))
+            .await
+            .unwrap();
+        assert_eq!(lustre.log("setquota.log").lines().count(), 1);
+        assert_eq!(lustre.log("assigned.log").lines().count(), 2);
+        assert!(marker(&dir).is_complete_for(500));
+
+        // unassigned, but the ID already has a (raised) limit: only walked
+        lustre.touch("limit_500", "5000M\n");
+        lustre.seed(dir.to_str().unwrap(), "1", "P");
+        crate::set_default_project_quotas(&mapping, &none, &expires_in(60))
+            .await
+            .unwrap();
+        assert_eq!(lustre.log("setquota.log").lines().count(), 1);
+        assert_eq!(lustre.log("assigned.log").lines().count(), 3);
+        assert_eq!(
+            std::fs::read_to_string(lustre.dir.join("limit_500")).unwrap(),
+            "5000M\n"
+        );
+
+        // a walk that outlasts the job: not ready, and a resubmission joins it
+        lustre.touch("delay", "3");
+        lustre.seed(dir.to_str().unwrap(), "1", "P");
+        let result = crate::set_default_project_quotas(
+            &mapping,
+            &none,
+            &(Utc::now()
+                + chrono::Duration::from_std(WALK_WAIT_MARGIN).unwrap()
+                + chrono::Duration::seconds(1)),
+        )
+        .await;
+        assert!(matches!(result, Err(Error::NotReady(_))), "{:?}", result);
+
+        crate::set_default_project_quotas(&mapping, &none, &expires_in(60))
+            .await
+            .unwrap();
+        assert_eq!(lustre.log("assigned.log").lines().count(), 4);
+        assert!(marker(&dir).is_complete_for(500));
+    }
+
+    /// A Lustre volume with a default quota is refused when the engine does not
+    /// say which IDs are unassigned; without a default it is fine.
+    #[test]
+    fn test_default_quota_requires_unassigned_project_ids() {
+        let engine: crate::quotaengine::QuotaEngineConfig =
+            toml::from_str("type = \"lustre\"\nprojects = \"{GID}\"\n").unwrap();
+        let volume = Volume::new("projects");
+        let default = QuotaLimit::Limited(StorageSize::from_gigabytes(1.0));
+
+        assert!(engine.verify_volume_config(&volume, None).is_ok());
+
+        let error = engine
+            .verify_volume_config(&volume, Some(&default))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unassigned_project_ids"), "{}", error);
+
+        let engine: crate::quotaengine::QuotaEngineConfig = toml::from_str(
+            "type = \"lustre\"\nunassigned_project_ids = [1]\nprojects = \"{GID}\"\n",
+        )
+        .unwrap();
+        assert!(engine.verify_volume_config(&volume, Some(&default)).is_ok());
     }
 
     #[test]

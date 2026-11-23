@@ -691,7 +691,7 @@ links        = [""]               # optional symlinks, one per root
 | `is_home` | boolean | auto | Whether this is the primary home volume. Auto-set to `true` when only one user volume exists. At most one user volume can be the home. |
 | `quota_engine` | string | (none) | Name of a `quota_engines` entry to use for quota management. |
 | `max_quota` | size string | unlimited | Maximum allowed quota for any user. |
-| `default_quota` | size string | unlimited | Quota applied when this agent creates a user's directory on this volume, and only if the user has no quota there yet. It is never re-applied to a directory that already has its own quota ID, so a quota set with `set_local_user_quota` is not overwritten by a repeated `add_local_user`. An existing directory that has never been assigned its own quota ID (on Lustre, one still carrying an ID listed in `unassigned_project_ids`) is treated as new; if a quota is already set on the volume, the limit is kept and the directory is only given the quota ID so that it counts against it. |
+| `default_quota` | size string | unlimited | Quota applied when this agent creates a user's directory on this volume, and only if the user has no quota there yet. It is never re-applied to a directory that already has its own quota ID, so a quota set with `set_local_user_quota` is not overwritten by a repeated `add_local_user`. An existing directory that has never been assigned its own quota ID (on Lustre, one still carrying an ID listed in `unassigned_project_ids`) is treated as new; if a quota is already set on the quota ID, the limit is kept and the directory is only given the ID so that it counts against it. On Lustre this needs `unassigned_project_ids` and tagged roots - see §3.7.4. |
 | `mount_point` | string | (none) | Filesystem mount point (required by some quota engines). |
 | `default_inode_limit` | integer | (engine default) | Default number of files/directories allowed. |
 
@@ -704,7 +704,7 @@ links        = [""]               # optional symlinks, one per root
 | `permissions` | string or array | `"2770"` | Octal directory permissions (SGID bit typical for shared directories). |
 | `quota_engine` | string | (none) | Quota engine to use. |
 | `max_quota` | size string | unlimited | Maximum allowed quota for any project. |
-| `default_quota` | size string | unlimited | Quota applied when this agent creates a project's directory on this volume, and only if the project has no quota there yet. It is never re-applied to a directory that already has its own quota ID, so a quota set with `set_local_project_quota` is not overwritten by a repeated `add_local_project` or by adding a new member to the project. An existing directory that has never been assigned its own quota ID (on Lustre, one still carrying an ID listed in `unassigned_project_ids`) is treated as new; if a quota is already set on the volume, the limit is kept and the directory is only given the quota ID so that it counts against it. |
+| `default_quota` | size string | unlimited | Quota applied when this agent creates a project's directory on this volume, and only if the project has no quota there yet. It is never re-applied to a directory that already has its own quota ID, so a quota set with `set_local_project_quota` is not overwritten by a repeated `add_local_project` or by adding a new member to the project. An existing directory that has never been assigned its own quota ID (on Lustre, one still carrying an ID listed in `unassigned_project_ids`) is treated as new; if a quota is already set on the quota ID, the limit is kept and the directory is only given the ID so that it counts against it. On Lustre this needs `unassigned_project_ids` and tagged roots - see §3.7.4. |
 | `mount_point` | string | (none) | Filesystem mount point. |
 | `default_inode_limit` | integer | (engine default) | Default inode limit. |
 | `links` | array of strings | `[]` | Symlink templates to create alongside each root. Empty string = no link for that root. Placeholder: `{project}`. |
@@ -718,7 +718,7 @@ lfs_command            = "lfs"
 max_runners            = 4
 command_timeout_secs   = 30
 recursive_timeout_secs = 18000
-unassigned_project_ids = [0, 1]
+unassigned_project_ids = [1]
 
 [quota_engines.lustre.id_strategies]
 home     = "{UID-1483800000}01"
@@ -731,34 +731,120 @@ projects = "{GID}"
 | `lfs_command` | `"lfs"` | Command to invoke `lfs`. May include a path, `sudo`, or container exec (e.g. `"sudo lfs"`). |
 | `max_runners` | `4` | Maximum concurrent `lfs` commands (excluding recursive project operations). |
 | `command_timeout_secs` | `30` | Timeout in seconds for standard `lfs` commands. |
-| `recursive_timeout_secs` | `18000` | Timeout for `lfs project -srp` (recursive). Default is 5 hours to accommodate large directory trees. |
-| `unassigned_project_ids` | `[0, 1]` | Lustre project IDs that mean a directory has not been given its own quota ID yet. A new directory inherits its parent's project ID when the parent has the inherit (`P`) flag set, so if the filesystem roots are tagged with a catch-all project (e.g. `lfs project -p 1 -s /scratch`) every new directory starts with that ID. A directory carrying one of these IDs is treated as having no quota, so the volume's `default_quota` is applied to it and its own quota ID is assigned with a recursive `lfs project -srp` - on the next `add_local_user` or `add_local_project` if it already exists. Never list an ID that is used as a real quota ID by an `id_strategies` entry. See the notes below. |
+| `recursive_timeout_secs` | `18000` | How long a recursive walk (`lfs project -srp` / `-Cr`) may run before it is stopped and reported as failed. Default is 5 hours to accommodate large directory trees. Walks run in the background, so this does not hold up any job. |
+| `unassigned_project_ids` | (unset) | Lustre project IDs that mean a directory has not been given its own quota ID yet - typically the ID the volume roots are tagged with, e.g. `[1]`. **There is no default.** Unset, no ID counts as unassigned; that is valid, but then no volume using this engine may have a `default_quota` (the agent refuses to start). Never list an ID that is used as a real quota ID by an `id_strategies` entry. See below. |
 | `id_strategies` | (required) | Map of volume name → ID format string. |
 
-**Notes on `unassigned_project_ids`:**
+**Default quotas on Lustre: tagging the roots.**
 
-- **The roots must carry the inherit (`P`) flag.** Only a directory whose project ID
-  is shown with the `P` flag by `lfs project -d` is recognised. On a filesystem whose
-  roots are not tagged, a new directory reads as `0 -` (no inherit flag); that is
-  indistinguishable from a directory whose quota was removed with
-  `clear_local_user_quota` / `clear_local_project_quota`, so it is **not** treated as
-  unassigned and gets no default quota. Tag each root, e.g.
-  `lfs project -p 1 -s /scratch`, before using `default_quota` on it.
-- **The default treats project ID `1` as a catch-all.** Before 0.94.1 a directory
-  carrying ID `1` was reported as a mismatch; it is now re-tagged with its own quota
-  ID. If a site uses `1` as a real quota ID, set `unassigned_project_ids` explicitly.
-- **Assigning an ID to an existing directory walks its whole tree**, inside the
-  `add_local_user` / `add_local_project` job that triggered it. Recursive assignments
-  run one at a time, and the job waits for its own for up to
-  `recursive_timeout_secs`, which can outlast the job itself on a large tree. The
-  assignment carries on in the background, but the default limit may then not be
-  applied; send `set_local_user_quota` / `set_local_project_quota` once for that
-  directory.
-- **One extra `lfs project -d` per directory.** A repeated `add_local_user` or
-  `add_local_project` for directories that already exist now reads each directory's
-  project ID to make this check (bounded by `max_runners` and
-  `command_timeout_secs`). A failed read is logged and the default quota is skipped;
-  it does not fail the job.
+A Lustre quota belongs to a project ID, and a directory counts against it only once
+its whole tree is tagged with that ID. A new directory inherits its parent's project
+ID, but only when the parent has the inherit (`P`) flag. So the volume's
+`default_quota` can be applied to new directories only if the volume roots are
+tagged with a catch-all ID that is listed in `unassigned_project_ids`:
+
+```shell
+lfs project -p 1 -s /projects     # once per root of each volume with a default_quota
+lfs project -d /projects          # should now print: 1 P /projects
+```
+
+```toml
+[quota_engines.lustre]
+type                   = "lustre"
+unassigned_project_ids = [1]
+```
+
+Every new directory under `/projects` then starts as `1 P`, which the agent reads as
+"not given its own quota ID yet". Any directory between the root and the user or
+project directories (e.g. `{project}` in a `{project}/{user}` subpath) must carry the
+flag too; one created after the root was tagged inherits it.
+
+**The agent refuses to start** if a volume using this engine has a `default_quota`
+and either `unassigned_project_ids` is unset, or a root does not carry one of the
+listed IDs with the `P` flag. An untagged root reads as `0 -`: a new directory under
+it would be indistinguishable from one whose quota was removed with
+`clear_local_user_quota` / `clear_local_project_quota`, so the default would never be
+applied, without any error. The start-up error names the root and the
+`lfs project -p <id> -s <root>` command that fixes it. A root whose project ID cannot
+be read (e.g. `lfs` fails) also stops the start-up, since the check has not passed.
+
+**How a default quota is applied.** On each `add_local_user` / `add_local_project`,
+for each volume with a `default_quota`:
+
+| The directories... | The quota ID... | What happens |
+|---|---|---|
+| carry an unassigned ID (new, or never assigned) | has no limit | The default limit is set on the quota ID, then the directories are walked to give them the ID. |
+| carry an unassigned ID | already has a limit | The limit is left as it is; the directories are only walked to give them the ID. |
+| already carry their quota ID | - | No limit is touched. A walk that was interrupted (see the marker below) is run again. |
+| carry some other ID, or none (`0 -`) | - | Left alone: the quota was cleared deliberately, or the directory belongs to someone else. |
+
+`set_local_user_quota` / `set_local_project_quota` likewise set the limit first and
+then walk. The limit belongs to the ID, so it applies to each file as soon as the
+walk reaches it.
+
+**Walks run in the background, and the job says so.** Walking a large tree can take
+hours, far longer than a job lives. Walks are queued and run one at a time; a job
+waits for its walk until shortly before it expires, and if the walk has not finished
+it fails with a "not ready" error saying the quota ID is still being assigned. The
+walk carries on, and the cluster agent's resubmission of the job joins the same
+walk rather than starting another. The job succeeds only once the walk has finished.
+A walk that fails, or outlasts `recursive_timeout_secs`, fails the job with the
+error. A project directory that is still being walked does not stop a new member's
+own directories from being created; the `add_local_user` job still reports "not
+ready" until both are done.
+
+The walk queue lives only in memory. What records a walk across a restart of the
+agent is a marker file.
+
+**The `.openportal_quota` marker.** `lfs project -srp` tags the top directory first
+and then walks the tree, so the top directory's ID alone cannot say whether a walk
+finished. Each walk therefore records itself in `.openportal_quota` in the top
+directory:
+
+```toml
+# Written by the OpenPortal filesystem agent to record the walk that gave
+# this directory tree its Lustre quota ID. Do not edit: a marker this
+# agent did not write is ignored, and the tree is walked again.
+quota_id = 1234
+state = "complete"
+started = "2027-03-01T10:15:02.118Z"
+completed = "2027-03-01T12:40:57.904Z"
+```
+
+- `state = "started"` is written just before the walk begins, and `"complete"` once
+  `lfs` has finished successfully. If a walk is interrupted - the agent restarted, the
+  walk failed or timed out - the marker stays `started`, and the next
+  `add_local_*` or `set_local_*_quota` for that user or project walks the tree again.
+- A directory that carries its quota ID but has **no** marker was tagged before
+  markers were kept (or by hand). It is taken to be complete, and a `complete` marker
+  with no `started` time is written to record that.
+- The marker is written by the agent's own user (root in practice), mode `0400`, via
+  a temporary file renamed into place, so it never follows a symlink. A marker that
+  is not a regular file owned by the agent's user, has more than one link, or cannot
+  be parsed is ignored and the tree is walked again - the worst a user can do by
+  editing or replacing it is cause a repeat walk.
+- `clear_local_user_quota` / `clear_local_project_quota` remove the marker once the
+  ID has been cleared from the tree.
+- To force a tree to be walked again, delete its marker.
+
+**What to look for in the log.** Each walk logs these lines, with the directory and
+quota ID:
+
+| Log line | Meaning |
+|---|---|
+| `Walk queued behind N other(s): ...` | A job asked for a walk; N walks are ahead of it. |
+| `Joining the walk already queued/running: ...` | A resubmitted job found its walk in progress. |
+| `Walk started: ...` | The walk has begun, and its marker says `started`. |
+| `Walk still running after N minutes: ...` | Logged every 30 minutes while a walk runs. |
+| `Walk finished after Ns: ...` | Done; the marker now says `complete`. |
+| `Walk failed after Ns: ...` | `lfs` failed or timed out; the error follows. The marker still says `started`, so the next request walks again. |
+| `... its marker records a walk ... not completed - walking it (again)` | A walk interrupted earlier (e.g. by a restart) is being re-run. |
+
+**A few extra `lfs project -d` calls per directory.** A repeated `add_local_user`
+or `add_local_project` for directories that already exist reads each directory's
+project ID (twice) and its marker, on volumes with a `default_quota` (bounded by
+`max_runners` and `command_timeout_secs`). A read
+that fails fails the job, rather than being taken to mean the directory has no quota.
 
 **ID strategy format strings:**
 
@@ -784,6 +870,8 @@ Literals outside braces are appended: `"{UID-100000}01"` for UID 100125 →
 type         = "lustre"
 lfs_command  = "sudo lfs"
 max_runners  = 4
+# /home and /projects are tagged with `lfs project -p 1 -s <root>`
+unassigned_project_ids = [1]
 
 [quota_engines.lustre.id_strategies]
 home     = "{UID-1483800000}01"

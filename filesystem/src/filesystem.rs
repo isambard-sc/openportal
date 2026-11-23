@@ -59,6 +59,20 @@ fn get_exec_prefix() -> Option<&'static [String]> {
     EXEC_PREFIX.get().and_then(|p| p.as_deref())
 }
 
+/// The exec prefix, for other modules that offer native and remote versions
+/// of an operation (e.g. `crate::quotamarker`).
+pub(crate) fn exec_prefix() -> Option<&'static [String]> {
+    get_exec_prefix()
+}
+
+/// Run a command through `prefix` - see `run_remote`.
+pub(crate) async fn run_with_prefix(
+    prefix: &[String],
+    args: &[&str],
+) -> Result<(i32, String, String), Error> {
+    run_remote(prefix, args).await
+}
+
 ///
 /// Run an external command built from a pre-tokenised prefix plus
 /// additional arguments.  Returns (exit_code, stdout, stderr).

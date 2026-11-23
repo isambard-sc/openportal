@@ -21,7 +21,7 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-use crate::quotamarker::{MarkerRead, QuotaMarker};
+use crate::quotamarker::{MarkerLocation, MarkerRead, QuotaMarker};
 
 use crate::volumeconfig::{ProjectVolumeConfig, UserVolumeConfig};
 
@@ -715,6 +715,7 @@ struct Walk {
     lfs_command: String,
     args: Vec<String>,
     directory: PathBuf,
+    marker: MarkerLocation,
     kind: WalkKind,
     timeout: Duration,
     status: tokio::sync::watch::Sender<WalkStatus>,
@@ -825,14 +826,12 @@ async fn run_walk(walk: &Walk) -> Result<(), Error> {
     if let WalkKind::Assign(id) = walk.kind {
         // Without this, an interrupted walk would later look finished - so
         // the walk does not start unless it can be recorded.
-        crate::quotamarker::write_marker(
-            &walk.directory,
-            &crate::quotamarker::QuotaMarker::started(id, started_at),
-        )
-        .map_err(|e| {
-            tracing::error!("Walk failed before it started: {}: {}", description, e);
-            e
-        })?;
+        crate::quotamarker::write_marker(&walk.marker, &QuotaMarker::started(id, started_at))
+            .await
+            .map_err(|e| {
+                tracing::error!("Walk failed before it started: {}: {}", description, e);
+                e
+            })?;
     }
 
     let result = run_walk_command(walk, &description, clock).await;
@@ -842,11 +841,14 @@ async fn run_walk(walk: &Walk) -> Result<(), Error> {
     match &result {
         Ok(()) => {
             let recorded = match walk.kind {
-                WalkKind::Assign(id) => crate::quotamarker::write_marker(
-                    &walk.directory,
-                    &crate::quotamarker::QuotaMarker::complete(id, Some(started_at), Utc::now()),
-                ),
-                WalkKind::Clear => crate::quotamarker::remove_marker(&walk.directory),
+                WalkKind::Assign(id) => {
+                    crate::quotamarker::write_marker(
+                        &walk.marker,
+                        &QuotaMarker::complete(id, Some(started_at), Utc::now()),
+                    )
+                    .await
+                }
+                WalkKind::Clear => crate::quotamarker::remove_marker(&walk.marker).await,
             };
 
             if let Err(e) = recorded {
@@ -938,6 +940,7 @@ async fn run_walk_command(
 async fn enqueue_walk(
     lfs_command: &str,
     directory: &Path,
+    marker: MarkerLocation,
     kind: WalkKind,
     timeout: Duration,
 ) -> Result<tokio::sync::watch::Receiver<WalkStatus>, Error> {
@@ -985,6 +988,7 @@ async fn enqueue_walk(
         lfs_command: lfs_command.to_string(),
         args,
         directory: directory.to_path_buf(),
+        marker,
         kind,
         timeout,
         status,
@@ -1242,6 +1246,7 @@ impl LustreEngine {
     /// still queued or running - it carries on, and a resubmitted job joins it.
     async fn queue_walk(
         &self,
+        root: &Path,
         directory: &Path,
         kind: WalkKind,
         expires: &chrono::DateTime<Utc>,
@@ -1261,6 +1266,7 @@ impl LustreEngine {
         let status = enqueue_walk(
             self.config.lfs_command(),
             directory,
+            MarkerLocation::new(root, directory)?,
             kind,
             self.config.recursive_timeout(),
         )
@@ -1327,6 +1333,7 @@ impl LustreEngine {
     /// This operation can be very slow on large directory trees
     async fn clear_lustre_id(
         &self,
+        root: &Path,
         directory: &Path,
         lustre_id: u64,
         expires: &chrono::DateTime<Utc>,
@@ -1362,7 +1369,8 @@ impl LustreEngine {
             return Ok(true);
         }
 
-        self.queue_walk(directory, WalkKind::Clear, expires).await
+        self.queue_walk(root, directory, WalkKind::Clear, expires)
+            .await
     }
 
     /// Assign a Lustre ID to a directory recursively
@@ -1381,6 +1389,7 @@ impl LustreEngine {
     /// recorded.
     async fn assign_lustre_id(
         &self,
+        root: &Path,
         directory: &Path,
         lustre_id: u64,
         expires: &chrono::DateTime<Utc>,
@@ -1388,7 +1397,9 @@ impl LustreEngine {
         let current_id = self.get_lustre_id_from_dir(directory, expires).await?;
 
         if current_id == Some(lustre_id) && !is_dry_run() {
-            match crate::quotamarker::read_marker(directory) {
+            let location = MarkerLocation::new(root, directory)?;
+
+            match crate::quotamarker::read_marker(&location).await {
                 MarkerRead::Ours(marker) if marker.is_complete_for(lustre_id) => {
                     tracing::debug!(
                         "Directory {} already has Lustre ID {} ({})",
@@ -1407,9 +1418,11 @@ impl LustreEngine {
                     );
 
                     if let Err(e) = crate::quotamarker::write_marker(
-                        directory,
+                        &location,
                         &QuotaMarker::complete(lustre_id, None, Utc::now()),
-                    ) {
+                    )
+                    .await
+                    {
                         tracing::warn!("Could not record the earlier assignment: {}", e);
                     }
 
@@ -1445,7 +1458,7 @@ impl LustreEngine {
             );
         }
 
-        self.queue_walk(directory, WalkKind::Assign(lustre_id), expires)
+        self.queue_walk(root, directory, WalkKind::Assign(lustre_id), expires)
             .await
     }
 
@@ -1803,7 +1816,8 @@ impl LustreEngine {
 
         for path_config in volume_config.path_configs() {
             let path = path_config.path(mapping.clone().into())?;
-            self.clear_lustre_id(&path, quota_id, expires).await?;
+            self.clear_lustre_id(Path::new(path_config.root()), &path, quota_id, expires)
+                .await?;
         }
 
         if !is_lustre_id_only() {
@@ -1869,7 +1883,10 @@ impl LustreEngine {
 
         for path_config in volume_config.path_configs() {
             let path = path_config.path(mapping.clone().into())?;
-            if !self.assign_lustre_id(&path, quota_id, expires).await? {
+            if !self
+                .assign_lustre_id(Path::new(path_config.root()), &path, quota_id, expires)
+                .await?
+            {
                 walking.push(path.display().to_string());
             }
         }
@@ -1925,7 +1942,8 @@ impl LustreEngine {
 
         for path_config in volume_config.path_configs() {
             let path = path_config.path(mapping.clone().into())?;
-            self.clear_lustre_id(&path, quota_id, expires).await?;
+            self.clear_lustre_id(Path::new(path_config.root()), &path, quota_id, expires)
+                .await?;
         }
 
         if !is_lustre_id_only() {
@@ -1991,7 +2009,10 @@ impl LustreEngine {
 
         for path_config in volume_config.path_configs() {
             let path = path_config.project_path(mapping)?;
-            if !self.assign_lustre_id(&path, quota_id, expires).await? {
+            if !self
+                .assign_lustre_id(Path::new(path_config.root()), &path, quota_id, expires)
+                .await?
+            {
                 walking.push(path.display().to_string());
             }
         }
@@ -2189,7 +2210,10 @@ impl LustreEngine {
                 // an assigned directory is walked again only if its marker
                 // says the last walk did not finish - see `assign_lustre_id`
                 LustreIdState::Unassigned(_) | LustreIdState::Assigned => {
-                    if !self.assign_lustre_id(&path, quota_id, expires).await? {
+                    if !self
+                        .assign_lustre_id(Path::new(path_config.root()), &path, quota_id, expires)
+                        .await?
+                    {
                         all_set = false;
                     }
                 }
@@ -2366,7 +2390,10 @@ impl LustreEngine {
                 // an assigned directory is walked again only if its marker
                 // says the last walk did not finish - see `assign_lustre_id`
                 LustreIdState::Unassigned(_) | LustreIdState::Assigned => {
-                    if !self.assign_lustre_id(&path, quota_id, expires).await? {
+                    if !self
+                        .assign_lustre_id(Path::new(path_config.root()), &path, quota_id, expires)
+                        .await?
+                    {
                         all_set = false;
                     }
                 }
@@ -2968,8 +2995,13 @@ mod tests {
         ProjectMapping::parse("proj.portal:root").unwrap()
     }
 
-    fn marker(path: &Path) -> QuotaMarker {
-        match crate::quotamarker::read_marker(path) {
+    /// The marker location for a project directory directly under its root.
+    fn loc(dir: &Path) -> MarkerLocation {
+        MarkerLocation::new(dir.parent().unwrap(), dir).unwrap()
+    }
+
+    async fn marker(path: &Path) -> QuotaMarker {
+        match crate::quotamarker::read_marker(&loc(path)).await {
             MarkerRead::Ours(marker) => marker,
             other => panic!("expected a marker in {}, got {:?}", path.display(), other),
         }
@@ -3018,24 +3050,24 @@ mod tests {
         assert!(lustre.line(&foreign).starts_with("777 P "));
 
         // the walk is recorded as started and completed
-        let walked = marker(&inherited);
+        let walked = marker(&inherited).await;
         assert!(walked.is_complete_for(500));
         assert!(walked.started.is_some());
         assert!(walked.completed >= walked.started);
 
         // the directory that already had the ID, with no marker, was assigned
         // before markers were kept: it is taken as complete, and recorded so
-        let earlier = marker(&has_id);
+        let earlier = marker(&has_id).await;
         assert!(earlier.is_complete_for(500));
         assert!(earlier.started.is_none());
 
         // directories that are not ours to walk get no marker
         assert_eq!(
-            crate::quotamarker::read_marker(&cleared),
+            crate::quotamarker::read_marker(&loc(&cleared)).await,
             MarkerRead::Absent
         );
         assert_eq!(
-            crate::quotamarker::read_marker(&foreign),
+            crate::quotamarker::read_marker(&loc(&foreign)).await,
             MarkerRead::Absent
         );
 
@@ -3064,12 +3096,23 @@ mod tests {
         let planted = lustre.seed_project("planted", "500", "P");
         let complete = lustre.seed_project("complete", "500", "P");
 
-        crate::quotamarker::write_marker(&started, &QuotaMarker::started(500, Utc::now())).unwrap();
-        crate::quotamarker::write_marker(&other_id, &QuotaMarker::complete(499, None, Utc::now()))
+        crate::quotamarker::write_marker(&loc(&started), &QuotaMarker::started(500, Utc::now()))
+            .await
             .unwrap();
-        std::os::unix::fs::symlink("/dev/null", crate::quotamarker::marker_path(&planted)).unwrap();
-        crate::quotamarker::write_marker(&complete, &QuotaMarker::complete(500, None, Utc::now()))
-            .unwrap();
+        crate::quotamarker::write_marker(
+            &loc(&other_id),
+            &QuotaMarker::complete(499, None, Utc::now()),
+        )
+        .await
+        .unwrap();
+        std::fs::create_dir(loc(&planted).path().parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("/dev/null", loc(&planted).path()).unwrap();
+        crate::quotamarker::write_marker(
+            &loc(&complete),
+            &QuotaMarker::complete(500, None, Utc::now()),
+        )
+        .await
+        .unwrap();
 
         let engine = lustre.engine("unassigned_project_ids = [1]");
         engine.initialize().await.unwrap();
@@ -3097,7 +3140,11 @@ mod tests {
         assert!(!log.contains(&complete.display().to_string()));
 
         for path in [&started, &other_id, &planted, &complete] {
-            assert!(marker(path).is_complete_for(500), "{}", path.display());
+            assert!(
+                marker(path).await.is_complete_for(500),
+                "{}",
+                path.display()
+            );
         }
     }
 
@@ -3137,7 +3184,10 @@ mod tests {
         // the limit is already in place, and the walk is under way
         assert_eq!(lustre.log("setquota.log"), "500 10240M\n");
         assert_eq!(lustre.log("assigned.log"), "");
-        assert_eq!(marker(&dir).state, crate::quotamarker::WalkState::Started);
+        assert_eq!(
+            marker(&dir).await.state,
+            crate::quotamarker::WalkState::Started
+        );
 
         // a resubmission joins the walk, and returns the quota once it is done
         let quota = engine
@@ -3147,7 +3197,7 @@ mod tests {
 
         assert_eq!(quota.limit(), &limit);
         assert_eq!(lustre.log("assigned.log").lines().count(), 1);
-        assert!(marker(&dir).is_complete_for(500));
+        assert!(marker(&dir).await.is_complete_for(500));
     }
 
     /// A walk that fails is reported as a failure, not as success or as still
@@ -3172,7 +3222,10 @@ mod tests {
             .await;
 
         assert!(matches!(result, Err(Error::Failed(_))), "{:?}", result);
-        assert_eq!(marker(&dir).state, crate::quotamarker::WalkState::Started);
+        assert_eq!(
+            marker(&dir).await.state,
+            crate::quotamarker::WalkState::Started
+        );
 
         // once the cause is fixed, the next attempt walks again
         std::fs::remove_file(lustre.dir.join("fail")).unwrap();
@@ -3186,7 +3239,7 @@ mod tests {
             )
             .await
             .unwrap());
-        assert!(marker(&dir).is_complete_for(500));
+        assert!(marker(&dir).await.is_complete_for(500));
     }
 
     /// Clearing a quota walks the tree to clear the ID, and removes the marker.
@@ -3195,7 +3248,8 @@ mod tests {
         let lustre = FakeLustre::new("clear").await;
 
         let dir = lustre.seed_project("root", "500", "P");
-        crate::quotamarker::write_marker(&dir, &QuotaMarker::complete(500, None, Utc::now()))
+        crate::quotamarker::write_marker(&loc(&dir), &QuotaMarker::complete(500, None, Utc::now()))
+            .await
             .unwrap();
 
         let engine = lustre.engine("unassigned_project_ids = [1]");
@@ -3218,7 +3272,10 @@ mod tests {
             lustre.log("setquota.log"),
             format!("500 {}\n", lustre.dir.display())
         );
-        assert_eq!(crate::quotamarker::read_marker(&dir), MarkerRead::Absent);
+        assert_eq!(
+            crate::quotamarker::read_marker(&loc(&dir)).await,
+            MarkerRead::Absent
+        );
     }
 
     /// At start-up, a volume with a default quota must have roots tagged with
@@ -3339,7 +3396,7 @@ mod tests {
             .unwrap();
         assert_eq!(lustre.log("setquota.log").lines().count(), 1);
         assert_eq!(lustre.log("assigned.log").lines().count(), 1);
-        assert!(marker(&dir).is_complete_for(500));
+        assert!(marker(&dir).await.is_complete_for(500));
 
         // repeated: nothing to do
         crate::set_default_project_quotas(&mapping, &none, &expires_in(60))
@@ -3349,13 +3406,15 @@ mod tests {
         assert_eq!(lustre.log("assigned.log").lines().count(), 1);
 
         // interrupted walk: walked again, the limit is not touched
-        crate::quotamarker::write_marker(&dir, &QuotaMarker::started(500, Utc::now())).unwrap();
+        crate::quotamarker::write_marker(&loc(&dir), &QuotaMarker::started(500, Utc::now()))
+            .await
+            .unwrap();
         crate::set_default_project_quotas(&mapping, &none, &expires_in(60))
             .await
             .unwrap();
         assert_eq!(lustre.log("setquota.log").lines().count(), 1);
         assert_eq!(lustre.log("assigned.log").lines().count(), 2);
-        assert!(marker(&dir).is_complete_for(500));
+        assert!(marker(&dir).await.is_complete_for(500));
 
         // unassigned, but the ID already has a (raised) limit: only walked
         lustre.touch("limit_500", "5000M\n");
@@ -3387,7 +3446,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(lustre.log("assigned.log").lines().count(), 4);
-        assert!(marker(&dir).is_complete_for(500));
+        assert!(marker(&dir).await.is_complete_for(500));
     }
 
     /// A Lustre volume with a default quota is refused when the engine does not

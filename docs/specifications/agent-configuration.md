@@ -796,15 +796,20 @@ ready" until both are done.
 The walk queue lives only in memory. What records a walk across a restart of the
 agent is a marker file.
 
-**The `.openportal_quota` marker.** `lfs project -srp` tags the top directory first
-and then walks the tree, so the top directory's ID alone cannot say whether a walk
-finished. Each walk therefore records itself in `.openportal_quota` in the top
-directory:
+**Walk markers.** `lfs project -srp` tags the top directory first and then walks
+the tree, so the top directory's ID alone cannot say whether a walk finished. Each
+walk therefore records itself in a marker kept under the volume root, in a
+`.openportal_quota` directory alongside the user and project directories:
+
+| Walked directory | Its marker |
+|---|---|
+| `/projects/proj` | `/projects/.openportal_quota/proj.toml` |
+| `/home/proj/alice` | `/home/.openportal_quota/proj/alice.toml` |
 
 ```toml
 # Written by the OpenPortal filesystem agent to record the walk that gave
-# this directory tree its Lustre quota ID. Do not edit: a marker this
-# agent did not write is ignored, and the tree is walked again.
+# a directory tree its Lustre quota ID. Do not edit: a marker this agent
+# did not write is ignored, and the tree is walked again.
 quota_id = 1234
 state = "complete"
 started = "2027-03-01T10:15:02.118Z"
@@ -818,14 +823,20 @@ completed = "2027-03-01T12:40:57.904Z"
 - A directory that carries its quota ID but has **no** marker was tagged before
   markers were kept (or by hand). It is taken to be complete, and a `complete` marker
   with no `started` time is written to record that.
-- The marker is written by the agent's own user (root in practice), mode `0400`, via
-  a temporary file renamed into place, so it never follows a symlink. A marker that
-  is not a regular file owned by the agent's user, has more than one link, or cannot
-  be parsed is ignored and the tree is walked again - the worst a user can do by
-  editing or replacing it is cause a repeat walk.
+- **Users cannot reach the markers.** The volume root is the operator's directory,
+  and `.openportal_quota` and everything in it is created by the agent's own user
+  (root in practice), mode `0700`, with each marker `0400`. The walked directories
+  themselves are never written to. A marker is trusted only if every directory from
+  `.openportal_quota` down is a real directory (not a symlink) owned by the agent's
+  user and not writable by group or others, and the marker is a regular file with one
+  link, owned by the agent's user, that parses. Anything else is ignored and the tree
+  is walked again, so the worst a tampered marker can cause is a repeat walk.
+- With `exec-prefix` set, the markers are read and written by shell commands run
+  through the prefix, making the same checks.
 - `clear_local_user_quota` / `clear_local_project_quota` remove the marker once the
   ID has been cleared from the tree.
-- To force a tree to be walked again, delete its marker.
+- `ls -R <root>/.openportal_quota` shows the state of every walk on a volume. To force
+  a tree to be walked again, delete its marker.
 
 **What to look for in the log.** Each walk logs these lines, with the directory and
 quota ID:

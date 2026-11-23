@@ -155,14 +155,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
     finished. A failed walk fails the job with its error.
   - **Walks log** when they are queued, start, are still running (every 30
     minutes), and finish or fail, with how long they took.
-  - **A marker records each walk.** `.openportal_quota` in the top directory
-    says `started` while a walk runs and `complete` once it has finished, with
-    the UTC times. A tree whose marker still says `started` - the agent
-    restarted mid-walk, or the walk failed - is walked again on the next
-    request. A tree tagged before this release, with no marker, is taken to be
-    complete. The marker is written by the agent's user, mode `0400`, and one
-    it did not write is ignored, so the worst a user can do by touching it is
-    cause a repeat walk.
+  - **A marker records each walk.** A marker under the volume root (e.g.
+    `/projects/.openportal_quota/proj.toml` for `/projects/proj`) says
+    `started` while a walk runs and `complete` once it has finished, with the
+    UTC times. A tree whose marker still says `started` - the agent restarted
+    mid-walk, or the walk failed - is walked again on the next request. A tree
+    tagged before this release, with no marker, is taken to be complete.
+    Markers live outside the users' directories, in a directory only the
+    agent's user can enter, and one the agent did not write is ignored, so
+    the worst tampering can cause is a repeat walk. With `exec-prefix` set,
+    markers are handled through the prefix like every other file operation.
   - **`recursive_timeout_secs` is used.** The walk timeout was hard-coded to
     five hours.
   - **Failures are reported.** A quota that could not be read or set when

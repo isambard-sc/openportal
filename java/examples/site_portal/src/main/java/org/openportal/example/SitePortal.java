@@ -36,6 +36,7 @@ import org.openportal.ProjectUsageReport;
 import org.openportal.StorageReport;
 import org.openportal.Usage;
 import org.openportal.UsageReport;
+import org.openportal.UsageUnit;
 import org.openportal.UserIdentifier;
 import org.openportal.UserMapping;
 
@@ -241,15 +242,34 @@ public final class SitePortal {
     }
 
     /**
-     * A function turning a figure in <i>our</i> unit into the award's unit, or
-     * empty when there is no agreed factor.
+     * The {@link UsageUnit} a usage report in {@code name} is written in.
+     *
+     * <p>A unit OpenPortal knows comes at its default resolution: 3600 counts
+     * per hour for a time unit such as {@code GPUHR}, a million per pound for
+     * {@code GBP}. A unit two portals agreed between themselves -
+     * {@code CREDITS}, say - has no default, so this example says what one count
+     * of it is: a millionth, as for money. The report carries that, so the
+     * awarding portal never has to guess.
+     */
+    public static UsageUnit unitFor(String name) {
+        try {
+            return UsageUnit.parse(name);
+        } catch (IllegalArgumentException e) {
+            return UsageUnit.of(name, 1_000_000);
+        }
+    }
+
+    /**
+     * A function turning a figure in <i>our</i> unit into a {@link Usage} in
+     * the award's unit ({@link #unitFor} its allocation's units), or empty when
+     * there is no agreed factor.
      *
      * <p><b>This is what decides what the numbers in a usage report mean.</b> A
-     * {@link Usage} is a bare number; nothing in it says whether 50 is 50 node
-     * hours or 50 GPU hours. The unit is the one the awarding portal allocated
-     * in, so a site that reports its own figures unconverted is not reporting
-     * slightly differently - it is reporting a different quantity under the same
-     * name, and nothing on the wire will catch it.
+     * usage report says which unit it is in, and that unit is the one the
+     * awarding portal allocated in - so a site that reported its own figures
+     * unconverted would be stating a different quantity under the award's name.
+     * The report's unit says what the numbers are; this conversion is what
+     * makes it true.
      *
      * <p>Empty must be treated as "we cannot hold this award" rather than as
      * zero or as one-for-one. Guessing 1.0 would silently report a quarter of
@@ -272,8 +292,9 @@ public final class SitePortal {
         }
 
         double agreed = factor;
+        UsageUnit unit = unitFor(allocation.units());
 
-        return Optional.of(hours -> Usage.fromHours(hours * agreed));
+        return Optional.of(hours -> unit.usage(hours * agreed));
     }
 
     /**
@@ -832,6 +853,8 @@ public final class SitePortal {
      */
     public ProjectUsageReport buildUsageReport(
             String offering, String projectId, DateRange dateRange) {
+        // No unit: if the award turns out not to be here, the answer is an
+        // empty report, and an empty report claims nothing about its unit.
         ProjectUsageReport empty =
                 new ProjectUsageReport(ProjectIdentifier.parse(projectId));
 
@@ -879,16 +902,23 @@ public final class SitePortal {
         // least a number we can name.
         Allocation allocation = award.details().allocation().orElse(null);
         DoubleFunction<Usage> convert = converterFor(offering, allocation).orElse(null);
+        UsageUnit unit;
 
         if (convert == null) {
             LOG.log(Level.SEVERE, "award " + projectId + " on " + offering
                     + " is allocated in '" + allocation + "', which this site cannot account"
                     + " in - reporting our own " + SITE_UNIT + " unconverted");
 
-            convert = Usage::fromHours;
+            UsageUnit ours = unitFor(SITE_UNIT);
+            unit = ours;
+            convert = ours::usage;
+        } else {
+            unit = unitFor(allocation.units());
         }
 
-        ProjectUsageReport report = new ProjectUsageReport(localProject);
+        // The report says which unit it is in, so the awarding portal reads its
+        // figures as what they are rather than assuming hours.
+        ProjectUsageReport report = new ProjectUsageReport(localProject, unit);
         java.util.Set<String> monthsWithDays = new TreeSet<>();
         java.util.Set<String> settled = new TreeSet<>();
 

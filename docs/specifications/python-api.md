@@ -726,23 +726,65 @@ every other field.
 
 ### `Usage`
 
-A compute-time quantity (internally stored as an integer number of seconds).
+An integer count. What one count means is set by the `UsageUnit` of the report
+it is in - a node-second, a micro-pound - so a bare `Usage` prints as its raw
+count. Build one from an amount with `UsageUnit.usage`, or from time with
+`Usage.from_hours` and friends (a count of a time unit is a unit-second).
 
 **Properties:**
 
 | Property | Type | Description |
 |---|---|---|
-| `seconds` | `int` | Raw value in seconds |
+| `counts` | `int` | The raw count |
+| `seconds` | `int` | The same raw count, under its wire name |
 
 **Methods:**
 
 | Method | Signature | Description |
 |---|---|---|
-| `in_hours` | `() → str` | Return a human-readable string with all values expressed in hours (e.g. `"2.000 hours"`). Useful for consistent unit display when comparing across days. |
+| `from_counts` | `(counts: int) → Usage` | *(static)* A usage of `counts` counts |
+| `as_duration` | `() → str` | The value as a human duration, e.g. `"3.000 days"` - for figures that really are time, such as limits and queue waits |
+| `in_hours` | `() → str` | The value in hours, e.g. `"2.000 hours"` |
 
-`str(usage)` auto-scales to the most appropriate unit (seconds, minutes, or
-hours) with up to 3 decimal places, e.g. `"2.000 hours"`, `"40.433 minutes"`,
-`"1 second"`.
+`str(usage)` is the raw count, e.g. `"3200000"`. Scaling (`*`, `/`) rounds to
+the nearest count, ties to even.
+
+---
+
+### `UsageUnit`
+
+What one count of a usage report's figures means: `counts_per_unit` counts make
+one unit. `UsageUnit("GBP")` is a well-known unit at its default resolution - an
+ISO 4217 currency code (or `£` / `€`) at 1000000 per unit, or a time unit
+(`NHR`, `GPUHR`, `CPUHR`, `COREHR`, `GBHR`, `MBHR`, `BHR`) at 3600 per hour.
+Anything else raises `ValueError` unless its resolution is given:
+`UsageUnit("CREDITS", counts_per_unit=100)`.
+
+| Member | Type / signature | Description |
+|---|---|---|
+| `name`, `counts_per_unit` | `str`, `int` | The canonical name and resolution |
+| `is_time`, `is_currency` | `bool` | Which kind of well-known unit this is |
+| `usage` | `(amount) → Usage` | An amount as a `Usage`. An `int`, `str` or `decimal.Decimal` is exact, and refused if finer than one count; a `float` is rounded to the nearest count. A `bool` is refused |
+| `amount` | `(usage: Usage) → float` | The amount of this unit a `Usage` holds |
+| `format` | `(usage: Usage, decimals: int \| None = None) → str` | E.g. `"3.20 GBP"`; full resolution if `decimals` is not given |
+
+### `Amount`
+
+A `Usage` with its `UsageUnit`, as reports return totals: `str(amount)` is
+`"3.200000 GBP"`, and it honours a format spec - `f"{amount:.2f}"` gives
+`"3.20 GBP"`. Properties `value` (`float`), `usage` and `unit`.
+
+```python
+gbp = openportal.UsageUnit("GBP")
+report = openportal.ProjectUsageReport(project, unit=gbp)
+report.set_component_unit("gpu", openportal.UsageUnit("GPUHR"))
+
+day = openportal.DailyProjectUsageReport()
+day.add_usage("alice", gbp.usage("3.20"))
+day.add_component_usage("gpu", "alice", openportal.UsageUnit("GPUHR").usage(1.5))
+report.add_report(date, day)
+
+print(f"{report.total():.2f}")   # 3.20 GBP
 
 ---
 
@@ -777,8 +819,25 @@ counts and average wait times.
 
 ### `ProjectUsageReport`
 
-Compute usage for a single project over a date range, indexed by calendar
-date. Arithmetic operators (`+`, `+=`) are supported.
+Usage for a single project over a date range, indexed by calendar date, in the
+report's `unit`. `ProjectUsageReport(project, unit=...)` constructs one; a report
+without a unit can be read but no figures can be added to it - `add_report` and
+`set_report` raise `ValueError` - until `set_unit` or `set_time_unit` has said
+what they are in. `+` and `+=` raise `ValueError` for reports in different units.
+
+**Units:**
+
+| Member | Signature | Description |
+|---|---|---|
+| `unit` | `UsageUnit \| None` | The report's unit; `None` only for a report from before units |
+| `set_unit` | `(unit: UsageUnit) → None` | Declare the unit. Allowed only while there is none; on a report from before units it declares what the figures already mean and changes none of them |
+| `set_time_unit` | `(name: str) → None` | `set_unit` for a time unit at 3600 per hour - what every report from before units was, in its award's unit. Refuses a currency |
+| `component_unit` | `(component: str) → UsageUnit \| None` | The component's own unit, else the report's |
+| `component_units` | `dict[str, UsageUnit]` | The components with a unit of their own |
+| `set_component_unit` | `(component: str, unit: UsageUnit) → None` | Give a component its own unit; refused if it already has figures in another |
+| `total` | `() → Amount \| None` | The total in the report's unit |
+| `component_total` | `(component: str) → Amount \| None` | One component's total, in its unit |
+| `convert` | `(to: UsageUnit, factor: float) → None` | Re-express the report in `to`, multiplying every consumption figure by `factor`; components keep their meaning |
 
 **Properties:**
 
@@ -800,7 +859,7 @@ date. Arithmetic operators (`+`, `+=`) are supported.
 | `remap_portal` | `(new_portal: PortalIdentifier) → None` | Swap the portal while keeping each project name unchanged, e.g. `project.portal` → `project.new_portal`. |
 | `remap_users` | `(new_usermapping: dict[UserIdentifier, str]) → None` | Update local username strings for the specified users. Raises `OSError` if the remapping would merge two distinct users into the same local username. |
 
-`str(report)` auto-scales usage units per user per day.
+`str(report)` prints every figure in the report's unit (`3.200000 GBP`), and as a duration for a report from before units. Queue waits are always durations.
 
 ---
 
@@ -824,7 +883,9 @@ active projects. Arithmetic operators (`+`, `+=`) are supported.
 | `get_report` | `(project: ProjectIdentifier) → ProjectUsageReport` | Return the usage report for `project`, or an empty report if not present |
 | `get_component` | `(component: str) → UsageReport` | Return a new `UsageReport` containing only the named component's usage |
 | `filter` | `(range: DateRange) → UsageReport` | Return a copy of this report with every contained `ProjectUsageReport` filtered to only days that fall within `range` (inclusive on both ends). |
-| `combine` | `(reports: list[UsageReport]) → UsageReport` | *(static)* Merge a list of portal-level reports |
+| `combine` | `(reports: list[UsageReport]) → UsageReport` | *(static)* Merge a list of portal-level reports. Raises if a project's reports are in different units |
+| `common_unit` | `UsageUnit \| None` | The unit every project shares, if they share one |
+| `total` | `() → Amount \| None` | The portal-wide total, if every project shares a unit |
 | `remap_portal` | `(new_portal: PortalIdentifier) → None` | Update `self.portal` and remap every contained project to the new portal, e.g. `project.portal` → `project.new_portal`. |
 | `remap_project` | `(old_project: ProjectIdentifier, new_project: ProjectIdentifier) → None` | Remap a single contained project from `old_project` to `new_project`. Does nothing if `old_project` is not present. |
 | `remap_users` | `(new_usermapping: dict[UserIdentifier, str]) → None` | Update local username strings across all contained project reports. Raises `OSError` on clash within any project. |

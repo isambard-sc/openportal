@@ -6,12 +6,13 @@ use chrono::Utc;
 use greatwestern::grammar;
 use greatwestern::storagereport;
 use greatwestern::usagereport;
+use greatwestern::usageunit;
 use once_cell::sync::Lazy;
 use paddington::SecretKey;
 use pyo3::basic::CompareOp;
-use pyo3::exceptions::PyOSError;
+use pyo3::exceptions::{PyOSError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDate, PyDateTime, PyList, PyString, PyTzInfo};
+use pyo3::types::{PyBool, PyDate, PyDateTime, PyFloat, PyInt, PyList, PyString, PyTzInfo};
 use pyo3::{IntoPyObject, PyResult, Python};
 use pyo3_stub_gen::derive::*;
 use pyo3_stub_gen::{define_stub_info_gatherer, PyStubType, TypeInfo};
@@ -2691,6 +2692,219 @@ impl From<grammar::Allocation> for Allocation {
     }
 }
 
+/// An amount accepted from Python: an `int`, `str` or `decimal.Decimal` is
+/// converted exactly, a `float` is rounded to the nearest count.
+#[derive(FromPyObject)]
+struct AmountArg(Py<PyAny>);
+
+impl PyStubType for AmountArg {
+    fn type_output() -> TypeInfo {
+        TypeInfo::builtin("int | float | str | decimal.Decimal")
+    }
+}
+
+impl AmountArg {
+    fn to_usage(&self, py: Python<'_>, unit: &usageunit::UsageUnit) -> PyResult<Usage> {
+        let amount = self.0.bind(py);
+        let invalid = |e: templemeads::Error| PyErr::new::<PyValueError, _>(format!("{}", e));
+
+        // `bool` is a subclass of `int`, and True is not an amount of money.
+        if amount.is_instance_of::<PyBool>() {
+            return Err(PyErr::new::<PyTypeError, _>("An amount cannot be a bool"));
+        }
+
+        if amount.is_instance_of::<PyInt>() || amount.is_instance_of::<PyString>() {
+            let text: String = amount.str()?.extract()?;
+            return unit.usage_from_decimal(&text).map(Usage).map_err(invalid);
+        }
+
+        if amount.is_instance_of::<PyFloat>() {
+            let value: f64 = amount.extract()?;
+            return unit.usage(value).map(Usage).map_err(invalid);
+        }
+
+        let decimal = py.import("decimal")?.getattr("Decimal")?;
+
+        if amount.is_instance(&decimal)? {
+            // Fixed-point notation, never an exponent, so the exact parser
+            // reads it as written.
+            let text: String = py
+                .import("builtins")?
+                .getattr("format")?
+                .call1((amount, "f"))?
+                .extract()?;
+            return unit.usage_from_decimal(&text).map(Usage).map_err(invalid);
+        }
+
+        Err(PyErr::new::<PyTypeError, _>(format!(
+            "An amount must be an int, float, str or decimal.Decimal, not {}",
+            amount.get_type().name()?
+        )))
+    }
+}
+
+/// What one count of a Usage means: `counts_per_unit` counts make one of the
+/// unit. `UsageUnit("GBP")` is a well-known unit at its default resolution
+/// (1000000 counts per pound; 3600 per hour for a time unit such as "NHR");
+/// `UsageUnit("CREDITS", counts_per_unit=100)` is any unit, at any resolution.
+#[gen_stub_pyclass]
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone)]
+struct UsageUnit(usageunit::UsageUnit);
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl UsageUnit {
+    #[new]
+    #[pyo3(signature = (name, counts_per_unit = None))]
+    fn new(name: &str, counts_per_unit: Option<u64>) -> PyResult<Self> {
+        let unit = match counts_per_unit {
+            Some(counts_per_unit) => usageunit::UsageUnit::new(name, counts_per_unit),
+            None => usageunit::UsageUnit::parse(name),
+        };
+
+        unit.map(Self)
+            .map_err(|e| PyErr::new::<PyValueError, _>(format!("{}", e)))
+    }
+
+    #[getter]
+    fn name(&self) -> PyResult<String> {
+        Ok(self.0.name().to_string())
+    }
+
+    #[getter]
+    fn counts_per_unit(&self) -> PyResult<u64> {
+        Ok(self.0.counts_per_unit())
+    }
+
+    #[getter]
+    fn is_time(&self) -> PyResult<bool> {
+        Ok(self.0.is_time())
+    }
+
+    #[getter]
+    fn is_currency(&self) -> PyResult<bool> {
+        Ok(self.0.is_currency())
+    }
+
+    /// An amount of this unit as a Usage. An int, str or decimal.Decimal is
+    /// exact (and refused if finer than one count); a float is rounded to the
+    /// nearest count.
+    fn usage(&self, py: Python<'_>, amount: AmountArg) -> PyResult<Usage> {
+        amount.to_usage(py, &self.0)
+    }
+
+    /// The amount of this unit a Usage holds.
+    fn amount(&self, usage: &Usage) -> PyResult<f64> {
+        Ok(self.0.amount(usage.0))
+    }
+
+    /// A Usage printed in this unit, e.g. "3.20 GBP" with decimals=2; at the
+    /// unit's full resolution if decimals is not given.
+    #[pyo3(signature = (usage, decimals = None))]
+    fn format(&self, usage: &Usage, decimals: Option<usize>) -> PyResult<String> {
+        let amount = usageunit::Amount::new(usage.0, &self.0);
+        Ok(match decimals {
+            Some(decimals) => format!("{:.*}", decimals, amount),
+            None => amount.to_string(),
+        })
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.name().to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        Ok(format!(
+            "UsageUnit(\"{}\", counts_per_unit={})",
+            self.0.name(),
+            self.0.counts_per_unit()
+        ))
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .extract::<UsageUnit>()
+            .map(|o| o.0 == self.0)
+            .unwrap_or(false)
+    }
+
+    fn __hash__(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.0.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+/// A Usage together with its unit: prints as "3.200000 GBP", and honours a
+/// format spec - f"{amount:.2f}" gives "3.20 GBP".
+#[gen_stub_pyclass]
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone)]
+struct Amount(usageunit::Amount);
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl Amount {
+    #[new]
+    fn new(usage: &Usage, unit: &UsageUnit) -> PyResult<Self> {
+        Ok(Self(usageunit::Amount::new(usage.0, &unit.0)))
+    }
+
+    /// The amount as a number of the unit.
+    #[getter]
+    fn value(&self) -> PyResult<f64> {
+        Ok(self.0.value())
+    }
+
+    #[getter]
+    fn usage(&self) -> PyResult<Usage> {
+        Ok(Usage(self.0.usage()))
+    }
+
+    #[getter]
+    fn unit(&self) -> PyResult<UsageUnit> {
+        Ok(UsageUnit(self.0.unit().clone()))
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        Ok(format!("Amount({})", self.0))
+    }
+
+    /// Supports a precision, as for a float: "", ".2f", ".2".
+    fn __format__(&self, spec: &str) -> PyResult<String> {
+        let spec = spec.trim_end_matches('f');
+
+        if spec.is_empty() {
+            return Ok(self.0.to_string());
+        }
+
+        let decimals = spec
+            .strip_prefix('.')
+            .and_then(|d| d.parse::<usize>().ok())
+            .ok_or_else(|| {
+                PyErr::new::<PyValueError, _>(format!(
+                    "Unsupported format for an Amount: '{}' - use e.g. '.2f'",
+                    spec
+                ))
+            })?;
+
+        Ok(format!("{:.*}", decimals, self.0))
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .extract::<Amount>()
+            .map(|o| o.0 == self.0)
+            .unwrap_or(false)
+    }
+}
+
 #[gen_stub_pyclass]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2737,6 +2951,25 @@ impl Usage {
     #[staticmethod]
     fn from_years(years: f64) -> PyResult<Self> {
         Ok(Self(usagereport::Usage::from_years(years)))
+    }
+
+    /// A usage of `counts` counts. What a count means - a node-second, a
+    /// micro-pound - is set by the unit of the report it is in.
+    #[staticmethod]
+    fn from_counts(counts: u64) -> PyResult<Self> {
+        Ok(Self(usagereport::Usage::from_counts(counts)))
+    }
+
+    /// The raw count. See `from_counts`.
+    #[getter]
+    fn counts(&self) -> PyResult<u64> {
+        Ok(self.0.counts())
+    }
+
+    /// This usage as a human duration, e.g. "3.000 days" - for figures that
+    /// really are time, such as limits and queue waits.
+    fn as_duration(&self) -> PyResult<String> {
+        Ok(self.0.as_duration().to_string())
     }
 
     #[getter]
@@ -2885,13 +3118,30 @@ impl UsageReport {
         Ok(self.clone())
     }
 
+    /// Raises if the two cannot be summed - a different portal, or a
+    /// project whose two reports are in different units.
     fn __add__(&self, other: &UsageReport) -> PyResult<Self> {
-        Ok(Self(self.0.clone() + other.0.clone()))
+        let mut sum = self.0.clone();
+        sum.try_add(other.0.clone())
+            .map_err(|e| PyErr::new::<PyValueError, _>(format!("{}", e)))?;
+        Ok(Self(sum))
     }
 
     fn __iadd__(&mut self, other: &UsageReport) -> PyResult<()> {
-        self.0 += other.0.clone();
-        Ok(())
+        self.0
+            .try_add(other.0.clone())
+            .map_err(|e| PyErr::new::<PyValueError, _>(format!("{}", e)))
+    }
+
+    /// The unit every project's report is in, if they share one.
+    #[getter]
+    fn common_unit(&self) -> PyResult<Option<UsageUnit>> {
+        Ok(self.0.common_unit().map(UsageUnit))
+    }
+
+    /// The total across every project, if they share a unit; else None.
+    fn total(&self) -> PyResult<Option<Amount>> {
+        Ok(self.0.total().map(Amount))
     }
 
     fn __mul__(&self, factor: f64) -> PyResult<Self> {
@@ -3074,9 +3324,85 @@ struct ProjectUsageReport(usagereport::ProjectUsageReport);
 #[gen_stub_pymethods]
 #[pymethods]
 impl ProjectUsageReport {
+    /// A report for `project`, with its usage in `unit`. Without a unit, the
+    /// report can be read but no figures can be added until `set_unit` (or
+    /// `set_time_unit`) has said what they are in.
     #[new]
-    fn new(project: &ProjectIdentifier) -> PyResult<Self> {
-        Ok(Self(usagereport::ProjectUsageReport::new(&project.0)))
+    #[pyo3(signature = (project, unit = None))]
+    fn new(project: &ProjectIdentifier, unit: Option<&UsageUnit>) -> PyResult<Self> {
+        Ok(Self(match unit {
+            Some(unit) => usagereport::ProjectUsageReport::new_in(&project.0, &unit.0),
+            None => usagereport::ProjectUsageReport::new(&project.0),
+        }))
+    }
+
+    /// The unit this report's usage is in, or None for a report from before
+    /// units.
+    #[getter]
+    fn unit(&self) -> PyResult<Option<UsageUnit>> {
+        Ok(self.0.unit().cloned().map(UsageUnit))
+    }
+
+    /// Declare the unit of this report. Allowed only while it has none; on a
+    /// report from before units it declares what the figures already mean,
+    /// and changes none of them. Use `convert` to change a unit.
+    fn set_unit(&mut self, unit: &UsageUnit) -> PyResult<()> {
+        self.0
+            .set_unit(&unit.0)
+            .map_err(|e| PyErr::new::<PyValueError, _>(format!("{}", e)))
+    }
+
+    /// Declare that this report is in the time unit `name` at 3600 counts per
+    /// hour, as every report from before units was - in the unit of its
+    /// award's allocation. Refuses a currency, and a report with a unit.
+    fn set_time_unit(&mut self, name: &str) -> PyResult<()> {
+        self.0
+            .set_time_unit(name)
+            .map_err(|e| PyErr::new::<PyValueError, _>(format!("{}", e)))
+    }
+
+    /// The unit `component` is in: its own, else the report's.
+    fn component_unit(&self, component: &str) -> PyResult<Option<UsageUnit>> {
+        Ok(self.0.component_unit(component).map(UsageUnit))
+    }
+
+    /// The components with a unit of their own.
+    #[getter]
+    fn component_units(&self) -> PyResult<std::collections::HashMap<String, UsageUnit>> {
+        Ok(self
+            .0
+            .component_units()
+            .into_iter()
+            .map(|(k, v)| (k, UsageUnit(v)))
+            .collect())
+    }
+
+    /// Give `component` a unit of its own. Refused if it already has figures
+    /// in a different unit.
+    fn set_component_unit(&mut self, component: &str, unit: &UsageUnit) -> PyResult<()> {
+        self.0
+            .set_component_unit(component, &unit.0)
+            .map_err(|e| PyErr::new::<PyValueError, _>(format!("{}", e)))
+    }
+
+    /// The total usage in the report's unit, or None for a report from
+    /// before units.
+    fn total(&self) -> PyResult<Option<Amount>> {
+        Ok(self.0.total().map(Amount))
+    }
+
+    /// The total of one component, in that component's unit.
+    fn component_total(&self, component: &str) -> PyResult<Option<Amount>> {
+        Ok(self.0.component_total(component).map(Amount))
+    }
+
+    /// Re-express this report in `to`, multiplying every consumption figure
+    /// by `factor` (how many of `to` one of the current unit is worth).
+    /// Components keep their meaning.
+    fn convert(&mut self, to: &UsageUnit, factor: f64) -> PyResult<()> {
+        self.0
+            .convert(&to.0, factor)
+            .map_err(|e| PyErr::new::<PyValueError, _>(format!("{}", e)))
     }
 
     fn to_json(&self) -> PyResult<String> {
@@ -3114,13 +3440,18 @@ impl ProjectUsageReport {
         Ok(self.clone())
     }
 
+    /// Raises if the two cannot be summed - different projects or units.
     fn __add__(&self, other: &ProjectUsageReport) -> PyResult<Self> {
-        Ok(Self(self.0.clone() + other.0.clone()))
+        let mut sum = self.0.clone();
+        sum.try_add(other.0.clone())
+            .map_err(|e| PyErr::new::<PyValueError, _>(format!("{}", e)))?;
+        Ok(Self(sum))
     }
 
     fn __iadd__(&mut self, other: &ProjectUsageReport) -> PyResult<()> {
-        self.0 += other.0.clone();
-        Ok(())
+        self.0
+            .try_add(other.0.clone())
+            .map_err(|e| PyErr::new::<PyValueError, _>(format!("{}", e)))
     }
 
     fn __mul__(&self, factor: f64) -> PyResult<Self> {
@@ -3528,8 +3859,8 @@ impl ProjectUsageReport {
         report: &DailyProjectUsageReport,
     ) -> PyResult<()> {
         self.0
-            .set_report(&grammar::Date::from_chrono(&date), &report.0);
-        Ok(())
+            .set_report(&grammar::Date::from_chrono(&date), &report.0)
+            .map_err(|e| PyErr::new::<PyValueError, _>(format!("{}", e)))
     }
 
     fn add_report(
@@ -3538,8 +3869,8 @@ impl ProjectUsageReport {
         report: &DailyProjectUsageReport,
     ) -> PyResult<()> {
         self.0
-            .add_report(&grammar::Date::from_chrono(&date), &report.0);
-        Ok(())
+            .add_report(&grammar::Date::from_chrono(&date), &report.0)
+            .map_err(|e| PyErr::new::<PyValueError, _>(format!("{}", e)))
     }
 
     #[pyo3(signature = (with_usage_only = true))]
@@ -6969,6 +7300,8 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Node>()?;
     m.add_class::<Allocation>()?;
     m.add_class::<Usage>()?;
+    m.add_class::<UsageUnit>()?;
+    m.add_class::<Amount>()?;
     m.add_class::<UsageReport>()?;
     m.add_class::<ProjectUsageReport>()?;
     m.add_class::<DailyProjectUsageReport>()?;

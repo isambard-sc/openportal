@@ -29,6 +29,7 @@ import org.openportal.ProjectTemplate;
 import org.openportal.ProjectUsageReport;
 import org.openportal.SpendProfileEntry;
 import org.openportal.UsageReport;
+import org.openportal.UsageUnit;
 
 /**
  * The contract, driven without a bridge.
@@ -560,7 +561,12 @@ class SitePortalTest {
         // 12.5 of our node hours, at the agreed four to one, is 50 of their GPU
         // hours. Reporting 12.5 would not be reporting slightly differently - it
         // would be reporting a different quantity under the same name.
-        assertEquals(50.0, report.totalUsage().hours(), 0.001);
+        assertEquals(50.0, report.total().orElseThrow().value(), 0.001);
+
+        // ...and the report says so: it is in the award's unit, GPU hours, so
+        // the awarding portal reads 50 as what it is.
+        assertEquals(UsageUnit.parse("GPUHR"), report.unit().orElseThrow());
+        assertEquals("50.0 GPUHR", report.total().orElseThrow().format(1));
 
         // And the report is about *their* award, with our project nowhere in it.
         assertEquals(AWARD, report.project().toString());

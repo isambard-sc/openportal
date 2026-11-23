@@ -841,10 +841,20 @@ passes anything else through unchanged, which is what lets a pair of portals
 agree a unit of their own. Nothing here requires the unit to be a duration; an
 allocation denominated in money or cloud credits works the same way.
 
+**A report says which unit it is in.** A `ProjectUsageReport` carries a
+`usage_unit` - `{"name": "GPUHR", "counts_per_unit": 3600}` - and every figure in
+it is a count of that unit: 50 GPU hours is 180000 counts, £3.20 is 3200000
+counts of `GBP` at a million per pound. Write the award's unit there, so the
+awarding portal reads your figures as what they are rather than by assumption.
+A component may carry a unit of its own (`component_units`) - GPU hours beside a
+report billed in GBP - but billing and limits use `usage_unit` alone. See
+[json-types.md](json-types.md#usageunit) and `docs/plans/usage-units-design.md`.
+
 Two obligations follow:
 
 * **Convert every figure you report into the award's unit**, per award, because
-  two awards on the same project may be denominated differently.
+  two awards on the same project may be denominated differently - and say so in
+  the report's `usage_unit`.
 * **Refuse an award in a unit you have no agreed factor for.** There is no safe
   default: one-for-one silently misreports by the factor, and zero reports
   nothing, and both are numbers the awarding portal will believe. What is missing

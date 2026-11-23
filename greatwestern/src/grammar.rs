@@ -1645,6 +1645,12 @@ impl Allocation {
     }
 
     pub fn canonicalize(units: &str) -> String {
+        // A currency is named by its ISO 4217 code, in capitals, so that an
+        // award of "5000 gbp" and a usage report in "GBP" are one unit.
+        if let Some(code) = crate::usageunit::currency_code(units) {
+            return code.to_string();
+        }
+
         let canonical = units.trim().to_lowercase();
 
         if canonical == "node hours" || canonical == "node hour" || canonical == "nhr" {
@@ -1657,6 +1663,8 @@ impl Allocation {
             return "COREHR".to_string();
         } else if canonical == "gb hours" || canonical == "gb hour" || canonical == "gbhr" {
             return "GBHR".to_string();
+        } else if canonical == "mb hours" || canonical == "mb hour" || canonical == "mbhr" {
+            return "MBHR".to_string();
         } else if canonical == "billing hours" || canonical == "billing hour" || canonical == "bhr"
         {
             return "BHR".to_string();

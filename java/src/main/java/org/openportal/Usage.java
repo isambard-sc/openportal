@@ -6,13 +6,14 @@ package org.openportal;
 import com.fasterxml.jackson.databind.JsonNode;
 
 /**
- * An amount of resource consumed, held as whole seconds.
+ * An amount of resource consumed, held as a whole number of counts.
  *
- * <p>Seconds of <i>what</i> is not recorded here, and that is the trap. A usage
- * figure is only meaningful alongside the unit its report is in - a site
- * accounts in its own unit and converts to the award's on the way out (see
- * {@code site-portal-api.md} §4.3). This type is the number; the unit lives on
- * the award.
+ * <p>What one count <i>is</i> is not recorded here: it is set by the
+ * {@link UsageUnit} of the report the figure is in - a node-second, a
+ * micro-pound. That is why the wire field is still called {@code seconds}, for
+ * compatibility, whatever it counts. So this prints as its raw count; use
+ * {@link UsageUnit#amount} or an {@link Amount} to read it as a quantity, and
+ * {@link #asDuration} for figures that really are time.
  *
  * <p>Every operation saturates rather than wrapping or throwing. That is not
  * defensiveness for its own sake: these values arrive from a peer, release
@@ -46,6 +47,16 @@ public record Usage(long seconds) implements OpenPortalType {
 
     public static Usage fromSeconds(long seconds) {
         return new Usage(seconds);
+    }
+
+    /** A usage of {@code counts} counts - see the class docs for what a count is. */
+    public static Usage fromCounts(long counts) {
+        return new Usage(counts);
+    }
+
+    /** The raw count. */
+    public long counts() {
+        return seconds;
     }
 
     public static Usage fromMinutes(double minutes) {
@@ -153,7 +164,7 @@ public record Usage(long seconds) implements OpenPortalType {
     }
 
     public Usage times(double factor) {
-        return fromTruncated(seconds * factor);
+        return fromRounded(seconds * factor);
     }
 
     /** Division, answering zero for a zero divisor rather than throwing. */
@@ -162,7 +173,7 @@ public record Usage(long seconds) implements OpenPortalType {
             return ZERO;
         }
 
-        return fromTruncated(seconds / divisor);
+        return fromRounded(seconds / divisor);
     }
 
     /** Always in hours, to three places - {@code "2.500 hours"}. */
@@ -194,16 +205,22 @@ public record Usage(long seconds) implements OpenPortalType {
         return new Usage(node.path("seconds").asLong());
     }
 
+    /** The raw count - see the class docs. */
+    @Override
+    public String toString() {
+        return Long.toString(seconds);
+    }
+
     /**
-     * The largest unit the value reaches, to three places.
+     * This value as a duration, in the largest unit it reaches, to three
+     * places - for figures that really are time, such as limits and waits.
      *
      * <p>Scales up through seconds, minutes, hours, days, weeks, months and
      * years - so the same value prints differently as it grows, which is fine
      * for a log line and wrong for anything that compares strings. Use
      * {@link #inHours} for a stable rendering, and {@link #seconds} to compare.
      */
-    @Override
-    public String toString() {
+    public String asDuration() {
         if (seconds < 60) {
             return seconds + (seconds == 1 ? " second" : " seconds");
         }
@@ -244,25 +261,29 @@ public record Usage(long seconds) implements OpenPortalType {
             return ZERO;
         }
 
-        return fromTruncated(amount * secondsPerUnit);
+        return fromRounded(amount * secondsPerUnit);
     }
 
     /**
-     * A {@code double} to whole seconds, truncated then clamped.
+     * A {@code double} to a whole count, rounded to the nearest (ties to even,
+     * as the Rust side does) then clamped.
      *
-     * <p>Truncated rather than rounded, because {@code as u64} in Rust
-     * truncates - and clamped because it also saturates rather than wrapping.
+     * <p>Rounded, not truncated: truncating always rounds down, which on money
+     * is a systematic loss. Clamped because a scaled figure saturates rather
+     * than wrapping.
      */
-    private static Usage fromTruncated(double value) {
+    private static Usage fromRounded(double value) {
         if (Double.isNaN(value) || value <= 0.0) {
             return ZERO;
         }
 
-        if (value >= (double) Long.MAX_VALUE) {
+        double rounded = Math.rint(value);
+
+        if (rounded >= (double) Long.MAX_VALUE) {
             return new Usage(Long.MAX_VALUE);
         }
 
-        return new Usage((long) value);
+        return new Usage((long) rounded);
     }
 
     static long saturatingAdd(long a, long b) {

@@ -144,16 +144,32 @@ def conversions_for(offering: str) -> dict[str, float]:
     }
 
 
+def unit_for(name: str) -> openportal.UsageUnit:
+    """
+    The `UsageUnit` a usage report in `name` is written in.
+
+    A unit OpenPortal knows comes at its default resolution: 3600 counts per
+    hour for a time unit such as `GPUHR`, a million per pound for `GBP`. A unit
+    two portals agreed between themselves - `CREDITS`, say - has no default, so
+    this example says what one count of it is: a millionth, as for money. The
+    report carries that, so the awarding portal never has to guess.
+    """
+    try:
+        return openportal.UsageUnit(name)
+    except ValueError:
+        return openportal.UsageUnit(name, counts_per_unit=1_000_000)
+
+
 def converter_for(offering: str, allocation: openportal.Allocation | None):
     """
-    Return a function turning a figure in *our* unit into the award's unit.
+    Return the award's unit, and a function turning a figure in *our* unit into
+    a `Usage` in it.
 
-    **This is what decides what the numbers in a usage report mean.** A `Usage`
-    is a bare number; nothing in it says whether 50 is 50 node hours or 50 GPU
-    hours. The unit is the one the awarding portal allocated in, so a site that
-    reports its own figures unconverted is not reporting slightly differently -
-    it is reporting a different quantity under the same name, and nothing on the
-    wire will catch it.
+    **This is what decides what the numbers in a usage report mean.** A usage
+    report says which unit it is in, and that unit is the one the awarding
+    portal allocated in - so a site that reported its own figures unconverted
+    would be stating a different quantity under the award's name. The report's
+    unit says what the numbers are; this conversion is what makes it true.
 
     Returns `None` when there is no agreed factor, which the caller must treat as
     "we cannot hold this award" rather than as zero or as one-for-one. Guessing
@@ -171,7 +187,9 @@ def converter_for(offering: str, allocation: openportal.Allocation | None):
     if not factor:
         return None
 
-    return lambda hours: openportal.Usage.from_hours(hours * factor)
+    unit = unit_for(str(allocation.units))
+
+    return unit, lambda hours: unit.usage(hours * factor)
 
 
 def to_site_units(offering: str, allocation: openportal.Allocation | None) -> float | None:
@@ -775,6 +793,8 @@ def build_usage_report(
     minimum was missed - and keeps that month incomplete until the forfeit has
     settled. See site-portal-api.md §4.4.1.
     """
+    # No unit yet: if the award turns out not to be here, the answer is an
+    # empty report, and an empty report claims nothing about what it is in.
     report = openportal.ProjectUsageReport(openportal.ProjectIdentifier(project_id))
 
     # **The project may simply not be on this resource.** An awarding portal
@@ -813,9 +833,11 @@ def build_usage_report(
     # a report is not the place to discover it - so it is logged loudly and the
     # figures go out in our own unit, which is at least a number we can name.
     allocation = openportal.AwardDetails(json.dumps(award.details)).allocation
-    convert = converter_for(offering, allocation)
+    converter = converter_for(offering, allocation)
 
-    if convert is None:
+    if converter is not None:
+        unit, convert = converter
+    else:
         logger.error(
             "award %s on %s is allocated in '%s', which this site cannot "
             "account in - reporting our own %s unconverted",
@@ -824,9 +846,12 @@ def build_usage_report(
             allocation,
             SITE_UNIT,
         )
-        convert = lambda hours: openportal.Usage.from_hours(hours)  # noqa: E731
+        unit = unit_for(SITE_UNIT)
+        convert = lambda hours: unit.usage(hours)  # noqa: E731
 
-    report = openportal.ProjectUsageReport(local_project)
+    # The report says which unit it is in, so the awarding portal reads its
+    # figures as what they are rather than assuming hours.
+    report = openportal.ProjectUsageReport(local_project, unit=unit)
     months_with_days: set[str] = set()
     final: set[str] = set()
 

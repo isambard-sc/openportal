@@ -1179,8 +1179,18 @@ def _run_all() -> None:
     ).result
     check(
         "12.5 node hours are reported as 50 GPU hours",
-        abs(report.total_usage.hours - 50.0) < 0.001,
-        f"-> {report.total_usage.in_hours()}",
+        abs(report.total().value - 50.0) < 0.001,
+        f"-> {report.total()}",
+    )
+    check(
+        "...and the report says it is in GPU hours",
+        report.unit == openportal.UsageUnit("GPUHR"),
+        f"-> {report.unit!r}",
+    )
+    check(
+        "...which prints as such",
+        f"{report.total():.1f}" == "50.0 GPUHR",
+        f"-> {report.total():.1f}",
     )
 
     # An award of nothing is not an award. There is no amount to provision
@@ -1246,8 +1256,8 @@ def _run_all() -> None:
     ).result
     check(
         "the same usage on another resource converts at that resource's factor",
-        abs(report.total_usage.hours - 25.0) < 0.001,
-        f"-> {report.total_usage.in_hours()} at 2 to 1, against 50 at 4 to 1",
+        abs(report.total().value - 25.0) < 0.001,
+        f"-> {report.total()} at 2 to 1, against 50 at 4 to 1",
     )
 
     # A unit nobody has agreed gets the same answer, for the same reason - and
@@ -1276,8 +1286,13 @@ def _run_all() -> None:
     ).result
     check(
         "...and answerable once a factor is agreed, whatever the unit is called",
-        abs(report.total_usage.hours - 6.25) < 0.001,
-        f"-> {report.total_usage.in_hours()} for 12.5 of ours at 0.5",
+        abs(report.total().value - 6.25) < 0.001,
+        f"-> {report.total()} for 12.5 of ours at 0.5",
+    )
+    check(
+        "...in a unit of our own agreeing, which the report states in full",
+        report.unit == openportal.UsageUnit("credits", counts_per_unit=1_000_000),
+        f"-> {report.unit!r}",
     )
     check(
         "the same factor values the award in our own units",

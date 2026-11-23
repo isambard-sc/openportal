@@ -611,10 +611,14 @@ Two consequences worth taking seriously:
   portal, not from a default of yours. An allocation of `0` is refused too, on
   the same grounds.
 
-One display quirk, since it will confuse you once: `Usage` currently holds a
-duration and prints itself in whatever time unit reads best, so 50 hours prints
-as `2.083 days`. The number is right. Read `usage.hours` or `usage.in_hours()`
-when you care about the allocation's unit.
+**A usage report says which unit it is in.** Its `unit` is a `UsageUnit` - the
+award's, here `GPUHR` - and every figure in it is a count of that unit at the
+unit's resolution (3600 per hour for a time unit, a million per pound for
+`GBP`). So read figures through it: `report.total()` is an `Amount` that prints
+as `50.000 GPUHR` and gives `.value`, and `report.unit.amount(usage)` turns any
+one figure into a number of the unit. A bare `Usage` prints as its raw count.
+Build a report with `openportal.ProjectUsageReport(project, unit=...)`: one
+without a unit cannot hold figures.
 
 ### 7. Finalised versus unfinalised reports
 

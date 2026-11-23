@@ -19,6 +19,7 @@ use greatwestern::grammar::{
 use greatwestern::storage::{Quota, Volume};
 use greatwestern::storagereport::{ProjectStorageReport, StorageReport};
 use greatwestern::usagereport::{ProjectUsageReport, Usage, UsageReport};
+use greatwestern::usageunit::UsageUnit;
 use greatwestern::{Hpc, NotificationEvent};
 use templemeads::agent;
 use templemeads::agent::instance::{process_args, run, Defaults};
@@ -1451,7 +1452,9 @@ async fn get_usage_report(
     // Wait for the job to complete... - get the resulting ProjectUsageReport
     let mut report = match job.wait().await?.result::<ProjectUsageReport>()? {
         Some(report) => report,
-        None => ProjectUsageReport::new(project.project()),
+        // Nothing from the scheduler: an empty report, in the scheduler's
+        // unit, node-seconds, so it says what it would hold.
+        None => ProjectUsageReport::new_in(project.project(), &UsageUnit::new("NHR", 3600)?),
     };
 
     // now add in all of the mappings that we know about

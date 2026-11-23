@@ -11,6 +11,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.TreeMap;
 
 /**
@@ -49,6 +50,12 @@ public final class ProjectUsageReport implements OpenPortalType {
         // Written even when empty: release 0.92.0 cannot read a report without
         // `users`, so omitting it is not a smaller payload but an unreadable one.
         node.putObject("users");
+    }
+
+    /** A report whose usage is in {@code unit} - what new code should use. */
+    public ProjectUsageReport(ProjectIdentifier project, UsageUnit unit) {
+        this(project);
+        node.set("usage_unit", unit.toJson());
     }
 
     private ProjectUsageReport(ObjectNode node) {
@@ -142,8 +149,11 @@ public final class ProjectUsageReport implements OpenPortalType {
         ProjectUsageReport report = new ProjectUsageReport(project());
         report.node.set("users", userMapNode().deepCopy());
 
+        // A component's figures are in the component's unit.
+        componentUnit(component).ifPresent(unit -> report.node.set("usage_unit", unit.toJson()));
+
         for (LocalDate date : dates()) {
-            report.setReport(date, getReport(date).getComponent(component));
+            report.putReport(date, getReport(date).getComponent(component));
         }
 
         return report;
@@ -268,8 +278,14 @@ public final class ProjectUsageReport implements OpenPortalType {
 
     // ---- writing -----------------------------------------------------------
 
-    /** Replace one day's report. */
+    /** Replace one day's report. Refused until the report has a unit - see {@link #requireUnit}. */
     public ProjectUsageReport setReport(LocalDate date, DailyProjectUsageReport report) {
+        requireUnit();
+
+        return putReport(date, report);
+    }
+
+    private ProjectUsageReport putReport(LocalDate date, DailyProjectUsageReport report) {
         mutableReports().set(date.toString(), report.toJson());
 
         return this;
@@ -285,11 +301,17 @@ public final class ProjectUsageReport implements OpenPortalType {
      * incomplete, unlike the Rust side, which inserts it unchanged.
      */
     public ProjectUsageReport addReport(LocalDate date, DailyProjectUsageReport report) {
+        requireUnit();
+
+        return mergeReport(date, report);
+    }
+
+    private ProjectUsageReport mergeReport(LocalDate date, DailyProjectUsageReport report) {
         if (!reports().path(date.toString()).isObject()) {
-            return setReport(date, report.copy());
+            return putReport(date, report.copy());
         }
 
-        return setReport(date, getReport(date).plus(report));
+        return putReport(date, getReport(date).plus(report));
     }
 
     /** Record what this site calls one of the portal's users. */
@@ -316,7 +338,7 @@ public final class ProjectUsageReport implements OpenPortalType {
 
     /** Close one day. */
     public ProjectUsageReport setDayComplete(LocalDate date) {
-        return setReport(date, getReport(date).setComplete());
+        return putReport(date, getReport(date).setComplete());
     }
 
     /** Rename the project this report is about. */
@@ -382,7 +404,7 @@ public final class ProjectUsageReport implements OpenPortalType {
         ProjectUsageReport remapped = new ProjectUsageReport(project());
 
         for (LocalDate date : dates()) {
-            remapped.setReport(date, getReport(date).remapUsers(renames));
+            remapped.putReport(date, getReport(date).remapUsers(renames));
         }
 
         ObjectNode users = remapped.mutableUserMap();
@@ -395,10 +417,11 @@ public final class ProjectUsageReport implements OpenPortalType {
     public ProjectUsageReport filter(DateRange range) {
         ProjectUsageReport filtered = new ProjectUsageReport(project());
         filtered.node.set("users", userMapNode().deepCopy());
+        filtered.copyUnitsFrom(this);
 
         for (LocalDate date : dates()) {
             if (range.contains(date)) {
-                filtered.setReport(date, getReport(date));
+                filtered.putReport(date, getReport(date));
             }
         }
 
@@ -413,14 +436,19 @@ public final class ProjectUsageReport implements OpenPortalType {
                             + " and " + other.project());
         }
 
+        MergedUnits units = mergedUnits(other);
         ProjectUsageReport sum = copy();
 
         for (LocalDate date : other.dates()) {
-            sum.addReport(date, other.getReport(date));
+            sum.mergeReport(date, other.getReport(date));
         }
 
         other.userMapNode().fields().forEachRemaining(entry ->
                 sum.mutableUserMap().put(entry.getKey(), entry.getValue().asText()));
+
+        sum.node.remove("usage_unit");
+        units.unit().ifPresent(unit -> sum.node.set("usage_unit", unit.toJson()));
+        sum.writeComponentUnits(units.components());
 
         return sum;
     }
@@ -430,7 +458,7 @@ public final class ProjectUsageReport implements OpenPortalType {
         ProjectUsageReport scaled = copy();
 
         for (LocalDate date : dates()) {
-            scaled.setReport(date, getReport(date).times(factor));
+            scaled.putReport(date, getReport(date).times(factor));
         }
 
         return scaled;
@@ -464,6 +492,241 @@ public final class ProjectUsageReport implements OpenPortalType {
         }
 
         return combined;
+    }
+
+    // ---- units -------------------------------------------------------------
+
+    /**
+     * The unit this report's usage is in. Empty only for a report from before
+     * units, whose figures were 3600 counts per hour of the award's unit; it
+     * can be declared with {@link #setUnit} or {@link #setTimeUnit}.
+     */
+    public Optional<UsageUnit> unit() {
+        JsonNode found = node.path("usage_unit");
+
+        return found.isObject() ? Optional.of(UsageUnit.fromJson(found)) : Optional.empty();
+    }
+
+    /**
+     * The unit, or an exception saying none is set. Figures can be added only to
+     * a report that says what they are in: one from before units can still be
+     * read, totalled and passed on, but must have its unit declared first.
+     */
+    public UsageUnit requireUnit() {
+        return unit().orElseThrow(() -> new IllegalStateException("The usage report for "
+                + project() + " has no unit. Set one with setUnit (or setTimeUnit for a "
+                + "report from before units, which were all time) before adding figures"));
+    }
+
+    /**
+     * Declare the unit of this report. Allowed only while it has none; on a
+     * report from before units it declares what the figures already mean, and
+     * changes none of them. Use {@link #convert} to change a unit.
+     */
+    public ProjectUsageReport setUnit(UsageUnit unit) {
+        unit().ifPresent(existing -> {
+            throw new IllegalStateException("The usage report for " + project()
+                    + " is already in " + existing.name() + ". Use convert to change it");
+        });
+
+        node.set("usage_unit", unit.toJson());
+        writeComponentUnits(componentUnits());
+
+        return this;
+    }
+
+    /**
+     * Declare that this report is in the time unit {@code name} at 3600 counts
+     * per hour - what every report from before units was, in the unit of its
+     * award's allocation. Refuses a currency, and a report with a unit.
+     */
+    public ProjectUsageReport setTimeUnit(String name) {
+        UsageUnit unit = UsageUnit.parse(name);
+
+        if (!unit.isTime()) {
+            throw new IllegalArgumentException("'" + name + "' is not a time unit. Use setUnit "
+                    + "for a currency or a unit of your own");
+        }
+
+        return setUnit(unit);
+    }
+
+    /** The unit {@code component} is in: its own if it has one, else the report's. */
+    public Optional<UsageUnit> componentUnit(String component) {
+        JsonNode own = node.path("component_units").path(component);
+
+        return own.isObject() ? Optional.of(UsageUnit.fromJson(own)) : unit();
+    }
+
+    /** The components with a unit of their own. */
+    public Map<String, UsageUnit> componentUnits() {
+        Map<String, UsageUnit> units = new TreeMap<>();
+
+        node.path("component_units").fields().forEachRemaining(entry ->
+                units.put(entry.getKey(), UsageUnit.fromJson(entry.getValue())));
+
+        return units;
+    }
+
+    /**
+     * Give {@code component} a unit of its own - GPU hours beside a report in
+     * GBP, say. Refused if the component already has figures in a different
+     * unit, which would relabel them.
+     */
+    public ProjectUsageReport setComponentUnit(String component, UsageUnit unit) {
+        Optional<UsageUnit> current = componentUnit(component);
+
+        if (current.isPresent() && !current.get().equals(unit) && components().contains(component)) {
+            throw new IllegalStateException("Component '" + component + "' of the usage report "
+                    + "for " + project() + " already has figures in " + current.get().name());
+        }
+
+        Map<String, UsageUnit> units = componentUnits();
+        units.put(component, unit);
+        writeComponentUnits(units);
+
+        return this;
+    }
+
+    /** The total usage in the report's unit, or empty for a report from before units. */
+    public Optional<Amount> total() {
+        return unit().map(unit -> new Amount(totalUsage(), unit));
+    }
+
+    /** The total of one component, in that component's unit. */
+    public Optional<Amount> componentTotal(String component) {
+        return componentUnit(component)
+                .map(unit -> new Amount(getComponent(component).totalUsage(), unit));
+    }
+
+    /**
+     * Scale only the consumption figures - usage, requeue, charged-requeue and
+     * reservation - leaving the component breakdowns, each in its own unit,
+     * alone. The unit is unchanged: to change it, use {@link #convert}.
+     */
+    public ProjectUsageReport scaleTotal(double factor) {
+        ProjectUsageReport scaled = copy();
+
+        for (LocalDate date : dates()) {
+            scaled.putReport(date, getReport(date).scaleTotals(factor));
+        }
+
+        return scaled;
+    }
+
+    /**
+     * This report re-expressed in {@code to}, as a new report: every
+     * consumption figure is multiplied by {@code factor} - how many of
+     * {@code to} one of the current unit is worth - and moved to the new
+     * resolution, rounding once. A component that was inheriting the old unit
+     * is given it explicitly first, so none is relabelled.
+     */
+    public ProjectUsageReport convert(UsageUnit to, double factor) {
+        UsageUnit from = requireUnit();
+
+        if (Double.isNaN(factor) || Double.isInfinite(factor) || factor < 0.0) {
+            throw new IllegalArgumentException("Cannot convert the usage report for " + project()
+                    + " by a factor of " + factor);
+        }
+
+        Map<String, UsageUnit> pinned = componentUnits();
+        components().forEach(component -> pinned.putIfAbsent(component, from));
+
+        double scale = factor * to.countsPerUnit() / from.countsPerUnit();
+        ProjectUsageReport converted = scaleTotal(scale);
+        converted.node.set("usage_unit", to.toJson());
+        converted.writeComponentUnits(pinned);
+
+        return converted;
+    }
+
+    /** The units of the sum of two reports: see {@link #mergedUnits}. */
+    private record MergedUnits(Optional<UsageUnit> unit, Map<String, UsageUnit> components) {}
+
+    /**
+     * The units of this report plus {@code other}, or an exception saying why
+     * they cannot be summed: the units must match - or both be absent, so two
+     * reports from before units still combine - a report with no figures takes
+     * the other's, and a component named by both must be in one unit.
+     */
+    private MergedUnits mergedUnits(ProjectUsageReport other) {
+        Optional<UsageUnit> mine = unit();
+        Optional<UsageUnit> theirs = other.unit();
+        Optional<UsageUnit> unit;
+
+        if (mine.equals(theirs)) {
+            unit = mine;
+        } else if (other.isBare()) {
+            unit = mine.or(() -> theirs);
+        } else if (isBare()) {
+            unit = theirs.or(() -> mine);
+        } else {
+            throw new IllegalArgumentException("Cannot combine usage reports for " + project()
+                    + " in different units: " + mine.map(UsageUnit::toString).orElse("no unit")
+                    + " and " + theirs.map(UsageUnit::toString).orElse("no unit"));
+        }
+
+        java.util.Set<String> ours = namedComponents();
+        java.util.Set<String> yours = other.namedComponents();
+        java.util.Set<String> all = new java.util.TreeSet<>(ours);
+        all.addAll(yours);
+
+        Map<String, UsageUnit> components = new TreeMap<>();
+
+        for (String component : all) {
+            Optional<UsageUnit> a = componentUnit(component);
+            Optional<UsageUnit> b = other.componentUnit(component);
+
+            if (ours.contains(component) && yours.contains(component) && !a.equals(b)) {
+                throw new IllegalArgumentException("Cannot combine usage reports for "
+                        + project() + ": component '" + component + "' is in "
+                        + a.map(UsageUnit::toString).orElse("no unit") + " in one and "
+                        + b.map(UsageUnit::toString).orElse("no unit") + " in the other");
+            }
+
+            Optional<UsageUnit> effective = ours.contains(component) ? a : b;
+
+            if (effective.isPresent() && !effective.equals(unit)) {
+                components.put(component, effective.get());
+            }
+        }
+
+        return new MergedUnits(unit, components);
+    }
+
+    /** No figures and no component units: a report that can take any unit. */
+    private boolean isBare() {
+        return reports().isEmpty() && componentUnits().isEmpty();
+    }
+
+    private java.util.Set<String> namedComponents() {
+        java.util.Set<String> names = new java.util.TreeSet<>(components());
+        names.addAll(componentUnits().keySet());
+
+        return names;
+    }
+
+    /** Write the component units, leaving out any equal to the report's unit. */
+    private void writeComponentUnits(Map<String, UsageUnit> units) {
+        Optional<UsageUnit> unit = unit();
+        ObjectNode written = Json.object();
+
+        units.forEach((component, componentUnit) -> {
+            if (unit.isEmpty() || !unit.get().equals(componentUnit)) {
+                written.set(component, componentUnit.toJson());
+            }
+        });
+
+        if (written.isEmpty()) {
+            node.remove("component_units");
+        } else {
+            node.set("component_units", written);
+        }
+    }
+
+    private void copyUnitsFrom(ProjectUsageReport other) {
+        other.unit().ifPresent(unit -> node.set("usage_unit", unit.toJson()));
+        writeComponentUnits(other.componentUnits());
     }
 
     // ---- wire form ---------------------------------------------------------

@@ -449,7 +449,29 @@ A JSON object containing a single integer field `seconds`.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `seconds` | integer (u64) | Total compute time in seconds |
+| `seconds` | integer (u64) | A count. For `get_limit` it is seconds of time; inside a usage report it is a count of the report's `usage_unit` (see [`UsageUnit`](#usageunit)), whatever that is - the field keeps the name `seconds` for compatibility |
+
+---
+
+### `UsageUnit`
+
+What one count of a usage report's figures means: `counts_per_unit` counts make
+one `name`. Carried by `ProjectUsageReport` as `usage_unit`, and per component
+as `component_units`.
+
+```json
+{ "name": "GBP", "counts_per_unit": 1000000 }
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | The unit, canonicalised as `Allocation` units are: a time unit (`NHR`, `GPUHR`, `CPUHR`, `COREHR`, `GBHR`, `MBHR`, `BHR`), an ISO 4217 currency code (`GBP`, `USD`, `EUR`, ...; `£` and `€` are read as `GBP` and `EUR`; `$` is not accepted), or a name two portals agreed |
+| `counts_per_unit` | integer (u64, at least 1) | How many counts make one unit. Defaults for the well-known units: 3600 for a time unit (a count is a unit-second, as usage has always been), 1000000 for a currency (a count is a micro-unit). A unit of your own states its own |
+
+So in a report in `GBP` at 1000000, `{"seconds": 3200000}` is £3.20; in one in
+`GPUHR` at 3600, `{"seconds": 180000}` is 50 GPU hours. Read a figure as
+`seconds / counts_per_unit` of `name`. See
+`docs/plans/usage-units-design.md`.
 
 ---
 
@@ -593,6 +615,8 @@ Compute usage for a single project over a date range, indexed by calendar date.
 ```json
 {
   "project": "myproject.waldur",
+  "usage_unit": {"name": "NHR", "counts_per_unit": 3600},
+  "component_units": {"gpu-partition": {"name": "GPUHR", "counts_per_unit": 3600}},
   "reports": {
     "2024-01-15": {
       "reports": {
@@ -632,8 +656,19 @@ Compute usage for a single project over a date range, indexed by calendar date.
 | Field | Type | Description |
 |-------|------|-------------|
 | `project` | string | `ProjectIdentifier` in `project.portal` format |
+| `usage_unit` | `UsageUnit` | The unit of every consumption figure in the report - `reports` (including unattributed usage) and the requeue, charged-requeue and reservation figures. Billing and limits use this unit. Absent only on a report from before units, whose figures were 3600 counts per hour of the award's unit |
+| `component_units` | object | (Optional, omitted when empty) Map of component name → `UsageUnit`, for components not in `usage_unit`. A component not listed is in `usage_unit`. Components are information |
 | `reports` | object | Map of date string (`YYYY-MM-DD`) → `DailyProjectUsageReport` |
 | `users` | object | Map of `UserIdentifier` string → local username string. Provides the mapping used to translate local usernames back to OpenPortal identifiers |
+
+Queue waits, runtimes and the other job statistics in a daily report are seconds
+of real time, whatever `usage_unit` is.
+
+**A report from before units** has no `usage_unit`. It reads, totals and passes
+on as before, but no figures can be added to it until its unit is declared
+(`set_unit`, or `set_time_unit` for a time unit). Reports combine only in the
+same unit - or when both have none - and a report with no figures takes the
+other's unit. See `docs/plans/usage-units-design.md`.
 
 **Empty report (no usage data for the requested period):**
 ```json

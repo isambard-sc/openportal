@@ -61,8 +61,61 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   until the forfeit has settled. This is a convention between portals, needing
   no type or wire change; see the site portal API (§4.4.1).
 
+- **Usage reports say which unit they are in.** A `ProjectUsageReport` gains an
+  optional `usage_unit`, e.g. `{"name": "GBP", "counts_per_unit": 1000000}`.
+  Every consumption figure in the report is a count of that unit, so the
+  awarding portal no longer has to know out of band whether a site reports node
+  hours at 3600 per hour or pounds at a million per pound.
+  - **Component units.** A component can carry its own unit in
+    `component_units`, such as GPU hours beside a report billed in GBP. Billing
+    and limits use `usage_unit` alone.
+  - **Well-known units:** the time units at 3600 counts per hour, plus every
+    ISO 4217 currency code and `£` / `€` at a million per unit. `$` is not
+    accepted, being ambiguous. Any other unit gives its own resolution.
+    `Allocation` canonicalises currencies the same way, and learns `MBHR`.
+  - **Exact amounts.** `UsageUnit::usage_from_decimal("3.20")` (Python:
+    `unit.usage("3.20")`, `Decimal`, or `int`) converts with no floating point.
+    `Amount` prints a figure in its unit, honouring a precision:
+    `f"{total:.2f}"` gives `3.20 GBP`.
+  - **`op-slurm`** now reports in `NHR`, with its `cpu`, `gpu`, `memory` and
+    `billing` components in `CPUHR`, `GPUHR`, `MBHR` and `BHR`.
+  - **Both example site portals** report in the award's unit.
+
+  A report from before units (no `usage_unit`) still reads, totals and passes
+  on. It must be declared with `set_unit`, or with `set_time_unit(<award's
+  unit>)` for the time-based reports every HPC site sent, before figures are
+  added. Reports combine only in one unit. `convert(to, factor)` changes a
+  report's unit without relabelling its components. Backwards compatible on
+  the wire. See
+  [`docs/plans/usage-units-design.md`](docs/plans/usage-units-design.md).
+
+### Changed
+
+- **Breaking, for code built on the Rust crate, the Python module or the Java
+  client** (the wire format is unchanged):
+  - **A report needs a unit before it holds figures.**
+    `ProjectUsageReport::add_report` / `set_report` now return a `Result` (and
+    raise in Python and Java), refusing a report with no unit. Construct reports
+    with a unit: `ProjectUsageReport::new_in(project, unit)`,
+    `ProjectUsageReport(project, unit=...)` in Python, or
+    `new ProjectUsageReport(project, unit)` in Java.
+  - **Adding reports in different units raises.** In Python and Java, adding
+    two reports in different units raises rather than summing them.
+  - **A `Usage` prints as its raw count**, since what a count is belongs to
+    its report's unit. Use `as_duration()` / `asDuration()` or `in_hours()` for
+    figures that really are time.
+  - **Scaling a `Usage` rounds to the nearest count** (ties to even) rather than
+    truncating, which always rounded down.
+
 ### Fixed
 
+- **`scale_total` scales the charged-requeue figures.** It kept its own list of
+  consumption figures, which had missed the charged-requeue ones, so after
+  scaling the charged share was in a different unit from the total it is part
+  of.
+- **The Java client sums, scales and remaps the charged-requeue figures.** Its
+  table of report fields did not know them, so `plus`, `times` and user
+  remapping silently skipped them.
 - **Summing two parts of a day keeps it complete when both parts are.**
   Adding one `DailyProjectUsageReport` to another (`+`, `+=`, and so
   `ProjectUsageReport.add_report` on a date that already has a report,

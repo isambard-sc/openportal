@@ -4,8 +4,9 @@
 use anyhow::Context;
 use anyhow::Result;
 use chrono::Utc;
-use greatwestern::grammar::{DateRange, ProjectMapping, UserMapping};
+use greatwestern::grammar::{DateRange, ProjectIdentifier, ProjectMapping, UserMapping};
 use greatwestern::usagereport::{DailyProjectUsageReport, ProjectUsageReport, Usage};
+use greatwestern::usageunit::UsageUnit;
 use once_cell::sync::Lazy;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
@@ -1925,6 +1926,29 @@ async fn get_daily_report(
     }
 }
 
+///
+/// An empty usage report for `project`, saying what this agent's figures are
+/// in: node-seconds (`NHR`, 3600 counts per node-hour), with the component
+/// breakdown in its own units - CPU, GPU and billing seconds, and
+/// megabyte-seconds of memory, which is what Slurm counts memory in.
+///
+pub fn new_usage_report(project: &ProjectIdentifier) -> Result<ProjectUsageReport, Error> {
+    let hours = |name: &str| UsageUnit::new(name, 3600);
+
+    let mut report = ProjectUsageReport::new_in(project, &hours("NHR")?);
+
+    for (component, unit) in [
+        ("cpu", "CPUHR"),
+        ("gpu", "GPUHR"),
+        ("memory", "MBHR"),
+        ("billing", "BHR"),
+    ] {
+        report.set_component_unit(component, &hours(unit)?)?;
+    }
+
+    Ok(report)
+}
+
 pub async fn get_usage_report(
     project: &ProjectMapping,
     dates: &DateRange,
@@ -1938,15 +1962,15 @@ pub async fn get_usage_report(
         Ok(Some(account)) => account,
         Ok(None) => {
             tracing::warn!("Could not get account {}", account.name());
-            return Ok(ProjectUsageReport::new(project.project()));
+            return new_usage_report(project.project());
         }
         Err(e) => {
             tracing::warn!("Could not get account {}: {}", account.name(), e);
-            return Ok(ProjectUsageReport::new(project.project()));
+            return new_usage_report(project.project());
         }
     };
 
-    let mut report = ProjectUsageReport::new(project.project());
+    let mut report = new_usage_report(project.project())?;
     let slurm_nodes = cache::get_nodes().await?;
     let now = chrono::Utc::now();
     let cluster = cache::get_cluster().await?;
@@ -2010,7 +2034,7 @@ pub async fn get_usage_report(
         };
 
         // now save this to the overall report
-        report.set_report(&day, &daily_report);
+        report.set_report(&day, &daily_report)?;
     }
 
     record_limit_correction(project, &report).await;
@@ -2256,8 +2280,8 @@ async fn apply_limit_correction(
             "Requeue correction for account {} would not raise its limit ({} vs {}). \
              Leaving it alone.",
             account.name(),
-            applied,
-            already
+            applied.as_duration(),
+            already.as_duration()
         );
         return Ok(());
     }
@@ -2276,9 +2300,9 @@ async fn apply_limit_correction(
         "Raised the Slurm limit for account {} to {} - {} requested plus {} of requeue \
          usage this month that was absorbed rather than charged.",
         account.name(),
-        applied,
-        account.limit(),
-        correction.computed()
+        applied.as_duration(),
+        account.limit().as_duration(),
+        correction.computed().as_duration()
     );
 
     Ok(())
@@ -2478,7 +2502,7 @@ pub async fn get_limit(
                  figure; a usage report for this month will settle it.",
                 account.name(),
                 month,
-                observed
+                observed.as_duration()
             );
 
             return Ok(observed);
@@ -2498,8 +2522,8 @@ pub async fn get_limit(
             "Recovered the requested limit for account {}: {} of the {} Slurm holds, the \
              rest being this month's requeue correction.",
             account.name(),
-            requested,
-            observed
+            requested.as_duration(),
+            observed.as_duration()
         );
 
         return Ok(requested);
@@ -2512,10 +2536,10 @@ pub async fn get_limit(
         "Slurm limit for account {} is {}, not the {} this agent applied ({} requested plus \
          a {} requeue correction). Something changed it outside OpenPortal. Setting it back.",
         account.name(),
-        observed,
-        applied,
-        account.limit(),
-        correction_or_zero(&correction)
+        observed.as_duration(),
+        applied.as_duration(),
+        account.limit().as_duration(),
+        correction_or_zero(&correction).as_duration()
     );
 
     write_slurm_limit(&account, &applied, expires).await?;

@@ -19,6 +19,7 @@ pub mod notification;
 pub mod storage;
 pub mod storagereport;
 pub mod usagereport;
+pub mod usageunit;
 
 // Needed only so ts-rs's "uuid-impl" feature (which implements TS for
 // uuid::Uuid, used transitively via chrono/serde derive on our report

@@ -625,9 +625,12 @@ def get_award(job: openportal.Job) -> openportal.AwardDetails:
     award = _require_award(job, job.instruction.arguments[0])
     details = openportal.AwardDetails(json.dumps(award.details))
 
-    # A real portal overlays live project state here - the current member list,
-    # the allocation as actually spent, the current end date - since those may
-    # have moved on from what was last agreed.
+    # A real portal overlays what is its to say here, and echoes the rest
+    # (§4.1.3): the live member list, the allocation it actually holds for the
+    # award, and its own page for the project as `project_link` - this example
+    # has no such page, so it leaves the link as it arrived. The dates,
+    # template and the other terms of the award are the awarding portal's, and
+    # go back unchanged.
 
     # `notes` is the one field that accumulates across a merge, which makes it
     # the right place for commentary that is not part of the award itself.

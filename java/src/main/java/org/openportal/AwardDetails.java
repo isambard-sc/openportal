@@ -415,7 +415,12 @@ public final class AwardDetails implements OpenPortalType {
         return this;
     }
 
-    /** The project's page on the awarding portal. */
+    /**
+     * This project's page on the portal that sent these details: the awarding
+     * portal's page in {@code create_award} / {@code update_award}, and the
+     * site's own page in a {@code get_award} reply - which a site supplies
+     * rather than echoing the awarding portal's back.
+     */
     public Optional<Link> projectLink() {
         return Optional.ofNullable(projectLink);
     }

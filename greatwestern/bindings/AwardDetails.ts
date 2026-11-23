@@ -66,7 +66,9 @@ award?: Link,
  */
 call?: Link, 
 /**
- * Link to the project page on the remote/awarding portal
+ * Link to this project's page on the portal that sent these details:
+ * the awarding portal's page in `create_award` / `update_award`, the
+ * site's own page in a `get_award` reply
  */
 project_link?: Link, 
 /**

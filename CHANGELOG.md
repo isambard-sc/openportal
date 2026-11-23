@@ -115,6 +115,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- **The site portal API says what happens to a `get_award` reply.** A new §4.1.3
+  shows what the reference awarding portal, `waldur-mastermind`, does with
+  each field, so a site developer can tell which fields are worth filling in:
+  - `project_link` is shown as the site's project page;
+  - `allocation` is taken as the amount the site holds;
+  - `members` is taken as the membership;
+  - `notes` are merged into the award's notes;
+  - the award's terms are the awarding portal's own, to be echoed unchanged.
+
+  It is described as that implementation's behaviour, not the contract.
+  `project_link` is now defined as the sending portal's own page for the
+  project. The old wording, "the project page on the remote/awarding portal",
+  left it unclear which side a `get_award` reply should name.
 - **The bridge walk-through works when followed literally**
   ([isambard-sc/openportal#45](https://github.com/isambard-sc/openportal/issues/45)).
   It had two errors:

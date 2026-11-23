@@ -719,6 +719,41 @@ of periods, not a single "attached since" date, and each period owns its own
 days. Collapsing them loses the days before the latest attachment — which are
 exactly the days already reported and billed.
 
+#### 4.1.3 What happens to your `get_award` reply
+
+`get_award` returns the whole `AwardDetails`, but the awarding portal does not
+take every field from it. **OpenPortal does not decide which**: it carries the
+reply, and what the awarding portal does with each field is that portal's
+business. What follows is what the reference implementation, `waldur-mastermind`,
+does with it, so you can tell which fields are worth filling in. Another
+awarding portal may differ.
+
+The rule of thumb, for any awarding portal: **echo what you were sent, and
+change only the fields that are yours to say something about.**
+
+| Field | What `waldur-mastermind` does with it | So a site should |
+|-------|---------------------------------------|------------------|
+| `project_link` | Copies it into its record of the project on your site, on every `get_award`, and shows it as the "Project page" link | Return **your own** page for the project, so the award team can navigate to it. See below |
+| `allocation` | Takes it as the award's current allocation. If it differs from what the awarding portal sent, the difference is shown as a change in flight | Return the amount you actually hold for the award, in the award's unit (§4.3) - not what has been spent |
+| `members` | Takes it as the award's membership | Return the live membership, with roles in the awarding portal's spelling (§4.2) |
+| `notes` | Merges new notes into the award's append-only notes | Add a note to leave a message for the award team - why an award is pending, say |
+| `start_date`, `end_date`, `template`, `key`, `earliest_approve`, `membership_control`, `allowed_domains` | Keeps its own values: the awarding portal decides these | Echo them unchanged |
+
+Remaining time is not something a site sends. The awarding portal works it out
+from the dates, the allocation and the usage reports you return (§4.3).
+
+**`project_link` is the sender's own page.** The field means "this project's
+page on the portal that sent these details". So in a `create_award` or
+`update_award` the awarding portal sends its page for the award, which you can
+show your users; in your `get_award` reply you send yours. Replace the link
+rather than echoing it: echoed back, the awarding portal's own page would be
+recorded as your site's project page.
+
+> The `waldur-mastermind` behaviour above comes from its
+> `remote_project_service.py`, `models.py` and `award_pace.py`. It describes
+> that implementation, not the contract. A field it does not list - such as
+> `spend_profile` - follows the rule of thumb: echo it.
+
 ### 4.2 Members
 
 | Instruction | Arguments | Must return |

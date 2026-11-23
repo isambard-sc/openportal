@@ -2547,9 +2547,8 @@ pub struct AwardDetails {
     #[ts(optional)]
     call: Option<Link>,
 
-    /// Link to this project's page on the portal that sent these details:
-    /// the awarding portal's page in `create_award` / `update_award`, the
-    /// site's own page in a `get_award` reply
+    /// Link to the project's page on the site portal. Set by the site and
+    /// returned from `get_award`; the awarding portal keeps and shows it
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     project_link: Option<Link>,

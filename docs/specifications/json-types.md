@@ -297,7 +297,7 @@ Fields that are `null` or unset are omitted from the serialised JSON.
 | `allocation` | string | Resource allocation, e.g. `"1000 NHR"` or `"No allocation"` |
 | `award` | `Link` | Link to the award record on the funding body's system |
 | `call` | `Link` | Link to the funding call that produced this award |
-| `project_link` | `Link` | Link to this project's page on the portal that sent the details: the awarding portal's page in `create_award` / `update_award`, the site's own page in a `get_award` reply. See [site-portal-api.md §4.1.3](site-portal-api.md#413-what-happens-to-your-get_award-reply) |
+| `project_link` | `Link` | Link to the project's page on the site portal. Set by the site and returned from `get_award`; the awarding portal keeps and shows it. See [site-portal-api.md §4.1.3](site-portal-api.md#413-what-happens-to-your-get_award-reply) |
 | `renewal` | `Link` | Link to the renewal / more-time application page |
 | `notes` | array of `Note` | Append-only timestamped messages; omitted when empty |
 | `earliest_approve` | string | RFC 3339 UTC — do not approve before this time; omitted when unset |

@@ -626,8 +626,8 @@ def get_award(job: openportal.Job) -> openportal.AwardDetails:
     details = openportal.AwardDetails(json.dumps(award.details))
 
     # A real portal overlays what is its to say here, and echoes the rest
-    # (§4.1.3): the live member list, the allocation it actually holds for the
-    # award, and its own page for the project as `project_link` - this example
+    # (§4.1.3): the live member list, the allocation actually set for the award
+    # (not usage), and its own page for the project as `project_link` - this example
     # has no such page, so it leaves the link as it arrived. The dates,
     # template and the other terms of the award are the awarding portal's, and
     # go back unchanged.

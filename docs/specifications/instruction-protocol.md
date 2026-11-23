@@ -330,11 +330,9 @@ unchanged.
 
 **`call`**: link to the funding call from which the award was made.
 
-**`project_link`**: link to this project's page on the portal that *sent*
-the details, so the other side's users can navigate there. In `create_award` /
-`update_award` it is the awarding portal's page; in a site's `get_award` reply
-it is the site's own page, which the site supplies rather than echoing the
-awarding portal's back. See
+**`project_link`**: link to the project's page on the **site** portal, so the
+award team can navigate there. The site sets it and returns it from
+`get_award`; the awarding portal keeps and shows it. See
 [site-portal-api.md §4.1.3](site-portal-api.md#413-what-happens-to-your-get_award-reply).
 
 **`renewal`**: link to the page where more time or a renewal can be requested.

@@ -733,8 +733,8 @@ change only the fields that are yours to say something about.**
 
 | Field | What `waldur-mastermind` does with it | So a site should |
 |-------|---------------------------------------|------------------|
-| `project_link` | Copies it into its record of the project on your site, on every `get_award`, and shows it as the "Project page" link | Return **your own** page for the project, so the award team can navigate to it. See below |
-| `allocation` | Takes it as the award's current allocation. If it differs from what the awarding portal sent, the difference is shown as a change in flight | Return the amount you actually hold for the award, in the award's unit (§4.3) - not what has been spent |
+| `project_link` | Copies it into its record of the project on your site, on every `get_award`, and shows it as the "Project page" link | Return **your** page for the project, so the award team can navigate to it. See below |
+| `allocation` | Compares it with the allocation it sent. If they differ, it keeps telling you to set its value, re-sending the award until you report that value back | Return the allocation actually set for the award at your site - an absolute amount in the award's unit (§4.3), ideally exactly what was sent (`1000 GPUHR` for `1000 GPUHR`). It is not usage: what has been consumed goes in the usage reports |
 | `members` | Takes it as the award's membership | Return the live membership, with roles in the awarding portal's spelling (§4.2) |
 | `notes` | Merges new notes into the award's append-only notes | Add a note to leave a message for the award team - why an award is pending, say |
 | `start_date`, `end_date`, `template`, `key`, `earliest_approve`, `membership_control`, `allowed_domains` | Keeps its own values: the awarding portal decides these | Echo them unchanged |
@@ -742,12 +742,17 @@ change only the fields that are yours to say something about.**
 Remaining time is not something a site sends. The awarding portal works it out
 from the dates, the allocation and the usage reports you return (§4.3).
 
-**`project_link` is the sender's own page.** The field means "this project's
-page on the portal that sent these details". So in a `create_award` or
-`update_award` the awarding portal sends its page for the award, which you can
-show your users; in your `get_award` reply you send yours. Replace the link
-rather than echoing it: echoed back, the awarding portal's own page would be
-recorded as your site's project page.
+**`project_link` is your page, and only you set it.** It is the link to the
+project's page on the *site* portal, whichever direction the details travel:
+you return it in `get_award`, and the awarding portal keeps it and shows it. Do
+not confuse it with the award's own links (`award`, `call`, `renewal`), which
+the awarding portal sets and you echo.
+
+**`allocation` is a setting, not a balance.** The awarding portal sends an
+absolute amount; you report back the amount actually set. A difference is read
+as "not yet applied", and corrected by sending the award again - so a site that
+reported its remaining balance here, rather than the allocation it set, would
+be told to change it on every cycle.
 
 > The `waldur-mastermind` behaviour above comes from its
 > `remote_project_service.py`, `models.py` and `award_pace.py`. It describes

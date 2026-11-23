@@ -745,8 +745,9 @@ from the dates, the allocation and the usage reports you return (§4.3).
 **`project_link` is your page, and only you set it.** It is the link to the
 project's page on the *site* portal, whichever direction the details travel:
 you return it in `get_award`, and the awarding portal keeps it and shows it. Do
-not confuse it with the award's own links (`award`, `call`, `renewal`), which
-the awarding portal sets and you echo.
+not confuse it with `award`, whose `url` is the award's page on the *awarding*
+portal, or with the other links the awarding portal sets (`call`, `renewal`):
+those you echo.
 
 **`allocation` is a setting, not a balance.** The awarding portal sends an
 absolute amount; you report back the amount actually set. A difference is read

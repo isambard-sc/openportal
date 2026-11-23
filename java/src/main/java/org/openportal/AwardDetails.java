@@ -385,7 +385,10 @@ public final class AwardDetails implements OpenPortalType {
 
     // ---- links -------------------------------------------------------------
 
-    /** The award record on the funding body's system. */
+    /**
+     * The award as made by the awarding portal: its identifier there, and in
+     * {@code url} the link to the award's page on the awarding portal.
+     */
     public Optional<Link> award() {
         return Optional.ofNullable(award);
     }

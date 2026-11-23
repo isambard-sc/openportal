@@ -58,7 +58,8 @@ allocation: string | null,
  */
 breakdown: { [key in string]?: string }, 
 /**
- * Link back to the award record on the funding body's system
+ * The award as made by the awarding portal: its identifier there, and
+ * in `url` the link to the award's page on the awarding portal
  */
 award?: Link, 
 /**

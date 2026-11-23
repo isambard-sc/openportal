@@ -326,7 +326,7 @@ On `merge` / `update_award`, entries from the incoming object overwrite matching
 keys in the existing map; new keys are added; existing keys not mentioned are
 unchanged.
 
-**`award`**: link back to the award record on the funding body's system (e.g. UKRI GtR).
+**`award`**: the award as made by the awarding portal - its identifier there, and in `url` the link to the award's page on the awarding portal. Set by the awarding portal; a site echoes it.
 
 **`call`**: link to the funding call from which the award was made.
 

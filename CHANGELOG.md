@@ -128,7 +128,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   It is described as that implementation's behaviour, not the contract.
   `project_link` is now documented as the site portal's page for the project,
   set by the site. The old wording, "the project page on the remote/awarding
-  portal", said the opposite.
+  portal", said the opposite. Likewise `award` is now documented as the award as made by
+  the awarding portal, with `url` linking to the award's page there. It was
+  described as a record on the funding body's system.
 - **The bridge walk-through works when followed literally**
   ([isambard-sc/openportal#45](https://github.com/isambard-sc/openportal/issues/45)).
   It had two errors:

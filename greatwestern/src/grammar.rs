@@ -2537,7 +2537,8 @@ pub struct AwardDetails {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     breakdown: BTreeMap<String, String>,
 
-    /// Link back to the award record on the funding body's system
+    /// The award as made by the awarding portal: its identifier there, and
+    /// in `url` the link to the award's page on the awarding portal
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     award: Option<Link>,

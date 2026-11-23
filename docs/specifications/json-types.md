@@ -259,7 +259,7 @@ Fields that are `null` or unset are omitted from the serialised JSON.
     "project_storage":  "5 TB",
     "user_storage":     "500 GB"
   },
-  "award":       { "id": "061-4738952-1", "url": "https://gtr.ukri.org/..." },
+  "award":       { "id": "061-4738952-1", "url": "https://waldur.example.ac.uk/awards/..." },
   "call":        { "id": "EPSRC-2024-AI", "url": "https://..." },
   "project_link":{ "id": "PRJ-001", "url": "https://waldur.example.ac.uk/projects/..." },
   "renewal":     { "url": "https://apply.example.ac.uk/renew" },
@@ -295,7 +295,7 @@ Fields that are `null` or unset are omitted from the serialised JSON.
 | `start_date` | string | ISO date `YYYY-MM-DD` |
 | `end_date` | string | ISO date `YYYY-MM-DD` |
 | `allocation` | string | Resource allocation, e.g. `"1000 NHR"` or `"No allocation"` |
-| `award` | `Link` | Link to the award record on the funding body's system |
+| `award` | `Link` | The award as made by the awarding portal: its identifier there, and in `url` the link to the award's page on the awarding portal. Set by the awarding portal; a site echoes it |
 | `call` | `Link` | Link to the funding call that produced this award |
 | `project_link` | `Link` | Link to the project's page on the site portal. Set by the site and returned from `get_award`; the awarding portal keeps and shows it. See [site-portal-api.md §4.1.3](site-portal-api.md#413-what-happens-to-your-get_award-reply) |
 | `renewal` | `Link` | Link to the renewal / more-time application page |

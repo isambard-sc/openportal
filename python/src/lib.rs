@@ -14,7 +14,9 @@ use pyo3::exceptions::{PyOSError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDate, PyDateTime, PyFloat, PyInt, PyList, PyString, PyTzInfo};
 use pyo3::{IntoPyObject, PyResult, Python};
+#[cfg(feature = "generate-stubs")]
 use pyo3_stub_gen::derive::*;
+#[cfg(feature = "generate-stubs")]
 use pyo3_stub_gen::{define_stub_info_gatherer, PyStubType, TypeInfo};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
@@ -254,7 +256,7 @@ where
 /// Load the OpenPortal configuration from the passed file
 /// and set it as the global configuration.
 ///
-#[gen_stub_pyfunction]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyfunction)]
 #[pyfunction]
 fn load_config(config_file: path::PathBuf) -> PyResult<()> {
     match local_load_config(&config_file) {
@@ -266,7 +268,7 @@ fn load_config(config_file: path::PathBuf) -> PyResult<()> {
 ///
 /// Return whether or not a valid configuration has been loaded
 ///
-#[gen_stub_pyfunction]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyfunction)]
 #[pyfunction]
 fn is_config_loaded() -> PyResult<bool> {
     match SINGLETON_CONFIG.read() {
@@ -279,7 +281,7 @@ fn is_config_loaded() -> PyResult<bool> {
 /// Initialize log tracing for the OpenPortal client. This will print
 /// logs to stdout.
 ///
-#[gen_stub_pyfunction]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyfunction)]
 #[pyfunction]
 fn initialize_tracing() -> PyResult<()> {
     // Initialize tracing
@@ -290,12 +292,12 @@ fn initialize_tracing() -> PyResult<()> {
 ///
 /// The FailedJobEntry object for diagnostics reports
 ///
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FailedJobEntry(mod_diagnostics::FailedJobEntry);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl FailedJobEntry {
     fn __str__(&self) -> PyResult<String> {
@@ -362,12 +364,12 @@ impl From<mod_diagnostics::FailedJobEntry> for FailedJobEntry {
 ///
 /// The SlowJobEntry object for diagnostics reports
 ///
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlowJobEntry(mod_diagnostics::SlowJobEntry);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl SlowJobEntry {
     fn __str__(&self) -> PyResult<String> {
@@ -420,12 +422,12 @@ impl From<mod_diagnostics::SlowJobEntry> for SlowJobEntry {
 ///
 /// The ExpiredJobEntry object for diagnostics reports
 ///
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpiredJobEntry(mod_diagnostics::ExpiredJobEntry);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl ExpiredJobEntry {
     fn __str__(&self) -> PyResult<String> {
@@ -487,12 +489,12 @@ impl From<mod_diagnostics::ExpiredJobEntry> for ExpiredJobEntry {
 ///
 /// The RunningJobEntry object for diagnostics reports
 ///
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunningJobEntry(mod_diagnostics::RunningJobEntry);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl RunningJobEntry {
     fn __str__(&self) -> PyResult<String> {
@@ -548,12 +550,12 @@ impl From<mod_diagnostics::RunningJobEntry> for RunningJobEntry {
 }
 
 /// A single log entry captured from the tracing framework
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry(mod_diagnostics::LogEntry);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl LogEntry {
     #[getter]
@@ -606,12 +608,12 @@ impl From<mod_diagnostics::LogEntry> for LogEntry {
 ///
 /// Notification send/receive/failure totals for a single agent
 ///
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotificationStatistics(mod_diagnostics::NotificationStatistics);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl NotificationStatistics {
     #[getter]
@@ -657,12 +659,12 @@ impl From<mod_diagnostics::NotificationStatistics> for NotificationStatistics {
 
 /// The DiagnosticsReport object returned from diagnostics requests
 ///
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticsReport(mod_diagnostics::DiagnosticsReport);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl DiagnosticsReport {
     #[getter]
@@ -771,7 +773,7 @@ impl From<mod_diagnostics::DiagnosticsReport> for DiagnosticsReport {
 ///
 /// Return type for the diagnostics function
 ///
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Diagnostics {
@@ -781,7 +783,7 @@ pub struct Diagnostics {
     pub diagnostics: Option<DiagnosticsReport>,
 }
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl Diagnostics {
     #[getter]
@@ -851,7 +853,7 @@ impl Diagnostics {
 /// - destination: Dot-separated path to the agent (e.g., "brics.aip2.clusters")
 ///                Empty string means get the diagnostics from the bridge itself.
 ///
-#[gen_stub_pyfunction]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyfunction)]
 #[pyfunction]
 fn diagnostics(destination: &str) -> PyResult<Diagnostics> {
     tracing::debug!("Calling /diagnostics with destination={}", destination);
@@ -869,12 +871,12 @@ fn diagnostics(destination: &str) -> PyResult<Diagnostics> {
 ///
 /// The HealthInfo object for each of the agent health checks
 ///
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthInfo(mod_health::HealthInfo);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl HealthInfo {
     #[getter]
@@ -1112,7 +1114,7 @@ impl From<mod_health::HealthInfo> for HealthInfo {
 ///
 /// Return type for the health function
 ///
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Health {
@@ -1121,7 +1123,7 @@ pub struct Health {
     pub health: Option<HealthInfo>,
 }
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl Health {
     #[getter]
@@ -1185,7 +1187,7 @@ impl Health {
 ///
 /// Return the health of the OpenPortal system.
 ///
-#[gen_stub_pyfunction]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyfunction)]
 #[pyfunction]
 fn health() -> PyResult<Health> {
     tracing::debug!("Calling /health");
@@ -1198,7 +1200,7 @@ fn health() -> PyResult<Health> {
 ///
 /// Return type for the restart function
 ///
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RestartResponse {
@@ -1206,7 +1208,7 @@ pub struct RestartResponse {
     pub message: String,
 }
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl RestartResponse {
     #[getter]
@@ -1251,7 +1253,7 @@ impl RestartResponse {
 /// - destination: Dot-separated path to the agent (e.g., "brics.aip2.clusters")
 ///                Empty string means restart the bridge itself
 ///
-#[gen_stub_pyfunction]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyfunction)]
 #[pyfunction]
 fn restart(restart_type: &str, destination: &str) -> PyResult<RestartResponse> {
     tracing::debug!(
@@ -1276,7 +1278,7 @@ fn restart(restart_type: &str, destination: &str) -> PyResult<RestartResponse> {
 /// run, and provides functions that let you query the status and
 /// get the results
 ///
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Job(job::Job<greatwestern::Hpc>);
@@ -1302,7 +1304,7 @@ impl From<job::Job<greatwestern::Hpc>> for Job {
     }
 }
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl Job {
     fn __str__(&self) -> PyResult<String> {
@@ -2177,12 +2179,12 @@ impl Job {
 /// Wrappers for the publicly exposed data types
 ///
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DateRange(grammar::DateRange);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl DateRange {
     #[new]
@@ -2368,12 +2370,12 @@ impl From<grammar::DateRange> for DateRange {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Node(grammar::Node);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl Node {
     #[new]
@@ -2480,12 +2482,12 @@ impl From<grammar::Node> for Node {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Allocation(grammar::Allocation);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl Allocation {
     #[new]
@@ -2697,6 +2699,7 @@ impl From<grammar::Allocation> for Allocation {
 #[derive(FromPyObject)]
 struct AmountArg(Py<PyAny>);
 
+#[cfg(feature = "generate-stubs")]
 impl PyStubType for AmountArg {
     fn type_output() -> TypeInfo {
         TypeInfo::builtin("int | float | str | decimal.Decimal")
@@ -2747,12 +2750,12 @@ impl AmountArg {
 /// unit. `UsageUnit("GBP")` is a well-known unit at its default resolution
 /// (1000000 counts per pound; 3600 per hour for a time unit such as "NHR");
 /// `UsageUnit("CREDITS", counts_per_unit=100)` is any unit, at any resolution.
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone)]
 struct UsageUnit(usageunit::UsageUnit);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl UsageUnit {
     #[new]
@@ -2839,12 +2842,12 @@ impl UsageUnit {
 
 /// A Usage together with its unit: prints as "3.200000 GBP", and honours a
 /// format spec - f"{amount:.2f}" gives "3.20 GBP".
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone)]
 struct Amount(usageunit::Amount);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl Amount {
     #[new]
@@ -2905,12 +2908,12 @@ impl Amount {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Usage(usagereport::Usage);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl Usage {
     #[new]
@@ -3074,12 +3077,12 @@ impl From<usagereport::Usage> for Usage {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UsageReport(usagereport::UsageReport);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl UsageReport {
     #[new]
@@ -3316,12 +3319,12 @@ impl From<usagereport::UsageReport> for UsageReport {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProjectUsageReport(usagereport::ProjectUsageReport);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl ProjectUsageReport {
     /// A report for `project`, with its usage in `unit`. Without a unit, the
@@ -3936,12 +3939,12 @@ impl From<usagereport::ProjectUsageReport> for ProjectUsageReport {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProjectStorageReport(storagereport::ProjectStorageReport);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl ProjectStorageReport {
     #[new]
@@ -4128,12 +4131,12 @@ impl From<storagereport::ProjectStorageReport> for ProjectStorageReport {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StorageReport(storagereport::StorageReport);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl StorageReport {
     #[new]
@@ -4263,12 +4266,12 @@ impl From<storagereport::StorageReport> for StorageReport {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DailyProjectUsageReport(usagereport::DailyProjectUsageReport);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl DailyProjectUsageReport {
     #[new]
@@ -4701,12 +4704,12 @@ impl From<usagereport::DailyProjectUsageReport> for DailyProjectUsageReport {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Destination(destination::Destination);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl Destination {
     #[new]
@@ -4774,12 +4777,12 @@ impl From<destination::Destination> for Destination {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Instruction(grammar::Instruction);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl Instruction {
     #[new]
@@ -4848,12 +4851,12 @@ impl From<grammar::Instruction> for Instruction {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Uuid(uuid::Uuid);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl Uuid {
     #[new]
@@ -4923,12 +4926,12 @@ impl From<uuid::Uuid> for Uuid {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Status(job::Status);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl Status {
     #[new]
@@ -5009,12 +5012,12 @@ impl From<job::Status> for Status {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UserIdentifier(grammar::UserIdentifier);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl UserIdentifier {
     #[new]
@@ -5098,12 +5101,12 @@ impl From<grammar::UserIdentifier> for UserIdentifier {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProjectIdentifier(grammar::ProjectIdentifier);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl ProjectIdentifier {
     #[new]
@@ -5177,12 +5180,12 @@ impl From<grammar::ProjectIdentifier> for ProjectIdentifier {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PortalIdentifier(portal_identifier::PortalIdentifier);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl PortalIdentifier {
     #[new]
@@ -5246,12 +5249,12 @@ impl From<portal_identifier::PortalIdentifier> for PortalIdentifier {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UserMapping(grammar::UserMapping);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl UserMapping {
     #[new]
@@ -5308,12 +5311,12 @@ impl From<grammar::UserMapping> for UserMapping {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProjectMapping(grammar::ProjectMapping);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl ProjectMapping {
     #[new]
@@ -5365,12 +5368,12 @@ impl From<grammar::ProjectMapping> for ProjectMapping {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DomainPattern(grammar::DomainPattern);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl DomainPattern {
     #[new]
@@ -5445,6 +5448,7 @@ enum DomainPatternOrStr {
     Str(String),
 }
 
+#[cfg(feature = "generate-stubs")]
 impl PyStubType for DomainPatternOrStr {
     fn type_output() -> TypeInfo {
         TypeInfo::builtin("str | DomainPattern")
@@ -5458,6 +5462,7 @@ enum AllocationOrStr {
     Str(String),
 }
 
+#[cfg(feature = "generate-stubs")]
 impl PyStubType for AllocationOrStr {
     fn type_output() -> TypeInfo {
         TypeInfo::builtin("str | Allocation")
@@ -5479,12 +5484,12 @@ impl AllocationOrStr {
 /// `minimum`, a `maximum`, both, or neither. Each entry describes only its own
 /// period, so one that sets neither means "no controls from this date".
 /// OpenPortal carries this between portals; it does not interpret it.
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SpendProfileEntry(grammar::SpendProfileEntry);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl SpendProfileEntry {
     #[new]
@@ -5569,12 +5574,12 @@ impl From<grammar::SpendProfileEntry> for SpendProfileEntry {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Link(grammar::Link);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl Link {
     #[new]
@@ -5650,12 +5655,12 @@ impl From<grammar::Link> for Link {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Note(grammar::Note);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl Note {
     #[new]
@@ -5713,12 +5718,12 @@ impl From<grammar::Note> for Note {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProjectTemplate(grammar::ProjectTemplate);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl ProjectTemplate {
     #[new]
@@ -5780,7 +5785,7 @@ impl From<grammar::ProjectTemplate> for ProjectTemplate {
 /// Controls whether the receiving portal may independently modify project
 /// membership or roles.  Access via `award.can_change_membership()` /
 /// `award.can_change_roles()` rather than comparing enum values directly.
-#[gen_stub_pyclass_enum]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass_enum)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, PartialEq)]
 enum MembershipControl {
@@ -5795,7 +5800,7 @@ enum MembershipControl {
     Locked,
 }
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl MembershipControl {
     /// Returns `true` if the receiving portal may add or remove members.
@@ -5892,12 +5897,12 @@ impl From<MembershipControl> for grammar::MembershipControl {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AwardDetails(grammar::AwardDetails);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl AwardDetails {
     /// Construct an `AwardDetails`, optionally from JSON.
@@ -6413,7 +6418,7 @@ impl From<grammar::ProjectDetails> for AwardDetails {
 /// milliseconds to wait as 'max_ms', or a negative number if you want
 /// to wait indefinitely.
 ///
-#[gen_stub_pyfunction]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyfunction)]
 #[pyfunction]
 #[pyo3(signature = (command, max_ms=0))]
 fn run(command: String, max_ms: i64) -> PyResult<Job> {
@@ -6444,12 +6449,12 @@ fn run(command: String, max_ms: i64) -> PyResult<Job> {
 ///
 /// Or parse from the canonical string format:
 ///   `n = Notification.parse("portal.clusters.shared user_added chris.p.portal")`
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Notification(mod_notification::Notification<greatwestern::Hpc>);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl Notification {
     #[new]
@@ -6558,7 +6563,7 @@ impl From<mod_notification::Notification<greatwestern::Hpc>> for Notification {
 /// Raises an error only if the notification could not be handed off to the
 /// bridge (e.g. malformed command, bridge unreachable).
 ///
-#[gen_stub_pyfunction]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyfunction)]
 #[pyfunction]
 fn notify(command: String) -> PyResult<()> {
     match call_post::<serde_json::Value>("notify", serde_json::json!({"command": command})) {
@@ -6571,7 +6576,7 @@ fn notify(command: String) -> PyResult<()> {
 /// Get the status of the passed job on the OpenPortal System
 /// This will return the job updated to the latest version.
 ///
-#[gen_stub_pyfunction]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyfunction)]
 #[pyfunction]
 fn status(job: Job) -> PyResult<Job> {
     match call_post::<job::Job<greatwestern::Hpc>>(
@@ -6587,7 +6592,7 @@ fn status(job: Job) -> PyResult<Job> {
 /// Return the Job with the specified ID. Raises an error if the
 /// job does not exist.
 ///
-#[gen_stub_pyfunction]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyfunction)]
 #[pyfunction]
 fn get(py: Python<'_>, job_id: Py<PyAny>) -> PyResult<Job> {
     let job_id = match job_id.extract::<Uuid>(py) {
@@ -6612,7 +6617,7 @@ fn get(py: Python<'_>, job_id: Py<PyAny>) -> PyResult<Job> {
 /// Fetch all of the jobs that OpenPortal has passed back to us
 /// to run
 ///
-#[gen_stub_pyfunction]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyfunction)]
 #[pyfunction]
 fn fetch_jobs() -> PyResult<Vec<Job>> {
     match call_get::<Vec<job::Job<greatwestern::Hpc>>>("fetch_jobs") {
@@ -6621,7 +6626,7 @@ fn fetch_jobs() -> PyResult<Vec<Job>> {
     }
 }
 
-#[gen_stub_pyfunction]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyfunction)]
 #[pyfunction]
 fn fetch_job(py: Python<'_>, job_id: Py<PyAny>) -> PyResult<Job> {
     let uid: uuid::Uuid = match job_id.extract::<Uuid>(py) {
@@ -6656,7 +6661,7 @@ fn fetch_job(py: Python<'_>, job_id: Py<PyAny>) -> PyResult<Job> {
 ///
 /// Raises `OSError` if the UUID is not found (already removed or never stored).
 ///
-#[gen_stub_pyfunction]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyfunction)]
 #[pyfunction]
 fn fetch_notification(py: Python<'_>, notification_id: Py<PyAny>) -> PyResult<Notification> {
     let uid: uuid::Uuid = match notification_id.extract::<Uuid>(py) {
@@ -6685,7 +6690,7 @@ fn fetch_notification(py: Python<'_>, notification_id: Py<PyAny>) -> PyResult<No
     }
 }
 
-#[gen_stub_pyfunction]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyfunction)]
 #[pyfunction]
 fn add_offerings(offerings: Vec<Destination>) -> PyResult<Vec<Destination>> {
     let offerings: Vec<destination::Destination> = offerings.into_iter().map(|d| d.0).collect();
@@ -6699,7 +6704,7 @@ fn add_offerings(offerings: Vec<Destination>) -> PyResult<Vec<Destination>> {
     }
 }
 
-#[gen_stub_pyfunction]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyfunction)]
 #[pyfunction]
 fn remove_offerings(offerings: Vec<Destination>) -> PyResult<Vec<Destination>> {
     let offerings: Vec<destination::Destination> = offerings.into_iter().map(|d| d.0).collect();
@@ -6713,7 +6718,7 @@ fn remove_offerings(offerings: Vec<Destination>) -> PyResult<Vec<Destination>> {
     }
 }
 
-#[gen_stub_pyfunction]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyfunction)]
 #[pyfunction]
 fn get_offerings() -> PyResult<Vec<Destination>> {
     match call_get::<Vec<destination::Destination>>("get_offerings") {
@@ -6722,7 +6727,7 @@ fn get_offerings() -> PyResult<Vec<Destination>> {
     }
 }
 
-#[gen_stub_pyfunction]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyfunction)]
 #[pyfunction]
 fn sync_offerings(offerings: Vec<Destination>) -> PyResult<Vec<Destination>> {
     let offerings: Vec<destination::Destination> = offerings.into_iter().map(|d| d.0).collect();
@@ -6740,12 +6745,12 @@ fn sync_offerings(offerings: Vec<Destination>) -> PyResult<Vec<Destination>> {
 // Storage type wrappers
 // ============================================================================
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StorageSize(greatwestern::storage::StorageSize);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl StorageSize {
     #[new]
@@ -6891,12 +6896,12 @@ impl From<greatwestern::storage::StorageSize> for StorageSize {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StorageUsage(greatwestern::storage::StorageUsage);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl StorageUsage {
     #[new]
@@ -6962,12 +6967,12 @@ impl From<greatwestern::storage::StorageUsage> for StorageUsage {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct QuotaLimit(greatwestern::storage::QuotaLimit);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl QuotaLimit {
     #[staticmethod]
@@ -7041,12 +7046,12 @@ impl From<greatwestern::storage::QuotaLimit> for QuotaLimit {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Quota(greatwestern::storage::Quota);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl Quota {
     #[staticmethod]
@@ -7140,12 +7145,12 @@ impl From<greatwestern::storage::Quota> for Quota {
     }
 }
 
-#[gen_stub_pyclass]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyclass)]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Volume(greatwestern::storage::Volume);
 
-#[gen_stub_pymethods]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pymethods)]
 #[pymethods]
 impl Volume {
     #[new]
@@ -7228,7 +7233,7 @@ fn error_from_message(py: Python<'_>, message: &str) -> PyResult<Py<PyAny>> {
     Ok(errors::to_pyerr(message).into_value(py).into_any())
 }
 
-#[gen_stub_pyfunction]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyfunction)]
 #[pyfunction]
 fn get_portal() -> PyResult<PortalIdentifier> {
     match call_get::<portal_identifier::PortalIdentifier>("get_portal") {
@@ -7241,7 +7246,7 @@ fn get_portal() -> PyResult<PortalIdentifier> {
 /// Send back the result of us running a job that was passed to us by
 /// OpenPortal.
 ///
-#[gen_stub_pyfunction]
+#[cfg_attr(feature = "generate-stubs", gen_stub_pyfunction)]
 #[pyfunction]
 fn send_result(job: Job) -> PyResult<()> {
     match call_post::<Health>("send_result", serde_json::json!(job.0)) {
@@ -7323,4 +7328,5 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+#[cfg(feature = "generate-stubs")]
 define_stub_info_gatherer!(stub_info_gatherer);

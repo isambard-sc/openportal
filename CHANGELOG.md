@@ -123,9 +123,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
     The names are the same, except that there is no `Local` or `TimeZone`:
     use `DateTime::from_timestamp(secs, nanos)` for
     `Utc.timestamp_opt(secs, nanos).single()`.
-  - **The Python stub generator still uses chrono.** `pyo3-stub-gen` depends
-    on it unconditionally, so it remains in the Python bindings' build, though
-    none of OpenPortal's own code uses it and no agent links it.
+  - **Only the Python stub generator still uses chrono.** `pyo3-stub-gen`
+    depends on it unconditionally, so it is now built only when the `.pyi`
+    stubs are generated (`--features generate-stubs`, as CI and `stub_gen`
+    already do); neither the agents nor the Python extension module link it.
+    The generated stubs are unchanged.
 
 - **Breaking, for code built on the Rust crate, the Python module or the Java
   client** (the wire format is unchanged):

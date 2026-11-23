@@ -138,6 +138,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- **Each Lustre quota engine runs its own `lfs` command.** The pool of `lfs`
+  runners was global and held the command, and each engine replaced it when
+  it was set up. With two Lustre engines configured with different
+  `lfs_command`s, the one set up last ran every engine's commands - against
+  the wrong filesystem. Each `lfs_command` now has its own pool, sized by its
+  engine's `max_runners`. Waiting for a free runner now waits until the job
+  expires, without polling.
+
 - **A Lustre quota is no longer reported as set while its directories are
   still being walked, and a walk that is interrupted is finished.** Giving an
   existing directory tree its quota ID (`lfs project -srp`) can take hours.

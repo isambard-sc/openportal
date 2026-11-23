@@ -8,8 +8,6 @@ use chrono::Utc;
 use greatwestern::grammar::{ProjectMapping, UserMapping};
 use greatwestern::storage::{Quota, QuotaLimit, StorageSize, StorageUsage, Volume};
 use once_cell::sync::Lazy;
-use rand::seq::IteratorRandom;
-use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -551,43 +549,80 @@ fn is_lustre_id_only() -> bool {
     }
 }
 
-/// Lustre runner - ensures that only a limited number of lfs commands
-/// are run at the same time
+/// How many `lfs` commands may run at once, for each `lfs` command (that is,
+/// each Lustre engine, or each set of engines that share a command), sized by
+/// the engine's `max_runners`. This keeps the Lustre servers from being
+/// overloaded. Recursive walks are not counted here - they run one at a time
+/// on their own worker (see `WALKS`).
+///
+/// Each entry is keyed by the command, so an engine's commands always run its
+/// own `lfs_command` - with more than one Lustre engine configured, one engine
+/// can no longer end up running another's.
+static LFS_LIMITS: Lazy<std::sync::Mutex<HashMap<String, LfsLimit>>> =
+    Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
+
 #[derive(Debug, Clone)]
-struct LfsRunner {
-    lfs_command: String,
+struct LfsLimit {
+    max_runners: usize,
+    slots: Arc<tokio::sync::Semaphore>,
 }
 
-static LFS_RUNNERS: Lazy<Mutex<Vec<Arc<Mutex<LfsRunner>>>>> = Lazy::new(|| Mutex::new(Vec::new()));
-
+/// Permission to run one `lfs` command, held while it runs.
 #[derive(Debug)]
 pub struct LockedRunner {
-    runner: tokio::sync::OwnedMutexGuard<LfsRunner>,
+    lfs_command: String,
+    _slot: tokio::sync::OwnedSemaphorePermit,
 }
 
-pub async fn set_command(lfs: &str, max_lfs_runners: usize) {
-    tracing::debug!(
-        "Using command line lfs commands: {}, max_lfs_runners: {}",
-        lfs,
-        max_lfs_runners
-    );
-
+/// Allow `lfs` to run up to `max_lfs_runners` commands at once. Engines that
+/// share a command share the limit; if they ask for different limits, the
+/// larger is used.
+pub fn set_command(lfs: &str, max_lfs_runners: usize) -> Result<(), Error> {
     // make sure we have at least one runner
     let max_lfs_runners = max_lfs_runners.max(1);
-    let mut runners = LFS_RUNNERS.lock().await;
 
-    runners.clear();
+    let mut limits = LFS_LIMITS
+        .lock()
+        .map_err(|_| Error::Failed("The lfs runner lock is poisoned".to_string()))?;
 
-    for _ in 0..max_lfs_runners {
-        runners.push(Arc::new(Mutex::new(LfsRunner {
-            lfs_command: lfs.to_string(),
-        })));
+    match limits.get_mut(lfs) {
+        Some(limit) => {
+            if max_lfs_runners > limit.max_runners {
+                limit
+                    .slots
+                    .add_permits(max_lfs_runners.saturating_sub(limit.max_runners));
+                limit.max_runners = max_lfs_runners;
+            }
+
+            tracing::debug!(
+                "lfs command '{}' is shared by more than one engine, running at most {} at once",
+                lfs,
+                limit.max_runners
+            );
+        }
+        None => {
+            tracing::debug!(
+                "Using command line lfs commands: {}, max_lfs_runners: {}",
+                lfs,
+                max_lfs_runners
+            );
+
+            limits.insert(
+                lfs.to_string(),
+                LfsLimit {
+                    max_runners: max_lfs_runners,
+                    slots: Arc::new(tokio::sync::Semaphore::new(max_lfs_runners)),
+                },
+            );
+        }
     }
+
+    Ok(())
 }
 
 impl LockedRunner {
     pub fn lfs(&self) -> &str {
-        &self.runner.lfs_command
+        &self.lfs_command
     }
 
     async fn run_command(
@@ -641,39 +676,32 @@ impl LockedRunner {
     }
 }
 
-// function to return the runner protected by a MutexGuard - this ensures
-// that we can only run a small number of lfs commands at a time, thereby not
-// overloading the server
-pub async fn runner(expires: &chrono::DateTime<Utc>) -> Result<LockedRunner, Error> {
-    let runners = LFS_RUNNERS.lock().await;
+/// Wait for a free slot to run `lfs`, for as long as the job has left.
+pub async fn runner(lfs: &str, expires: &chrono::DateTime<Utc>) -> Result<LockedRunner, Error> {
+    let slots = LFS_LIMITS
+        .lock()
+        .map_err(|_| Error::Failed("The lfs runner lock is poisoned".to_string()))?
+        .get(lfs)
+        .map(|limit| limit.slots.clone())
+        .ok_or_else(|| Error::Call(format!("No LFS runners have been configured for '{}'", lfs)))?;
 
-    if runners.is_empty() {
-        return Err(Error::Call(
-            "No LFS runners have been configured".to_string(),
-        ));
-    }
+    assert_not_expired(expires)?;
 
-    let mut rng = rand::rngs::StdRng::from_os_rng();
+    let remaining = (*expires - Utc::now()).to_std().unwrap_or(Duration::ZERO);
 
-    loop {
-        // try all the runners in a random order
-        for runner in runners.iter().choose_multiple(&mut rng, runners.len()) {
-            assert_not_expired(expires)?;
-
-            match runner.clone().try_lock_owned() {
-                Ok(guard) => {
-                    return Ok(LockedRunner { runner: guard });
-                }
-                Err(_) => {
-                    // the runner is already locked, so try the next one
-                    continue;
-                }
-            }
-        }
-
-        // wait a bit before trying again
-        assert_not_expired(expires)?;
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    match timeout(remaining, slots.acquire_owned()).await {
+        Ok(Ok(slot)) => Ok(LockedRunner {
+            lfs_command: lfs.to_string(),
+            _slot: slot,
+        }),
+        Ok(Err(_)) => Err(Error::Failed(format!(
+            "The lfs runners for '{}' have been shut down",
+            lfs
+        ))),
+        Err(_) => Err(Error::Timeout(format!(
+            "Timed out waiting for a free lfs runner for '{}'",
+            lfs
+        ))),
     }
 }
 
@@ -1055,7 +1083,7 @@ impl LustreEngine {
 
     /// Initialise the engine
     pub async fn initialize(&self) -> Result<(), Error> {
-        set_command(self.config.lfs_command(), self.config.max_runners()).await;
+        set_command(self.config.lfs_command(), self.config.max_runners())?;
         tracing::info!(
             "LustreEngine initialized with command '{}' and max runners {}",
             self.config.lfs_command(),
@@ -1231,7 +1259,7 @@ impl LustreEngine {
             return Ok(String::new());
         }
 
-        let locked_runner = runner(expires).await?;
+        let locked_runner = runner(self.config.lfs_command(), expires).await?;
         let output = locked_runner
             .run_command(args, timeout_duration, expires)
             .await?;
@@ -2891,8 +2919,8 @@ mod tests {
         _serial: tokio::sync::OwnedMutexGuard<()>,
     }
 
-    /// The `lfs` runners are global - `initialize` sets the command they run -
-    /// so the tests that use them take turns.
+    /// Walks share one worker, and the tests that time a walk assume theirs is
+    /// the only one, so the tests that walk take turns.
     static FAKE_LUSTRE_TESTS: Lazy<Arc<Mutex<()>>> = Lazy::new(|| Arc::new(Mutex::new(())));
 
     const FAKE_LFS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake_lfs.sh");
@@ -3447,6 +3475,54 @@ mod tests {
             .unwrap();
         assert_eq!(lustre.log("assigned.log").lines().count(), 4);
         assert!(marker(&dir).await.is_complete_for(500));
+    }
+
+    /// Two Lustre engines with different `lfs` commands each run their own.
+    /// (The runners used to be global, and the last engine initialised won.)
+    #[tokio::test]
+    async fn test_engines_run_their_own_lfs_command() {
+        let first = FakeLustre::new("engine-one").await;
+        let one = first.seed_project("root", "111", "P");
+        let first_engine = first.engine("unassigned_project_ids = [1]");
+
+        // the second fake shares the lock, so build it by hand
+        let second_dir =
+            std::env::temp_dir().join(format!("op-fake-lfs-engine-two-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&second_dir);
+        std::fs::create_dir_all(second_dir.join("root/proj")).unwrap();
+        let two = second_dir.join("root/proj");
+        let status = std::process::Command::new("sh")
+            .arg(FAKE_LFS)
+            .arg(&second_dir)
+            .args(["seed", two.to_str().unwrap(), "222", "P"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let second_engine = LustreEngine::new(
+            toml::from_str(&format!(
+                "lfs_command = \"sh {} {}\"\nmax_runners = 2\nprojects = \"{{GID}}\"\n",
+                FAKE_LFS,
+                second_dir.display()
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+
+        first_engine.initialize().await.unwrap();
+        second_engine.initialize().await.unwrap();
+
+        let expires = expires_in(60);
+
+        for _ in 0..3 {
+            let (a, b) = tokio::join!(
+                first_engine.get_lustre_id_from_dir(&one, &expires),
+                second_engine.get_lustre_id_from_dir(&two, &expires)
+            );
+            assert_eq!(a.unwrap(), Some(111));
+            assert_eq!(b.unwrap(), Some(222));
+        }
+
+        let _ = std::fs::remove_dir_all(&second_dir);
     }
 
     /// A Lustre volume with a default quota is refused when the engine does not

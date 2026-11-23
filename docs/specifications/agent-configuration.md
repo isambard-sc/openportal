@@ -729,7 +729,7 @@ projects = "{GID}"
 | Field | Default | Description |
 |-------|---------|-------------|
 | `lfs_command` | `"lfs"` | Command to invoke `lfs`. May include a path, `sudo`, or container exec (e.g. `"sudo lfs"`). |
-| `max_runners` | `4` | Maximum concurrent `lfs` commands (excluding recursive project operations). |
+| `max_runners` | `4` | Maximum concurrent `lfs` commands for this engine's `lfs_command` (excluding recursive walks, which run one at a time). Engines that share an `lfs_command` share the limit, using the larger of their settings. |
 | `command_timeout_secs` | `30` | Timeout in seconds for standard `lfs` commands. |
 | `recursive_timeout_secs` | `18000` | How long a recursive walk (`lfs project -srp` / `-Cr`) may run before it is stopped and reported as failed. Default is 5 hours to accommodate large directory trees. Walks run in the background, so this does not hold up any job. |
 | `unassigned_project_ids` | (unset) | Lustre project IDs that mean a directory has not been given its own quota ID yet - typically the ID the volume roots are tagged with, e.g. `[1]`. **There is no default.** Unset, no ID counts as unassigned; that is valid, but then no volume using this engine may have a `default_quota` (the agent refuses to start). Never list an ID that is used as a real quota ID by an `id_strategies` entry. See below. |

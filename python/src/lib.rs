@@ -4907,17 +4907,13 @@ impl Uuid {
 
     #[staticmethod]
     fn from_string(uuid: &str) -> PyResult<Uuid> {
-        Ok(Uuid::from(uuid.to_string()))
+        uuid::Uuid::parse_str(uuid)
+            .map(Uuid)
+            .map_err(|e| PyErr::new::<PyValueError, _>(format!("Invalid UUID '{}': {}", uuid, e)))
     }
 
     fn to_string(&self) -> PyResult<String> {
         Ok(self.0.to_string())
-    }
-}
-
-impl From<String> for Uuid {
-    fn from(uuid: String) -> Self {
-        Uuid(uuid::Uuid::parse_str(&uuid).unwrap())
     }
 }
 

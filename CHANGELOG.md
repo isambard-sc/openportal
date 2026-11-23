@@ -138,6 +138,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- **`Uuid.from_string` raises `ValueError` for an invalid UUID** in the Python
+  module. It unwrapped the parse, and release builds abort on a panic, so a
+  malformed string ended the whole Python process.
+- **Builds are clean on current Rust.** The recycle bin's timestamp is set with
+  the standard library instead of the `filetime` crate, whose newest release
+  deprecates the function used; every crate's `repository` now points at
+  `isambard-sc/openportal`, without a redundant `homepage`; and the Python
+  bindings now inherit the workspace lints like every other crate, which
+  removed four unused dependencies.
+
 - **The filesystem agent's log no longer contradicts itself about an existing
   directory.** When a directory it was asked to create was already there with
   a different owner, group or mode, it logged an error for each difference and

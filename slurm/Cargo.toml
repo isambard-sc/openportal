@@ -7,8 +7,7 @@ version = "0.94.2"
 description = "Agent that interfaces OpenPortal with the slurm scheduler"
 edition = "2021"
 license = "MIT"
-homepage = "https://github.com/chryswoods/openportal/"
-repository = "https://github.com/chryswoods/openportal/"
+repository = "https://github.com/isambard-sc/openportal/"
 
 [[bin]]
 name = "op-slurm"

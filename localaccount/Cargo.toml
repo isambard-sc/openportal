@@ -7,8 +7,7 @@ version = "0.1.0"
 description = "Account agent using local Unix user/group management (for testing)"
 edition = "2021"
 license = "MIT"
-homepage = "https://github.com/chryswoods/openportal/"
-repository = "https://github.com/chryswoods/openportal/"
+repository = "https://github.com/isambard-sc/openportal/"
 
 [dependencies]
 anyhow = { version="1.0.100", features = ["backtrace"] }

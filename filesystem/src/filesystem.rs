@@ -743,8 +743,18 @@ async fn create_dir_remote(
 
     if already_exists {
         // As in `create_dir_native`: left as it is, but say how it differs.
-        let (exit_code, stdout, stderr) =
-            run_remote(prefix, &["stat", "-c", "%U %G %a", &path_str]).await?;
+        let (exit_code, stdout, stderr) = run_remote(
+            prefix,
+            &[
+                "sh",
+                "-c",
+                // GNU stat, or BSD stat (macOS), which has no -c
+                r#"stat -c '%U %G %a' "$1" 2>/dev/null || stat -f '%Su %Sg %Mp%Lp' "$1""#,
+                "sh",
+                &path_str,
+            ],
+        )
+        .await?;
 
         let found: Vec<&str> = stdout.split_whitespace().collect();
 

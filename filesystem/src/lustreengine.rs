@@ -3018,9 +3018,12 @@ mod tests {
         Utc::now() + chrono::Duration::seconds(seconds)
     }
 
-    // the group "root" has GID 0, so the quota ID is 500
+    /// The project's group is a test-only name (see `nameservice::testing`), so
+    /// these tests do not depend on the groups - or the `getent` - of the host
+    /// running them. It has GID 0, so with `{GID+500}` the quota ID is 500.
     fn proj_mapping() -> ProjectMapping {
-        ProjectMapping::parse("proj.portal:root").unwrap()
+        crate::nameservice::testing::add_group("openportal-test-group", 0);
+        ProjectMapping::parse("proj.portal:openportal-test-group").unwrap()
     }
 
     /// The marker location for a project directory directly under its root.

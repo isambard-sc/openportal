@@ -514,6 +514,8 @@ mod remote {
 
     /// Prints `ABSENT`, `UNTRUSTED <reason>`, or `OK` followed by the marker.
     const READ: &str = r#"
+# GNU stat, or BSD stat (macOS) where there is no -c: "<GNU format>" "<BSD format>" path
+st() { stat -c "$1" "$3" 2>/dev/null || stat -f "$2" "$3"; }
 uid=$(id -u) || exit 1
 f=$1
 shift
@@ -521,7 +523,7 @@ for d in "$@"; do
     if [ -L "$d" ]; then echo "UNTRUSTED $d is a symlink"; exit 0; fi
     if [ ! -e "$d" ]; then echo ABSENT; exit 0; fi
     if [ ! -d "$d" ]; then echo "UNTRUSTED $d is not a directory"; exit 0; fi
-    s=$(stat -c '%u %a' "$d") || exit 1
+    s=$(st '%u %a' '%u %Mp%Lp' "$d") || exit 1
     set -- $s
     if [ "$1" != "$uid" ]; then echo "UNTRUSTED $d is owned by uid $1"; exit 0; fi
     case "$2" in *[2367]?|*[2367]) echo "UNTRUSTED $d is writable by group or others"; exit 0;; esac
@@ -529,7 +531,7 @@ done
 if [ -L "$f" ]; then echo "UNTRUSTED $f is a symlink"; exit 0; fi
 if [ ! -e "$f" ]; then echo ABSENT; exit 0; fi
 if [ ! -f "$f" ]; then echo "UNTRUSTED $f is not a regular file"; exit 0; fi
-s=$(stat -c '%u %h' "$f") || exit 1
+s=$(st '%u %h' '%u %l' "$f") || exit 1
 set -- $s
 if [ "$1" != "$uid" ]; then echo "UNTRUSTED $f is owned by uid $1"; exit 0; fi
 if [ "$2" != 1 ]; then echo "UNTRUSTED $f has $2 links, not 1"; exit 0; fi
@@ -540,6 +542,8 @@ head -c 4096 "$f"
     /// Creates the marker directories (0700) as needed, checks them, and
     /// writes the marker (0400) through a temporary file and a rename.
     const WRITE: &str = r#"
+# GNU stat, or BSD stat (macOS) where there is no -c: "<GNU format>" "<BSD format>" path
+st() { stat -c "$1" "$3" 2>/dev/null || stat -f "$2" "$3"; }
 uid=$(id -u) || exit 1
 content=$1
 f=$2
@@ -548,7 +552,7 @@ for d in "$@"; do
     if [ -L "$d" ]; then echo "$d is a symlink" >&2; exit 1; fi
     if [ ! -e "$d" ]; then mkdir -m 700 "$d" || exit 1; fi
     if [ ! -d "$d" ]; then echo "$d is not a directory" >&2; exit 1; fi
-    s=$(stat -c '%u %a' "$d") || exit 1
+    s=$(st '%u %a' '%u %Mp%Lp' "$d") || exit 1
     set -- $s
     if [ "$1" != "$uid" ]; then echo "$d is owned by uid $1" >&2; exit 1; fi
     case "$2" in *[2367]?|*[2367]) echo "$d is writable by group or others" >&2; exit 1;; esac

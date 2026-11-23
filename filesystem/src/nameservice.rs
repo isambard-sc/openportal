@@ -161,6 +161,11 @@ pub async fn resolve_gid(groupname: &str) -> Result<u32, Error> {
 async fn resolve(database: Database, name: &str) -> Result<u32, Error> {
     check_name(database, name)?;
 
+    #[cfg(test)]
+    if let Some(id) = testing::lookup(database, name) {
+        return Ok(id);
+    }
+
     let mut reason = String::new();
 
     for attempt in 1..=LOOKUP_ATTEMPTS {
@@ -514,6 +519,53 @@ async fn read_file(database: Database, name: &str) -> Outcome {
     ))
 }
 
+///
+/// Names that tests of *other* modules resolve without asking the host.
+///
+/// A test of, say, the Lustre engine needs a group with a known GID, but which
+/// users and groups exist - and whether there is a `getent` to ask - depends on
+/// the machine running the tests (macOS has neither `getent` nor a group called
+/// `root`). Such a test registers an obviously fake name here instead. Only test
+/// builds have this table: a release binary always asks the host.
+///
+/// The tests of this module itself never use it - they exercise the real lookup.
+///
+#[cfg(test)]
+pub mod testing {
+    use super::Database;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    static NAMES: Mutex<Option<HashMap<(&'static str, String), u32>>> = Mutex::new(None);
+
+    fn add(database: Database, name: &str, id: u32) {
+        let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
+        names
+            .get_or_insert_with(HashMap::new)
+            .insert((database.as_str(), name.to_string()), id);
+    }
+
+    /// Make `name` resolve to `gid` in this test process.
+    pub fn add_group(name: &str, gid: u32) {
+        add(Database::Group, name, gid);
+    }
+
+    /// Make `name` resolve to `uid` in this test process.
+    #[allow(dead_code)]
+    pub fn add_user(name: &str, uid: u32) {
+        add(Database::Passwd, name, uid);
+    }
+
+    pub(super) fn lookup(database: Database, name: &str) -> Option<u32> {
+        NAMES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()?
+            .get(&(database.as_str(), name.to_string()))
+            .copied()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -690,5 +742,20 @@ mod tests {
             result,
             Err(Error::NotFound(_)) | Err(Error::Unavailable(_))
         ));
+    }
+
+    /// The agents are built for Linux, where every lookup goes through `getent`.
+    /// A Linux build host without it would quietly test only the flat-file
+    /// fallback, so say so loudly instead. (Other platforms, e.g. a developer's
+    /// Mac, have no `getent`, and are tested through the fallback.)
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_linux_has_getent() {
+        assert!(
+            getent().await.is_some(),
+            "This Linux host has no 'getent', so the name lookups the agents rely on \
+             are not being tested. Install it (it is part of glibc, or musl-utils on \
+             Alpine) on the machine running the tests."
+        );
     }
 }

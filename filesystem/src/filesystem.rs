@@ -530,6 +530,59 @@ fn open_dir_nofollow(path: &Path) -> Result<std::fs::File, Error> {
         })?)
 }
 
+///
+/// How a directory that already exists differs from what was asked for: each
+/// pair is (found, expected) for the owner, the group and the mode.
+///
+fn existing_dir_differences(
+    owner: (&str, &str),
+    group: (&str, &str),
+    mode: (u32, u32),
+) -> Vec<String> {
+    let mut differences = Vec::new();
+
+    if owner.0 != owner.1 {
+        differences.push(format!("its owner is {} (expected {})", owner.0, owner.1));
+    }
+
+    if group.0 != group.1 {
+        differences.push(format!("its group is {} (expected {})", group.0, group.1));
+    }
+
+    let (found, expected) = (mode.0 & 0o7777, mode.1 & 0o7777);
+
+    if found != expected {
+        differences.push(format!(
+            "its mode is {:04o} {} (expected {:04o} {})",
+            found,
+            unix_mode::to_string(found),
+            expected,
+            unix_mode::to_string(expected)
+        ));
+    }
+
+    differences
+}
+
+///
+/// Log that a directory already exists, and is left as it is - with how it
+/// differs from what was asked for, if it does.
+///
+fn log_existing_dir(path: &Path, differences: &[String]) {
+    if differences.is_empty() {
+        tracing::info!(
+            "Directory {} already exists with the required ownership and permissions.",
+            path.display()
+        );
+    } else {
+        tracing::warn!(
+            "Directory {} already exists, and is left as it is, although {}.",
+            path.display(),
+            differences.join("; ")
+        );
+    }
+}
+
 async fn create_dir_native(
     path: &Path,
     username: &str,
@@ -559,42 +612,21 @@ async fn create_dir_native(
             }
         }
 
-        // directory already exists - check it has the right permissions
-        // and user / group ownership
+        // The directory is already here, so assume another request beat us to
+        // it and leave it as it is - an operator may have changed its owner or
+        // mode deliberately. Say so honestly if it differs from what this
+        // request would have created.
         let metadata = path.metadata()?;
 
-        // check the ownership
-        if Uid::from_raw(metadata.uid()) != uid {
-            // ownership is wrong
-            tracing::error!(
-                "Directory '{}' already exists, but has the wrong ownership. Expected '{}', got '{}'",
-                    path.to_string_lossy(), uid, Uid::from_raw(metadata.uid())
-                );
-        }
+        log_existing_dir(
+            path,
+            &existing_dir_differences(
+                (&format!("uid {}", metadata.uid()), &format!("uid {}", uid)),
+                (&format!("gid {}", metadata.gid()), &format!("gid {}", gid)),
+                (metadata.permissions().mode(), permissions),
+            ),
+        );
 
-        if Gid::from_raw(metadata.gid()) != gid {
-            // ownership is wrong
-            tracing::error!(
-                "Directory '{}' already exists, but has the wrong group ownership. Expected '{}', got '{}'",
-                    path.to_string_lossy(), gid, Gid::from_raw(metadata.gid())
-                );
-        }
-
-        // check the permissions - we should ignore the sticky bit
-        if metadata.permissions().mode() & 0o7777 != permissions {
-            // permissions are wrong
-            tracing::error!(
-                "Directory '{}' already exists, but has the wrong permissions. Expected '{}', got '{}'",
-                    path.to_string_lossy(), unix_mode::to_string(permissions),
-                    unix_mode::to_string(metadata.permissions().mode())
-                );
-        }
-
-        // otherwise the directory is already present and correct
-        // It is best to stop now, and not try to do anything,
-        // as we should assume that another process has already beaten
-        // us to creating the directory
-        tracing::info!("Directory already exists with required permissions.");
         return Ok(false);
     }
 
@@ -710,7 +742,37 @@ async fn create_dir_remote(
     }
 
     if already_exists {
-        tracing::info!("Directory already exists (remote): {}", path_str);
+        // As in `create_dir_native`: left as it is, but say how it differs.
+        let (exit_code, stdout, stderr) =
+            run_remote(prefix, &["stat", "-c", "%U %G %a", &path_str]).await?;
+
+        let found: Vec<&str> = stdout.split_whitespace().collect();
+
+        match (exit_code, found.as_slice()) {
+            (0, [owner, group, mode]) => match u32::from_str_radix(mode, 8) {
+                Ok(mode) => log_existing_dir(
+                    path,
+                    &existing_dir_differences(
+                        (owner, username),
+                        (group, groupname),
+                        (mode, permissions),
+                    ),
+                ),
+                Err(_) => tracing::warn!(
+                    "Directory {} already exists (remote), and is left as it is; could not \
+                     read its mode from '{}'",
+                    path_str,
+                    stdout.trim()
+                ),
+            },
+            _ => tracing::warn!(
+                "Directory {} already exists (remote), and is left as it is; could not check \
+                 its ownership and permissions: {}",
+                path_str,
+                stderr.trim()
+            ),
+        }
+
         return Ok(false);
     }
 
@@ -2107,6 +2169,54 @@ mod tests {
             "restoring the directory must be reported as a creation"
         );
         assert!(path.join("keep-me").exists(), "contents must come back");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_existing_dir_differences() {
+        assert!(
+            existing_dir_differences(("alice", "alice"), ("proj", "proj"), (0o2770, 0o2770))
+                .is_empty()
+        );
+
+        // only the permission bits are compared, not the file type
+        assert!(existing_dir_differences(("a", "a"), ("g", "g"), (0o40755, 0o755)).is_empty());
+
+        let differences =
+            existing_dir_differences(("root", "alice"), ("proj", "proj"), (0o755, 0o2770));
+        assert_eq!(differences.len(), 2, "{:?}", differences);
+        assert!(differences[0].contains("its owner is root (expected alice)"));
+        assert!(differences[1].contains("its mode is 0755"));
+        assert!(differences[1].contains("expected 2770"));
+    }
+
+    /// The remote path checks an existing directory too, and leaves it alone.
+    #[tokio::test]
+    async fn test_create_dir_remote_leaves_an_existing_directory() {
+        let Some((user, group)) = current_user_and_group() else {
+            return;
+        };
+
+        let base = std::env::temp_dir().join(format!("op-fs-remote-exists-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o750)).unwrap();
+
+        let prefix = vec!["env".to_string()];
+
+        // the same, and different: either way it is not created again or changed
+        for permissions in [0o750, 0o2770] {
+            assert!(
+                !create_dir_remote(&base, &user, &group, permissions, &prefix)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(
+                std::fs::metadata(&base).unwrap().permissions().mode() & 0o7777,
+                0o750
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&base);
     }

@@ -138,6 +138,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- **The filesystem agent's log no longer contradicts itself about an existing
+  directory.** When a directory it was asked to create was already there with
+  a different owner, group or mode, it logged an error for each difference and
+  then "Directory already exists with required permissions." It still leaves
+  the directory as it is, since it may have been changed deliberately, but now
+  logs one warning saying so and listing how it differs, or that it matches.
+  With `exec-prefix` set the same check is made through the prefix; before, it
+  was not made at all.
+
 - **Each Lustre quota engine runs its own `lfs` command.** The pool of `lfs`
   runners was global and held the command, and each engine replaced it when
   it was set up. With two Lustre engines configured with different

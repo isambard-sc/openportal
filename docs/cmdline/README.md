@@ -431,12 +431,15 @@ say that it will connect to the `portal` only from the localhost IP address
 $ ./target/debug/example-portal client -a cluster -i 127.0.0.1
 ```
 
-This will produce an invitation file called `invite_cluster.toml` in the
-current directory.
+This will produce an invitation file called `invite_portal_default.toml` in
+the current directory.
 
 > [!NOTE]
-> The invitation file is called `invite_{name}.toml', where
-> `{name}` is the name of the agent being invited.
+> The invitation file is called `invite_{issuer}_{zone}.toml`, where
+> `{issuer}` is the name of the agent that *issued* the invitation (here
+> `portal`) and `{zone}` is the zone (`default` unless you gave one). It is
+> not named after the agent being invited, so two invitations from the same
+> agent in the same zone share a name - import each before creating the next.
 
 Now that we have this invitation, we can pass it to the `cluster` agent.
 To do this, we use the `server` command line option of the `cluster` agent.
@@ -458,7 +461,7 @@ Options:
 In this case, we just need to add the invitation file.
 
 ```shell
-$ ./target/debug/example-cluster server -a invite_cluster.toml
+$ ./target/debug/example-cluster server -a invite_portal_default.toml
 ```
 
 Running this, you should see that the portal has been added.

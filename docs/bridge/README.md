@@ -92,10 +92,12 @@ for the bridge:
 ./target/debug/op-portal client --add bridge --ip 127.0.0.1
 ```
 
-This writes `invite_bridge.toml`. Import it into the bridge:
+This writes `invite_portal_default.toml`. An invitation is named after the
+agent that *issues* it and the zone - `invite_<issuer>_<zone>.toml` - not after
+the agent being invited. Import it into the bridge:
 
 ```bash
-./target/debug/op-bridge server --add invite_bridge.toml
+./target/debug/op-bridge server --add invite_portal_default.toml
 ```
 
 ## Step 5: Connect the portal to a provider
@@ -111,10 +113,13 @@ Ask the portal to create an invitation for the downstream agent (here called
 ./target/debug/op-portal client --add provider --ip 127.0.0.1
 ```
 
-Give the invitation to the provider/cluster agent:
+Give the invitation to the provider/cluster agent. The portal issued it, so it
+has the same name as the bridge's invitation in Step 4 -
+`invite_portal_default.toml` - and has overwritten it. That is why each
+invitation is imported before the next is created:
 
 ```bash
-./target/debug/example-cluster server --add invite_provider.toml
+./target/debug/example-cluster server --add invite_portal_default.toml
 ```
 
 ## Step 6: Run all agents
@@ -156,10 +161,25 @@ print(openportal.__doc__)
 
 ## Step 8: Write a Python script
 
-The bridge writes a small TOML config file (called `bridge.toml` or
-similar) during initialisation. This file tells the Python library where
-to find the running bridge and provides the signing key. Load it before
-calling any other function.
+The Python library does not read the bridge agent's own configuration. It reads
+a small client file holding just the bridge's HTTP address and its signing key,
+which you ask the bridge to write:
+
+```bash
+./target/debug/op-bridge bridge --config bridge-client.toml
+```
+
+The file looks like this:
+
+```toml
+url = "http://localhost:3000/"
+
+[key]
+data = "..."    # the HMAC signing key
+```
+
+It holds the key in clear, so it is written readable only by you - keep it
+that way. Load it before calling any other function:
 
 ```python
 import openportal
@@ -167,8 +187,8 @@ import openportal
 # Enable logging (optional)
 openportal.initialize_tracing()
 
-# Load the bridge config - adjust the path to match your setup
-openportal.load_config("bridge.toml")
+# Load the client file written above - adjust the path to match your setup
+openportal.load_config("bridge-client.toml")
 assert openportal.is_config_loaded(), "Bridge config not loaded"
 ```
 
@@ -300,10 +320,14 @@ if diag.detail:
                   f"(seen {entry.count} times)")
 ```
 
-## What the bridge config file contains
+## The two configuration files
 
-After running `op-bridge init`, the bridge writes a config file
-(`~/.config/openportal/bridge.toml` by default) that looks like this:
+There are two files, and they are easy to confuse.
+
+**The bridge agent's own configuration** is what `op-bridge init` writes
+(`~/.config/openportal/bridge.toml` by default). `op-bridge` reads it; the
+Python library does not, and `load_config` fails on it. After Step 4 it looks
+like this:
 
 ```toml
 agent = "Bridge"
@@ -313,33 +337,46 @@ name = "bridge"
 url = "ws://localhost:8044/"
 ip = "127.0.0.1"
 port = 8044
-servers = []
 clients = []
 
+[[service.servers]]
+name = "portal"
+url = "ws://localhost:8040/"
+zone = "default"
+type = "portal"
+# ... and the keys for that connection
+
 [bridge]
-url = "http://127.0.0.1:3000"
+url = "http://localhost:3000/"
 ip = "127.0.0.1"
 port = 3000
+signal_url = "http://localhost/signal"
+notification_url = "http://localhost/notification"
 
 [bridge.key]
 data = "..."    # HMAC signing key
-
-[extras]
 ```
 
-The Python `openportal.load_config("bridge.toml")` call reads the
-`[bridge]` section to find the HTTP server address and signing key. It does
-not need any of the websocket configuration.
+**The Python client file** is what `op-bridge bridge --config <file>` writes
+from it (Step 8): only `url` and `[key]`, copied from the `[bridge]` section
+above. This is the file `openportal.load_config` reads. Write it again
+whenever the bridge's address or key changes.
 
 ## Troubleshooting
 
-**`OSError: Failed to connect to bridge`** — the `op-bridge` agent is not
-running, or the `url` in the `[bridge]` config section does not match the
-address the bridge is actually listening on.
+**`OSError: Could not parse config file`** from `load_config` — it has been
+given the bridge agent's own configuration rather than the client file. Write
+the client file with `op-bridge bridge --config <file>` and load that.
 
-**`OSError: HMAC verification failed`** — the signing key in the config file
-does not match the running bridge. Re-run `op-bridge init` and reload the
-config.
+**`OSError: Failed to connect to bridge`** — the `op-bridge` agent is not
+running, or the `url` in the client file does not match the address the bridge
+is actually listening on.
+
+**`OSError: HMAC verification failed`** — the key in the client file does not
+match the running bridge, usually because the key was regenerated
+(`op-bridge bridge --regenerate`) or the bridge re-initialised since the file
+was written. Write the client file again with `op-bridge bridge --config <file>`
+and reload it.
 
 **Jobs never finish** — check that the downstream agents (`op-portal`,
 `op-cluster`, etc.) are all running and connected. Use `openportal.health()`

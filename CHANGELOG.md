@@ -115,6 +115,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- **The bridge walk-through works when followed literally**
+  ([isambard-sc/openportal#45](https://github.com/isambard-sc/openportal/issues/45)).
+  It had two errors:
+  - **Which file `openportal.load_config` reads.** The walk-through pointed it
+    at the bridge agent's own configuration, which it cannot parse. It reads
+    the client file written by `op-bridge bridge --config <file>`.
+  - **Invitation file names.** These are `invite_<issuer>_<zone>.toml`, e.g.
+    `invite_portal_default.toml`, not named after the agent invited.
+
+  The same mistakes are corrected in the Python API reference and the
+  command-line example.
 - **`scale_total` scales the charged-requeue figures.** It kept its own list of
   consumption figures, which had missed the charged-requeue ones, so after
   scaling the charged share was in a different unit from the total it is part

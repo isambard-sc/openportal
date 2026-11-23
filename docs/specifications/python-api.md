@@ -39,8 +39,10 @@ bridge. It is the fastest way to see how the pieces below fit together.
 
 ## Initialisation
 
-Before calling any other function you must load the bridge configuration
-file that was created when the bridge agent was initialised.
+Before calling any other function you must load the bridge's *client* file:
+the bridge's HTTP address and signing key, written by
+`op-bridge bridge --config <file>`. It is not the bridge agent's own
+configuration (`bridge.toml`), which `load_config` cannot read.
 
 ```python
 import openportal
@@ -48,8 +50,8 @@ import openportal
 # Enable logging to stdout (optional but recommended during development)
 openportal.initialize_tracing()
 
-# Load the bridge config (default path: ~/.config/openportal/bridge.toml)
-openportal.load_config("/path/to/bridge.toml")
+# Load the client file written by `op-bridge bridge --config <file>`
+openportal.load_config("/path/to/bridge-client.toml")
 
 # Check the config loaded successfully
 assert openportal.is_config_loaded()

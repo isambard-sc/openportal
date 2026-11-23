@@ -551,7 +551,6 @@ pub mod testing {
     }
 
     /// Make `name` resolve to `uid` in this test process.
-    #[allow(dead_code)]
     pub fn add_user(name: &str, uid: u32) {
         add(Database::Passwd, name, uid);
     }

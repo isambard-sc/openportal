@@ -2107,8 +2107,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// The name of the user and group running the tests, as `getent` knows them.
-    /// `None` if they cannot be looked up, in which case the caller skips - a build
+    /// The name of the user and group running the tests.
+    ///
+    /// They are registered, with their real ids from `id`, in the test name table
+    /// (`nameservice::testing`), because the tests then `chown` to them by name and
+    /// these tests are about directories, not lookups. Resolving them through the
+    /// host would fail wherever the account comes from a directory and there is no
+    /// `getent` (e.g. macOS).
+    ///
+    /// `None` if `id` cannot answer, in which case the caller skips - a build
     /// environment where `id` is unavailable is not a failure of the code under test.
     fn current_user_and_group() -> Option<(String, String)> {
         let run = |args: &[&str]| {
@@ -2119,7 +2126,14 @@ mod tests {
             }
         };
 
-        Some((run(&["-un"])?, run(&["-gn"])?))
+        let (user, group) = (run(&["-un"])?, run(&["-gn"])?);
+        let uid = run(&["-u"])?.parse().ok()?;
+        let gid = run(&["-g"])?.parse().ok()?;
+
+        crate::nameservice::testing::add_user(&user, uid);
+        crate::nameservice::testing::add_group(&group, gid);
+
+        Some((user, group))
     }
 
     #[tokio::test]

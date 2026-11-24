@@ -288,7 +288,7 @@ struct Collected {
 /// Read the whole period, one day at a time.
 ///
 async fn collect(options: &Options, nodes: &SlurmNodes) -> Result<Collected> {
-    let now = chrono::Utc::now();
+    let now = bradshaw::Utc::now();
     let mut collected = Collected::default();
 
     // A day that has not started cannot have been used, and `sacct` has nothing
@@ -1084,7 +1084,7 @@ mod tests {
     const DAY_ONE: i64 = 1772323200;
 
     fn day(timestamp: i64) -> Date {
-        let Some(at) = chrono::DateTime::from_timestamp(timestamp, 0) else {
+        let Some(at) = bradshaw::DateTime::from_timestamp(timestamp, 0) else {
             unreachable!("the fixture's timestamps are representable");
         };
 

@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: © 2026 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+# SPDX-License-Identifier: CC0-1.0
+
+[package]
+name = "bradshaw"
+version = "0.94.2"
+description = "UTC dates, times and durations for OpenPortal, on the standard library alone - the small part of a date library that OpenPortal uses, without a dependency on an unmaintained one"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/isambard-sc/openportal/"
+
+[dependencies]
+serde = "1.0.228"
+
+# Optional integrations, each enabled only by the crate that needs it.
+pyo3 = { version = "0.27.1", default-features = false, optional = true }
+pyo3-stub-gen = { version = "0.22.1", default-features = false, optional = true }
+ts-rs = { version = "10", optional = true }
+
+[dev-dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+
+[features]
+# `IntoPyObject` / `FromPyObject` for Python's `datetime` types
+pyo3 = ["dep:pyo3"]
+# Type information for `pyo3-stub-gen`'s `.pyi` stubs
+stub-gen = ["pyo3", "dep:pyo3-stub-gen"]
+# TypeScript bindings: every type here is a `string`
+ts-rs = ["dep:ts-rs"]
+
+[lints]
+workspace = true

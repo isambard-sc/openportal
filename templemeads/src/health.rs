@@ -15,7 +15,7 @@ use crate::named::NamedType;
 use crate::state;
 use crate::systeminfo;
 
-use chrono::{DateTime, Utc};
+use bradshaw::{DateTime, Utc};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

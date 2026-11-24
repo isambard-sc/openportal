@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
+// A binary shares its package's dependency list, which is the library's - this
+// tool only drives the library's stub generation, so it uses few of them.
+#![allow(unused_crate_dependencies)]
+
 use pyo3_stub_gen::Result;
 
 fn main() -> Result<()> {

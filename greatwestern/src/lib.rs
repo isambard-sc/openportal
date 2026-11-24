@@ -22,7 +22,7 @@ pub mod usagereport;
 pub mod usageunit;
 
 // Needed only so ts-rs's "uuid-impl" feature (which implements TS for
-// uuid::Uuid, used transitively via chrono/serde derive on our report
+// uuid::Uuid, used transitively via serde derive on our report
 // types) is enabled - nothing here calls into the uuid crate directly.
 use uuid as _;
 

@@ -42,6 +42,10 @@ Each agent type is its own binary crate that implements specific infrastructure 
 
 - **python**: Python library (via pyo3) for calling into OpenPortal via the bridge agent.
 
+### Utility Crates
+
+- **bradshaw**: UTC dates, times and durations on the standard library alone, named after Bradshaw's railway timetables. It replaced the unmaintained `chrono` and keeps chrono's names (`DateTime<Utc>`, `NaiveDate`, `TimeDelta`, `Datelike`, `Utc::now()`), so code reads the same. It is UTC-only (no `Local`), serialises exactly as chrono did (checked against vectors recorded from chrono in `bradshaw/tests/golden.tsv`), and its arithmetic saturates instead of panicking. Optional features add pyo3 conversions (`pyo3`), stub types (`stub-gen`) and TypeScript bindings (`ts-rs`).
+
 ## Architecture Concepts
 
 ### Agent Hierarchy
@@ -88,6 +92,7 @@ When writing or modifying code:
 - After making changes, run `make style-check`, `make lint` and `make test` (or `cargo fmt`, `cargo clippy --all-targets --all-features -- -D warnings` and `cargo test --all-targets`). Fix any warnings introduced by the changes before finishing. Note `--all-targets` on both: without it clippy skips test code and `cargo test` skips every test in the agent binary crates.
 - Lints are declared once in `[workspace.lints]` in the root `Cargo.toml`; member crates inherit them with `[lints] workspace = true`. `unwrap_used`, `expect_used`, `indexing_slicing` and `dbg_macro` are denied in production code (`clippy.toml` exempts tests), and `unsafe_code` is forbidden. Use `get`/`first`/`split_first`/slice patterns rather than indexing.
 - Release builds set `panic = "abort"` **and** `overflow-checks = true`, so any reachable panic or integer overflow is a remote process kill. Arithmetic on values that arrive from a peer must be explicitly saturating or checked - see `Usage` and `StorageSize` in `greatwestern`.
+- Dates and times use `bradshaw`, never `chrono` or another date crate, and are always UTC. If something you need is missing, add it to bradshaw with a test, rather than adding a dependency.
 - Any file containing key material must be written with `paddington::config::write_secret_file`, never a bare `fs::write`. `scripts/check-secret-writes.sh` (run by `make lint` and CI) enforces this.
 - Release binaries are **statically linked against musl**, and musl has no NSS implementation at all. Never resolve a Unix user or group through libc (`nix::unistd::User::from_name`, `Group::from_name`, `getpwnam_r`, `getgrnam_r`): in a musl binary those see only `/etc/passwd` and `/etc/group` plus a single fragile `nscd` attempt, so a directory-backed name looks absent whenever `nscd` is down and reports `EIO` whenever it is merely busy. Go through the host's `getent`, which consults every source in `nsswitch.conf` - `filesystem/src/nameservice.rs` is the reference implementation and explains it in full. `scripts/check-nss-lookups.sh` (run by `make lint` and CI) enforces this.
 - A name lookup that fails to answer is not a name that does not exist. Keep the two apart: report a genuine absence as a terminal error and an indeterminate result as a retryable one, or a transient outage in an identity service becomes a permanent job failure.

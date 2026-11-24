@@ -12,8 +12,8 @@ use crate::named::NamedType;
 use crate::state;
 
 use anyhow::Result;
-use chrono::serde::ts_seconds;
-use chrono::Utc;
+use bradshaw::serde::ts_seconds;
+use bradshaw::Utc;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use ts_rs::TS;
@@ -26,7 +26,7 @@ use uuid::Uuid;
 /// reaped. Real Jobs are created with a two-minute lifetime (`Job::new`) and
 /// occasionally extended, so an hour is generous. See
 /// `docs/specifications/security-review-2.md` (finding R31).
-const MAX_JOB_LIFETIME: chrono::TimeDelta = chrono::TimeDelta::hours(1);
+const MAX_JOB_LIFETIME: bradshaw::TimeDelta = bradshaw::TimeDelta::hours(1);
 
 /// Maximum number of Jobs accepted in a single `Command::Sync` payload.
 const MAX_SYNCED_JOBS: usize = 10_000;
@@ -211,11 +211,11 @@ impl<'de, L: Domain> Deserialize<'de> for Command<L> {
 pub struct Job<L: Domain> {
     id: Uuid,
     #[serde(with = "ts_seconds")]
-    created: chrono::DateTime<Utc>,
+    created: bradshaw::DateTime<Utc>,
     #[serde(with = "ts_seconds")]
-    changed: chrono::DateTime<Utc>,
+    changed: bradshaw::DateTime<Utc>,
     #[serde(with = "ts_seconds")]
-    expires: chrono::DateTime<Utc>,
+    expires: bradshaw::DateTime<Utc>,
     version: u64,
     command: Command<L>,
     state: Status,
@@ -282,7 +282,7 @@ impl<L: Domain> Job<L> {
             // user portal more responsive - any task that takes longer
             // than 2 minutes can have its lifetime changed using the
             // set_lifetime method
-            expires: now + chrono::Duration::minutes(2),
+            expires: now + bradshaw::Duration::minutes(2),
             version: 1,
             command: Command::parse(command, check_portal)?,
             state: Status::Created,
@@ -327,7 +327,7 @@ impl<L: Domain> Job<L> {
         self.command.instruction()
     }
 
-    pub fn expires(&self) -> &chrono::DateTime<Utc> {
+    pub fn expires(&self) -> &bradshaw::DateTime<Utc> {
         &self.expires
     }
 
@@ -376,7 +376,7 @@ impl<L: Domain> Job<L> {
         clamped
     }
 
-    pub fn set_lifetime(&self, lifetime: chrono::Duration) -> Self {
+    pub fn set_lifetime(&self, lifetime: bradshaw::Duration) -> Self {
         Self {
             id: self.id,
             created: self.created,
@@ -419,11 +419,11 @@ impl<L: Domain> Job<L> {
         self.state.clone()
     }
 
-    pub fn created(&self) -> chrono::DateTime<Utc> {
+    pub fn created(&self) -> bradshaw::DateTime<Utc> {
         self.created
     }
 
-    pub fn changed(&self) -> chrono::DateTime<Utc> {
+    pub fn changed(&self) -> bradshaw::DateTime<Utc> {
         self.changed
     }
 
@@ -1660,7 +1660,7 @@ pub async fn send_queued<L: Domain>(peer: &Peer) -> Result<(), Error> {
 ///
 /// Assert that the job with the specified expiry time has not expired
 ///
-pub fn assert_not_expired(expiry: &chrono::DateTime<Utc>) -> Result<(), Error> {
+pub fn assert_not_expired(expiry: &bradshaw::DateTime<Utc>) -> Result<(), Error> {
     if Utc::now() > *expiry {
         return Err(Error::Expired(
             format!("Job expired at: {}", expiry).to_owned(),
@@ -1689,7 +1689,7 @@ mod tests {
         assert_eq!(job.clamp_expires().expires(), job.expires());
 
         // A far-future expiry is pulled back to the ceiling.
-        let far_future = job.set_lifetime(chrono::TimeDelta::days(365 * 1000));
+        let far_future = job.set_lifetime(bradshaw::TimeDelta::days(365 * 1000));
         let clamped = far_future.clamp_expires();
 
         assert!(
@@ -1697,13 +1697,13 @@ mod tests {
             "a millennium-long lifetime must be clamped"
         );
         assert!(
-            *clamped.expires() <= Utc::now() + MAX_JOB_LIFETIME + chrono::TimeDelta::seconds(5),
+            *clamped.expires() <= Utc::now() + MAX_JOB_LIFETIME + bradshaw::TimeDelta::seconds(5),
             "clamped expiry {} is still beyond the ceiling",
             clamped.expires()
         );
 
         // Clamping never *extends* a short lifetime, and is idempotent.
-        let short = job.set_lifetime(chrono::TimeDelta::seconds(30));
+        let short = job.set_lifetime(bradshaw::TimeDelta::seconds(30));
         assert_eq!(short.clamp_expires().expires(), short.expires());
         assert_eq!(
             clamped.clamp_expires().expires(),
@@ -1766,7 +1766,7 @@ mod tests {
         // one it superseded.
         let mut newer = stored.clone();
         newer.version = 0;
-        newer.changed = stored.changed + chrono::Duration::seconds(10);
+        newer.changed = stored.changed + bradshaw::Duration::seconds(10);
 
         let (result, _) = board
             .add(&newer)

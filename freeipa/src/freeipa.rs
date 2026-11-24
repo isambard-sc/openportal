@@ -3,7 +3,7 @@
 
 use anyhow::Context;
 use anyhow::Result;
-use chrono::Utc;
+use bradshaw::Utc;
 use greatwestern::grammar::{ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping};
 use once_cell::sync::Lazy;
 use rand::seq::IteratorRandom;
@@ -68,7 +68,7 @@ async fn call_post<T>(
     func: &str,
     args: Option<Vec<String>>,
     kwargs: Option<HashMap<String, String>>,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<T, Error>
 where
     T: DeserializeOwned,
@@ -152,7 +152,7 @@ async fn call_write<T>(
     func: &str,
     args: Option<Vec<String>>,
     kwargs: Option<HashMap<String, String>>,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<T, Error>
 where
     T: DeserializeOwned,
@@ -169,7 +169,7 @@ async fn call_post_to<T>(
     func: &str,
     args: Option<Vec<String>>,
     kwargs: Option<HashMap<String, String>>,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<T, Error>
 where
     T: DeserializeOwned,
@@ -454,7 +454,7 @@ struct IPAServer {
     user: String,
     password: SecretString,
     num_failed_reconnects: u32,
-    last_failed_reconnect: Option<chrono::DateTime<Utc>>,
+    last_failed_reconnect: Option<bradshaw::DateTime<Utc>>,
 }
 
 impl IPAServer {
@@ -504,7 +504,7 @@ impl IPAServer {
 
         if let Some(last_failed) = self.last_failed_reconnect {
             let backoff_duration =
-                chrono::Duration::seconds(20 * self.num_failed_reconnects as i64);
+                bradshaw::Duration::seconds(20 * self.num_failed_reconnects as i64);
             Utc::now() < last_failed + backoff_duration
         } else {
             false
@@ -659,10 +659,10 @@ impl ServerHealth {
     /// How long this server has been confirmed down, or None if it is
     /// believed to be up.
     ///
-    fn down_for(&self) -> Option<chrono::Duration> {
+    fn down_for(&self) -> Option<bradshaw::Duration> {
         match self.down_since.load(std::sync::atomic::Ordering::SeqCst) {
             0 => None,
-            since => Some(chrono::Duration::seconds(
+            since => Some(bradshaw::Duration::seconds(
                 Utc::now().timestamp().saturating_sub(since).max(0),
             )),
         }
@@ -677,7 +677,7 @@ impl ServerHealth {
     /// another master accepted while it was away, so writing to it too soon
     /// would create the same conflict from the other direction.
     ///
-    fn can_take_writes(&self, replication_window: chrono::Duration) -> bool {
+    fn can_take_writes(&self, replication_window: bradshaw::Duration) -> bool {
         if self.down_since.load(std::sync::atomic::Ordering::SeqCst) != 0 {
             return false;
         }
@@ -685,7 +685,7 @@ impl ServerHealth {
         match self.up_since.load(std::sync::atomic::Ordering::SeqCst) {
             0 => true,
             since => {
-                chrono::Duration::seconds(Utc::now().timestamp().saturating_sub(since).max(0))
+                bradshaw::Duration::seconds(Utc::now().timestamp().saturating_sub(since).max(0))
                     >= replication_window
             }
         }
@@ -738,14 +738,14 @@ static CREDENTIALS: Lazy<Mutex<Option<Credentials>>> = Lazy::new(|| Mutex::new(N
 #[derive(Debug, Clone, Default)]
 struct WriteConfig {
     server: Option<String>,
-    replication_window: chrono::Duration,
+    replication_window: bradshaw::Duration,
     concurrent_writes: usize,
 }
 
 static WRITE_CONFIG: Lazy<Mutex<WriteConfig>> = Lazy::new(|| {
     Mutex::new(WriteConfig {
         server: None,
-        replication_window: chrono::Duration::seconds(DEFAULT_REPLICATION_WINDOW),
+        replication_window: bradshaw::Duration::seconds(DEFAULT_REPLICATION_WINDOW),
         concurrent_writes: DEFAULT_CONCURRENT_WRITES,
     })
 });
@@ -890,7 +890,7 @@ pub async fn initialise_servers(
         }
     };
 
-    let replication_window = chrono::Duration::seconds(
+    let replication_window = bradshaw::Duration::seconds(
         replication_window
             .filter(|window| *window >= 0)
             .unwrap_or(DEFAULT_REPLICATION_WINDOW),
@@ -1088,7 +1088,7 @@ async fn servers_to_check() -> Vec<String> {
 
 async fn get_connected_server(
     target: &Target,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<LockedIPAServer, Error> {
     // get a copy of the servers, so that we don't hold the lock while we
     // try to connect
@@ -1239,7 +1239,7 @@ async fn login(
     server: &str,
     user: &str,
     password: &SecretString,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Arc<Jar>, Error> {
     // how much time is left before we expire?
     let time_left = expires.signed_duration_since(Utc::now()).num_seconds();
@@ -2064,7 +2064,7 @@ fn identifier_to_projectid(project: &ProjectIdentifier, legacy: bool) -> Result<
 async fn force_get_users_in_group(
     target: &Target,
     group: &IPAGroup,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Vec<IPAUser>, Error> {
     if !group.is_project_group() {
         // we only list users in project groups
@@ -2109,7 +2109,7 @@ async fn force_get_users_in_group(
 ///
 async fn get_group(
     project: &ProjectIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Option<IPAGroup>, Error> {
     match cache::get_group(project).await? {
         Some(group) => Ok(Some(group)),
@@ -2124,7 +2124,7 @@ async fn get_group(
 async fn force_get_group_on(
     target: &Target,
     project: &ProjectIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Option<IPAGroup>, Error> {
     let kwargs = {
         let mut kwargs = HashMap::new();
@@ -2258,7 +2258,7 @@ pub async fn identifier_to_userid(user: &UserIdentifier) -> Result<String, Error
 ///
 async fn force_get_user(
     user: &UserIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Option<IPAUser>, Error> {
     force_get_user_on(&Target::Any, user, expires).await
 }
@@ -2269,7 +2269,7 @@ async fn force_get_user(
 async fn force_get_user_on(
     target: &Target,
     user: &UserIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Option<IPAUser>, Error> {
     // only get users whose portals are not in the internal set
     if is_internal_portal(&user.portal()) {
@@ -2313,7 +2313,7 @@ async fn force_get_user_on(
 ///
 async fn force_get_user_everywhere(
     user: &UserIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Option<IPAUser>, Error> {
     let servers = servers_to_check().await;
 
@@ -2361,7 +2361,7 @@ async fn force_get_user_everywhere(
 ///
 async fn force_get_group_everywhere(
     project: &ProjectIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Option<IPAGroup>, Error> {
     let servers = servers_to_check().await;
 
@@ -2406,7 +2406,7 @@ async fn force_get_group_everywhere(
 ///
 async fn get_groups_for_user(
     user: &IPAUser,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Vec<IPAGroup>, Error> {
     let kwargs = {
         let mut kwargs = HashMap::new();
@@ -2450,7 +2450,7 @@ async fn get_groups_for_user(
 ///
 async fn get_instance_group_member_uids(
     group: &IPAGroup,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<HashSet<String>, Error> {
     let kwargs = {
         let mut kwargs = HashMap::new();
@@ -2515,7 +2515,7 @@ fn raw_group_member_uids(raw_group: &serde_json::Value) -> HashSet<String> {
 ///
 async fn get_user(
     user: &UserIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Option<IPAUser>, Error> {
     match cache::get_user(user).await? {
         Some(user) => Ok(Some(user.clone())),
@@ -2529,7 +2529,7 @@ async fn get_user(
 ///
 async fn get_group_create_if_not_exists(
     group: &IPAGroup,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<IPAGroup, Error> {
     // If we already know this group exists then there is no decision to
     // serialise, and every add_user comes through here five times or so - for
@@ -2546,7 +2546,7 @@ async fn get_group_create_if_not_exists(
     // job Board is concerned, so without this they both look, both see nothing
     // and both add - on whichever masters the pool handed them. That is the
     // largest single source of the namingConflict entries this guards against.
-    let now = chrono::Utc::now();
+    let now = bradshaw::Utc::now();
 
     let _guard = loop {
         match cache::get_group_mutex(group.identifier())
@@ -2555,7 +2555,11 @@ async fn get_group_create_if_not_exists(
         {
             Ok(guard) => break guard,
             Err(_) => {
-                if chrono::Utc::now().signed_duration_since(now).num_seconds() > 5 {
+                if bradshaw::Utc::now()
+                    .signed_duration_since(now)
+                    .num_seconds()
+                    > 5
+                {
                     tracing::warn!(
                         "Could not get lock to add group {} - another task is adding it.",
                         group
@@ -2727,7 +2731,7 @@ async fn expected_groups(user: &UserIdentifier, instance: &Peer) -> Result<Vec<I
 async fn sync_groups(
     user: &IPAUser,
     instance: &Peer,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<IPAUser, Error> {
     // the user probably doesn't exist, so add them, making sure they
     // are in the correct groups
@@ -2859,7 +2863,7 @@ async fn sync_groups(
 ///
 pub async fn add_project(
     project: &ProjectIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<IPAGroup, Error> {
     // ensure that we don't have too many concurrent requests
     let project_group = get_group_create_if_not_exists(
@@ -2884,7 +2888,7 @@ pub async fn add_project(
 pub async fn remove_project(
     project: &ProjectIdentifier,
     instance: &Peer,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<IPAGroup, Error> {
     let project_group = match get_group(project, expires).await {
         Ok(Some(group)) => group,
@@ -2961,7 +2965,10 @@ pub async fn remove_project(
     Ok(project_group)
 }
 
-async fn reenable_user(user: &IPAUser, expires: &chrono::DateTime<Utc>) -> Result<IPAUser, Error> {
+async fn reenable_user(
+    user: &IPAUser,
+    expires: &bradshaw::DateTime<Utc>,
+) -> Result<IPAUser, Error> {
     let kwargs = {
         let mut kwargs = HashMap::new();
         kwargs.insert("uid".to_string(), user.userid().to_string());
@@ -3019,17 +3026,21 @@ pub async fn add_user(
     user: &UserIdentifier,
     instance: &Peer,
     homedir: &Option<String>,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<IPAUser, Error> {
     // get a lock for this user, as only a single task should be adding
     // or removing this user at the same time
-    let now = chrono::Utc::now();
+    let now = bradshaw::Utc::now();
 
     let _guard = loop {
         match cache::get_user_mutex(user).await?.try_lock_owned() {
             Ok(guard) => break guard,
             Err(_) => {
-                if chrono::Utc::now().signed_duration_since(now).num_seconds() > 5 {
+                if bradshaw::Utc::now()
+                    .signed_duration_since(now)
+                    .num_seconds()
+                    > 5
+                {
                     tracing::warn!(
                         "Could not get lock to add user {} - another task is adding or removing.",
                         user
@@ -3374,17 +3385,21 @@ pub async fn add_user(
 pub async fn remove_user(
     user: &UserIdentifier,
     instance: &Peer,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<IPAUser, Error> {
     // get and lock a mutex on this user, as we should only have a single
     // task adding or removing this user at once
-    let now = chrono::Utc::now();
+    let now = bradshaw::Utc::now();
 
     let _guard = loop {
         match cache::get_user_mutex(user).await?.try_lock_owned() {
             Ok(guard) => break guard,
             Err(_) => {
-                if chrono::Utc::now().signed_duration_since(now).num_seconds() > 5 {
+                if bradshaw::Utc::now()
+                    .signed_duration_since(now)
+                    .num_seconds()
+                    > 5
+                {
                     tracing::warn!(
                         "Could not get lock to remove user {} - another task is adding or removing.",
                         user
@@ -3644,7 +3659,7 @@ pub async fn remove_user(
 pub async fn update_homedir(
     user: &UserIdentifier,
     homedir: &str,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<String, Error> {
     let homedir = homedir.trim();
 
@@ -3743,7 +3758,7 @@ pub async fn update_homedir(
 pub async fn get_groups(
     portal: &PortalIdentifier,
     peer: &Peer,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Vec<IPAGroup>, Error> {
     tracing::debug!("Getting managed groups for portal: {}", portal);
     if is_internal_portal(&portal.portal()) {
@@ -3899,7 +3914,7 @@ pub async fn get_groups(
 pub async fn get_users(
     project: &ProjectIdentifier,
     instance: &Peer,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Vec<IPAUser>, Error> {
     tracing::debug!("Getting users for project: {}", project);
     // don't get the users for project identifiers that use internal portal names
@@ -3971,7 +3986,7 @@ pub async fn get_users(
 
 pub async fn get_project_mapping(
     project: &ProjectIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<ProjectMapping, Error> {
     match get_group(project, expires).await? {
         Some(group) => group.mapping(),
@@ -3984,7 +3999,7 @@ pub async fn get_project_mapping(
 
 pub async fn get_user_mapping(
     user: &UserIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<UserMapping, Error> {
     match get_user(user, expires).await? {
         Some(user) => user.mapping(),
@@ -3997,7 +4012,7 @@ pub async fn get_user_mapping(
 
 pub async fn is_protected_user(
     user: &UserIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     // need to get the up-to-date version of the user,
     // in case their details have been changed in FreeIPA
@@ -4012,7 +4027,7 @@ pub async fn is_protected_user(
 
 pub async fn is_existing_user(
     user: &UserIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     match get_user(user, expires).await? {
         Some(user) => {
@@ -4028,7 +4043,7 @@ pub async fn is_existing_user(
 
 pub async fn is_existing_project(
     project: &ProjectIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     match get_group(project, expires).await? {
         Some(_) => Ok(true),
@@ -4040,7 +4055,7 @@ pub async fn is_existing_project(
 /// Ensure the "openportal.blocked" group exists in FreeIPA, creating it if
 /// necessary. This group is the source of truth for which users are blocked.
 ///
-async fn ensure_blocked_group_exists(expires: &chrono::DateTime<Utc>) -> Result<(), Error> {
+async fn ensure_blocked_group_exists(expires: &bradshaw::DateTime<Utc>) -> Result<(), Error> {
     let blocked_cn = "openportal.blocked";
 
     let kwargs = {
@@ -4071,7 +4086,7 @@ async fn ensure_blocked_group_exists(expires: &chrono::DateTime<Utc>) -> Result<
 
 pub async fn is_blocked_user(
     user: &UserIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     match force_get_user(user, expires).await? {
         Some(user) => Ok(user.is_blocked()),
@@ -4087,15 +4102,19 @@ pub async fn is_blocked_user(
 ///
 pub async fn block_user(
     user: &UserIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<IPAUser, Error> {
-    let now = chrono::Utc::now();
+    let now = bradshaw::Utc::now();
 
     let _guard = loop {
         match cache::get_user_mutex(user).await?.try_lock_owned() {
             Ok(guard) => break guard,
             Err(_) => {
-                if chrono::Utc::now().signed_duration_since(now).num_seconds() > 5 {
+                if bradshaw::Utc::now()
+                    .signed_duration_since(now)
+                    .num_seconds()
+                    > 5
+                {
                     return Err(Error::Locked(format!(
                         "Could not get lock to block user {} - another task is adding or removing.",
                         user
@@ -4201,15 +4220,19 @@ pub async fn block_user(
 ///
 pub async fn unblock_user(
     user: &UserIdentifier,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<IPAUser, Error> {
-    let now = chrono::Utc::now();
+    let now = bradshaw::Utc::now();
 
     let _guard = loop {
         match cache::get_user_mutex(user).await?.try_lock_owned() {
             Ok(guard) => break guard,
             Err(_) => {
-                if chrono::Utc::now().signed_duration_since(now).num_seconds() > 5 {
+                if bradshaw::Utc::now()
+                    .signed_duration_since(now)
+                    .num_seconds()
+                    > 5
+                {
                     return Err(Error::Locked(format!(
                         "Could not get lock to unblock user {} - another task is adding or removing.",
                         user
@@ -4289,7 +4312,7 @@ pub async fn unblock_user(
 pub async fn is_local_user_added(
     mapping: &UserMapping,
     instance: &Peer,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     let user = match force_get_user(mapping.user(), expires).await? {
         Some(user) => user,
@@ -4365,7 +4388,7 @@ pub async fn is_local_user_added(
 pub async fn is_local_user_removed(
     mapping: &UserMapping,
     instance: &Peer,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     let user = match force_get_user(mapping.user(), expires).await? {
         Some(user) => user,
@@ -4419,7 +4442,7 @@ pub async fn is_local_user_removed(
 ///
 pub async fn is_local_project_added(
     mapping: &ProjectMapping,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     let group = match force_get_group_on(&Target::Any, mapping.project(), expires).await? {
         Some(group) => group,
@@ -4465,7 +4488,7 @@ pub async fn is_local_project_added(
 pub async fn is_local_project_removed(
     mapping: &ProjectMapping,
     instance: &Peer,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     let group = match force_get_group_on(&Target::Any, mapping.project(), expires).await? {
         Some(group) => group,

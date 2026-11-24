@@ -11,7 +11,7 @@ use crate::command::Command;
 use crate::domain::Domain;
 use crate::job::Job;
 use crate::named::NamedType;
-use chrono::{DateTime, Utc};
+use bradshaw::{DateTime, Utc};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -773,7 +773,7 @@ pub async fn get_cached_diagnostics(agent_name: &str) -> Option<DiagnosticsRepor
 ///
 /// When we received the cached report for `agent_name`, on our own clock.
 ///
-async fn cached_diagnostics_age(agent_name: &str) -> Option<chrono::Duration> {
+async fn cached_diagnostics_age(agent_name: &str) -> Option<bradshaw::Duration> {
     DIAGNOSTICS_CACHE
         .read()
         .await

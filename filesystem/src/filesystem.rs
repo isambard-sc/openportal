@@ -639,12 +639,16 @@ async fn create_dir_native(
     // use a lock to ensure that only a single task can create directories
     // at a time - this should prevent overloading the filesystem and
     // reduce risk of filesystem-related race conditions
-    let now = chrono::Utc::now();
+    let now = bradshaw::Utc::now();
     let _guard = loop {
         match FS_LOCK.try_lock() {
             Ok(guard) => break guard,
             Err(_) => {
-                if chrono::Utc::now().signed_duration_since(now).num_seconds() > 15 {
+                if bradshaw::Utc::now()
+                    .signed_duration_since(now)
+                    .num_seconds()
+                    > 15
+                {
                     return Err(Error::State(
                         "Could not acquire filesystem lock after 15 seconds".to_string(),
                     ));
@@ -787,12 +791,16 @@ async fn create_dir_remote(
     }
 
     // Serialise directory creation with the same lock used by the native path.
-    let now = chrono::Utc::now();
+    let now = bradshaw::Utc::now();
     let _guard = loop {
         match FS_LOCK.try_lock() {
             Ok(guard) => break guard,
             Err(_) => {
-                if chrono::Utc::now().signed_duration_since(now).num_seconds() > 15 {
+                if bradshaw::Utc::now()
+                    .signed_duration_since(now)
+                    .num_seconds()
+                    > 15
+                {
                     return Err(Error::State(
                         "Could not acquire filesystem lock after 15 seconds".to_string(),
                     ));
@@ -1596,9 +1604,25 @@ async fn recycle_dir_native(path: &Path) -> Result<(), Error> {
         )
     })?;
 
-    // Update the timestamp to current time using filetime crate
-    let now = filetime::FileTime::now();
-    match filetime::set_file_times(&recycle_path, now, now) {
+    // Update the timestamp to the current time, so the recycled directory's age
+    // is how long it has been in the recycle bin. Opened without following a
+    // symlink - it is the directory we have just moved.
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let now = std::time::SystemTime::now();
+    let touched = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+        .open(&recycle_path)
+        .and_then(|dir| {
+            dir.set_times(
+                std::fs::FileTimes::new()
+                    .set_accessed(now)
+                    .set_modified(now),
+            )
+        });
+
+    match touched {
         Ok(_) => tracing::info!("Successfully recycled directory with updated timestamp"),
         Err(e) => {
             tracing::warn!("Could not update timestamp on recycled directory: {}", e);
@@ -2241,6 +2265,36 @@ mod tests {
                 0o750
             );
         }
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Recycling a directory resets its timestamps, so its age in `.recycle` is
+    /// how long it has been there.
+    #[tokio::test]
+    async fn test_recycle_resets_the_timestamp() {
+        let base = std::env::temp_dir().join(format!("op-fs-recycle-time-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let path = base.join("proj");
+        std::fs::create_dir_all(&path).unwrap();
+
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_accessed(old)
+                    .set_modified(old),
+            )
+            .unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), old);
+
+        let before = std::time::SystemTime::now() - std::time::Duration::from_secs(5);
+        recycle_dir_native(&path).await.unwrap();
+
+        let recycled = base.join(".recycle").join("proj");
+        assert!(!path.exists());
+        assert!(std::fs::metadata(&recycled).unwrap().modified().unwrap() >= before);
 
         let _ = std::fs::remove_dir_all(&base);
     }

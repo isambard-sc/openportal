@@ -26,7 +26,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use chrono::{DateTime, Duration, Utc};
+use bradshaw::{DateTime, Duration, Utc};
 use paddington::config::IpOrRange;
 use paddington::{Key, SecretKey};
 use secrecy::ExposeSecret;

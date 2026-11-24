@@ -1356,14 +1356,9 @@ pub async fn is_protected_project(
     }
 
     // Never remove specially-configured groups, even with a normal GID.
-    if group_name == cmds.managed_group
+    Ok(group_name == cmds.managed_group
         || group_name == blocked_group_name(cmds)
-        || cmds.system_groups.iter().any(|g| g == &group_name)
-    {
-        return Ok(true);
-    }
-
-    Ok(false)
+        || cmds.system_groups.iter().any(|g| g == &group_name))
 }
 
 ///

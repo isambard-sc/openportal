@@ -3,7 +3,7 @@
 
 use anyhow::Context;
 use anyhow::Result;
-use chrono::Utc;
+use bradshaw::Utc;
 use greatwestern::grammar::{DateRange, ProjectIdentifier, ProjectMapping, UserMapping};
 use greatwestern::usagereport::{DailyProjectUsageReport, ProjectUsageReport, Usage};
 use greatwestern::usageunit::UsageUnit;
@@ -123,7 +123,7 @@ impl LockedRunner {
 
         tracing::debug!("Running command: {:?}", cmd);
 
-        let start_time = chrono::Utc::now();
+        let start_time = bradshaw::Utc::now();
         let Some((program, program_args)) = cmd.split_first() else {
             return Err(Error::Call("Empty command vector".to_string()));
         };
@@ -146,7 +146,7 @@ impl LockedRunner {
             }
         };
 
-        let end_time = chrono::Utc::now();
+        let end_time = bradshaw::Utc::now();
 
         let duration_ms = (end_time - start_time).num_milliseconds();
 
@@ -198,10 +198,10 @@ impl LockedRunner {
     ) -> Result<serde_json::Value, Error> {
         let output = self.run(cmd, timeout).await?;
 
-        let start_time = chrono::Utc::now();
+        let start_time = bradshaw::Utc::now();
         match serde_json::from_str(&output) {
             Ok(output) => {
-                let end_time = chrono::Utc::now();
+                let end_time = bradshaw::Utc::now();
                 let duration_ms = (end_time - start_time).num_milliseconds();
 
                 if duration_ms > 5000 {
@@ -228,7 +228,7 @@ pub const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 // function to return the runner protected by a MutexGuard - this ensures
 // that we can only run a small number of slurm commands at a time, thereby not
 // overloading the server
-pub async fn runner(expires: &chrono::DateTime<Utc>) -> Result<LockedRunner, Error> {
+pub async fn runner(expires: &bradshaw::DateTime<Utc>) -> Result<LockedRunner, Error> {
     let runners = SLURM_RUNNERS.lock().await;
 
     if runners.is_empty() {
@@ -263,7 +263,7 @@ pub async fn runner(expires: &chrono::DateTime<Utc>) -> Result<LockedRunner, Err
 
 // function to return a priority runner - used for time-sensitive commands
 // like adding/removing users, getting/setting limits, etc.
-pub async fn priority_runner(expires: &chrono::DateTime<Utc>) -> Result<LockedRunner, Error> {
+pub async fn priority_runner(expires: &bradshaw::DateTime<Utc>) -> Result<LockedRunner, Error> {
     let runners = PRIORITY_RUNNERS.lock().await;
 
     if runners.is_empty() {
@@ -298,7 +298,7 @@ pub async fn priority_runner(expires: &chrono::DateTime<Utc>) -> Result<LockedRu
 
 async fn force_add_slurm_account(
     account: &SlurmAccount,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<SlurmAccount, Error> {
     if account.organization() != get_managed_organization() {
         tracing::warn!(
@@ -341,7 +341,7 @@ async fn force_add_slurm_account(
 
 async fn get_account_from_slurm(
     account: &str,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Option<SlurmAccount>, Error> {
     let account = clean_account_name(account)?;
 
@@ -418,7 +418,7 @@ async fn get_account_from_slurm(
 
 async fn get_account(
     account: &str,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Option<SlurmAccount>, Error> {
     // need to GET /slurm/vX.Y.Z/accounts/{account.name}
     // and return the account if it exists
@@ -487,7 +487,7 @@ async fn get_account(
 
 async fn get_account_create_if_not_exists(
     account: &SlurmAccount,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<SlurmAccount, Error> {
     let existing_account = get_account(account.name(), expires).await?;
 
@@ -527,7 +527,7 @@ async fn get_account_create_if_not_exists(
 
 async fn get_user_from_slurm(
     user: &str,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Option<SlurmUser>, Error> {
     let user = clean_user_name(user)?;
     let cluster = cache::get_cluster().await?;
@@ -590,7 +590,10 @@ async fn get_user_from_slurm(
     }
 }
 
-async fn get_user(user: &str, expires: &chrono::DateTime<Utc>) -> Result<Option<SlurmUser>, Error> {
+async fn get_user(
+    user: &str,
+    expires: &bradshaw::DateTime<Utc>,
+) -> Result<Option<SlurmUser>, Error> {
     let cached_user = cache::get_user(user).await?;
 
     if let Some(cached_user) = cached_user {
@@ -652,7 +655,7 @@ async fn get_user(user: &str, expires: &chrono::DateTime<Utc>) -> Result<Option<
 
 async fn add_account_association(
     account: &SlurmAccount,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<(), Error> {
     // eventually should check to see if this association already exists,
     // and if so, not to do anything else
@@ -700,7 +703,7 @@ async fn add_user_association(
     user: &SlurmUser,
     account: &SlurmAccount,
     make_default: bool,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<SlurmUser, Error> {
     if !account.is_managed() {
         tracing::error!(
@@ -811,7 +814,7 @@ async fn add_user_association(
 
 async fn get_user_create_if_not_exists(
     user: &UserMapping,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<SlurmUser, Error> {
     // first, make sure that the account exists
     let slurm_account = get_account_create_if_not_exists(
@@ -946,7 +949,7 @@ pub async fn find_cluster() -> Result<(), Error> {
     // now get the requested cluster from the cache
     let requested_cluster = cache::get_option_cluster().await?;
 
-    let expires = chrono::Utc::now() + chrono::Duration::minutes(1);
+    let expires = bradshaw::Utc::now() + bradshaw::Duration::minutes(1);
 
     // ask slurm for all of the clusters
     let cmd = priority_runner(&expires).await?.build_command(
@@ -1003,7 +1006,7 @@ pub async fn find_cluster() -> Result<(), Error> {
 
 pub async fn add_project(
     project: &ProjectMapping,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<(), Error> {
     assert_not_expired(expires)?;
 
@@ -1016,7 +1019,7 @@ pub async fn add_project(
     Ok(())
 }
 
-pub async fn add_user(user: &UserMapping, expires: &chrono::DateTime<Utc>) -> Result<(), Error> {
+pub async fn add_user(user: &UserMapping, expires: &bradshaw::DateTime<Utc>) -> Result<(), Error> {
     assert_not_expired(expires)?;
 
     let user: SlurmUser = get_user_create_if_not_exists(user, expires).await?;
@@ -1083,7 +1086,7 @@ impl ReportTotals {
 pub fn record_job(
     report: &mut DailyProjectUsageReport,
     job: &SlurmJob,
-    window_start: &chrono::DateTime<Utc>,
+    window_start: &bradshaw::DateTime<Utc>,
     policy: RequeuePolicy,
     totals: &mut ReportTotals,
 ) {
@@ -1490,7 +1493,7 @@ async fn complete_and_cache_if_final(
     is_partial: bool,
     project: &ProjectMapping,
     day: &greatwestern::grammar::Date,
-    now: &chrono::DateTime<Utc>,
+    now: &bradshaw::DateTime<Utc>,
 ) {
     if is_partial {
         // some part of the day could not be read at all - see `get_hourly_report`.
@@ -1537,7 +1540,7 @@ async fn complete_and_cache_if_final(
     if totals.saw_unfinished_job {
         let age = now.signed_duration_since(day_end);
 
-        if age < chrono::Duration::days(PROVISIONAL_DAY_LIMIT_DAYS) {
+        if age < bradshaw::Duration::days(PROVISIONAL_DAY_LIMIT_DAYS) {
             tracing::debug!(
                 "Not completing the report for project {} on {}: a job that started that \
                  day had not finished when we asked, so its runtime is not yet known. \
@@ -1569,7 +1572,7 @@ async fn complete_and_cache_if_final(
 }
 
 async fn get_hourly_report(
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
     project: &ProjectMapping,
     day: &greatwestern::grammar::Date,
     account: &SlurmAccount,
@@ -1577,7 +1580,7 @@ async fn get_hourly_report(
     cluster: &str,
     partition_command: &str,
 ) -> Result<DailyProjectUsageReport, Error> {
-    let now = chrono::Utc::now();
+    let now = bradshaw::Utc::now();
     let mut daily_report = DailyProjectUsageReport::default();
     let mut totals = ReportTotals::default();
 
@@ -1780,7 +1783,7 @@ async fn get_hourly_report(
 }
 
 async fn get_daily_report(
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
     project: &ProjectMapping,
     day: &greatwestern::grammar::Date,
     account: &SlurmAccount,
@@ -1808,7 +1811,7 @@ async fn get_daily_report(
         .await;
     }
 
-    let now = chrono::Utc::now();
+    let now = bradshaw::Utc::now();
     let policy = cache::get_requeue_policy().await;
     let start_time = day.day().start_time().and_utc();
     let end_time = day.day().end_time().and_utc();
@@ -1952,7 +1955,7 @@ pub fn new_usage_report(project: &ProjectIdentifier) -> Result<ProjectUsageRepor
 pub async fn get_usage_report(
     project: &ProjectMapping,
     dates: &DateRange,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<ProjectUsageReport, Error> {
     assert_not_expired(expires)?;
 
@@ -1972,7 +1975,7 @@ pub async fn get_usage_report(
 
     let mut report = new_usage_report(project.project())?;
     let slurm_nodes = cache::get_nodes().await?;
-    let now = chrono::Utc::now();
+    let now = bradshaw::Utc::now();
     let cluster = cache::get_cluster().await?;
     let partition = cache::get_partition().await?;
 
@@ -2091,7 +2094,7 @@ async fn record_limit_correction(project: &ProjectMapping, report: &ProjectUsage
 ///
 async fn slurm_limit_for(
     account: &SlurmAccount,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Option<SlurmLimit>, Error> {
     let cluster = cache::get_cluster().await?;
 
@@ -2200,7 +2203,8 @@ async fn apply_limit_corrections() -> Result<(), Error> {
     );
 
     for (project, correction) in pending {
-        let expires = chrono::Utc::now() + chrono::Duration::minutes(LIMIT_APPLIER_EXPIRY_MINUTES);
+        let expires =
+            bradshaw::Utc::now() + bradshaw::Duration::minutes(LIMIT_APPLIER_EXPIRY_MINUTES);
 
         // Serialised against everything else that touches this project, so a
         // correction cannot interleave with a `set_limit` and leave Slurm
@@ -2224,7 +2228,7 @@ async fn apply_limit_corrections() -> Result<(), Error> {
 async fn apply_limit_correction(
     project: &greatwestern::grammar::ProjectIdentifier,
     correction: &cache::LimitCorrection,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<(), Error> {
     let Some(account) = get_account(correction.account(), expires).await? else {
         tracing::warn!(
@@ -2357,7 +2361,7 @@ fn corrected_limit(requested: &Usage, correction: &Usage) -> Usage {
 
 pub async fn get_limit(
     project: &ProjectMapping,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Usage, Error> {
     assert_not_expired(expires)?;
 
@@ -2570,7 +2574,7 @@ fn correction_or_zero(correction: &Option<cache::LimitCorrection>) -> Usage {
 async fn write_slurm_limit(
     account: &SlurmAccount,
     limit: &Usage,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<(), Error> {
     let cluster = cache::get_cluster().await?;
 
@@ -2636,7 +2640,7 @@ async fn write_slurm_limit(
 pub async fn set_limit(
     project: &ProjectMapping,
     limit: &Usage,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<Usage, Error> {
     assert_not_expired(expires)?;
 
@@ -2748,10 +2752,10 @@ const ACTIVE_JOB_WINDOW_DAYS: i64 = 365;
 /// lost the ability to submit, and jobs run for a day or two at most, so this
 /// resolves itself.
 ///
-async fn has_active_jobs(filter: &str, expires: &chrono::DateTime<Utc>) -> Result<bool, Error> {
+async fn has_active_jobs(filter: &str, expires: &bradshaw::DateTime<Utc>) -> Result<bool, Error> {
     let cluster = cache::get_cluster().await?;
 
-    let start_time = chrono::Utc::now() - chrono::Duration::days(ACTIVE_JOB_WINDOW_DAYS);
+    let start_time = bradshaw::Utc::now() - bradshaw::Duration::days(ACTIVE_JOB_WINDOW_DAYS);
 
     let cmd = priority_runner(expires).await?.build_command(
         "SACCT",
@@ -2788,7 +2792,7 @@ async fn has_active_jobs(filter: &str, expires: &chrono::DateTime<Utc>) -> Resul
 ///
 pub async fn is_local_project_added(
     mapping: &ProjectMapping,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     assert_not_expired(expires)?;
 
@@ -2836,7 +2840,7 @@ pub async fn is_local_project_added(
 ///
 pub async fn is_local_project_removed(
     mapping: &ProjectMapping,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     assert_not_expired(expires)?;
 
@@ -2860,7 +2864,7 @@ pub async fn is_local_project_removed(
 ///
 pub async fn is_local_user_added(
     mapping: &UserMapping,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     assert_not_expired(expires)?;
 
@@ -2921,7 +2925,7 @@ pub async fn is_local_user_added(
 ///
 pub async fn is_local_user_removed(
     mapping: &UserMapping,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     assert_not_expired(expires)?;
 
@@ -2940,7 +2944,7 @@ pub async fn is_local_user_removed(
 
 pub async fn cancel_pending_user_jobs(
     user: &str,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<(), Error> {
     assert_not_expired(expires)?;
 
@@ -3024,7 +3028,7 @@ pub async fn cancel_pending_user_jobs(
 
 pub async fn cancel_pending_project_jobs(
     account: &str,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<(), Error> {
     assert_not_expired(expires)?;
 
@@ -3138,13 +3142,13 @@ mod tests {
     /// one thing. `report_for_policy` is for the cases that are about the
     /// policy itself.
     fn report_for(
-        window: (chrono::DateTime<Utc>, chrono::DateTime<Utc>),
+        window: (bradshaw::DateTime<Utc>, bradshaw::DateTime<Utc>),
     ) -> (DailyProjectUsageReport, ReportTotals) {
         report_for_policy(window, RequeuePolicy::NoCharge)
     }
 
     fn report_for_policy(
-        window: (chrono::DateTime<Utc>, chrono::DateTime<Utc>),
+        window: (bradshaw::DateTime<Utc>, bradshaw::DateTime<Utc>),
         policy: RequeuePolicy,
     ) -> (DailyProjectUsageReport, ReportTotals) {
         let (start, _) = window;

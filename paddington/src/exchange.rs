@@ -226,7 +226,7 @@ impl Drop for StandbyWaiter {
 async fn event_loop(mut rx: UnboundedReceiver<Message>) -> Result<(), Error> {
     let mut workers = JoinSet::new();
 
-    let mut last_logged_update = chrono::Utc::now();
+    let mut last_logged_update = bradshaw::Utc::now();
     let mut last_logged_count: i64 = 0;
 
     // Get a reference to the worker_count Arc so we can update it
@@ -284,13 +284,13 @@ async fn event_loop(mut rx: UnboundedReceiver<Message>) -> Result<(), Error> {
         // unbounded inbound channel growing behind it. See
         // docs/specifications/security-review-2.md (finding R23).
         if (last_logged_count - workers.len() as i64).abs() >= 10
-            || chrono::Utc::now()
+            || bradshaw::Utc::now()
                 .signed_duration_since(last_logged_update)
                 .num_seconds()
                 >= 60
         {
             last_logged_count = workers.len() as i64;
-            last_logged_update = chrono::Utc::now();
+            last_logged_update = bradshaw::Utc::now();
             tracing::info!("Number of workers: {}", workers.len());
         }
 
@@ -300,7 +300,7 @@ async fn event_loop(mut rx: UnboundedReceiver<Message>) -> Result<(), Error> {
                 workers.len()
             );
 
-            let start_reaping = chrono::Utc::now();
+            let start_reaping = bradshaw::Utc::now();
             let mut last_update = start_reaping;
 
             while workers.len() > 768 {
@@ -315,7 +315,7 @@ async fn event_loop(mut rx: UnboundedReceiver<Message>) -> Result<(), Error> {
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
                     // log a message every 10 seconds
-                    if chrono::Utc::now()
+                    if bradshaw::Utc::now()
                         .signed_duration_since(last_update)
                         .num_seconds()
                         >= 10
@@ -323,23 +323,23 @@ async fn event_loop(mut rx: UnboundedReceiver<Message>) -> Result<(), Error> {
                         let count = workers.len();
                         tracing::warn!(
                             "It has been {} seconds and there are still a high number of workers: {}. Attempting to reduce...",
-                            chrono::Utc::now()
+                            bradshaw::Utc::now()
                                 .signed_duration_since(start_reaping)
                                 .num_seconds(),
                             count
                         );
-                        last_update = chrono::Utc::now();
+                        last_update = bradshaw::Utc::now();
                     }
                 }
 
-                if chrono::Utc::now()
+                if bradshaw::Utc::now()
                     .signed_duration_since(start_reaping)
                     .num_seconds()
                     >= 300
                 {
                     tracing::error!(
                         "It has been {} seconds since the last log message and there are still a high number of workers: {}.",
-                        chrono::Utc::now()
+                        bradshaw::Utc::now()
                             .signed_duration_since(start_reaping)
                             .num_seconds(),
                         workers.len()

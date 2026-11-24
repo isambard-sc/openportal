@@ -960,7 +960,7 @@ a connected portal never sees it.
 - `Quota.usage` is skipped when serialising if it is `None`
   (`#[serde(skip_serializing_if = "Option::is_none")]`), so the field is simply
   absent in the JSON rather than present as `null`.
-- Timestamps in `Job` use Unix seconds (via `chrono::serde::ts_seconds`).
+- Timestamps in `Job` use Unix seconds (via `bradshaw::serde::ts_seconds`).
 - The key types `UserIdentifier`, `ProjectIdentifier`, `PortalIdentifier`,
   `UserMapping`, `ProjectMapping`, and `Destination` all serialise as plain strings
   (via custom `Serialize`/`Deserialize` impls that delegate to `to_string()` and

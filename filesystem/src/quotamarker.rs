@@ -45,7 +45,7 @@
 //! With `exec-prefix` set (see `crate::filesystem`), the same checks and writes
 //! are made by shell commands run through the prefix.
 
-use chrono::{DateTime, Utc};
+use bradshaw::{DateTime, Utc};
 use nix::errno::Errno;
 use nix::fcntl::{openat, renameat, OFlag};
 use nix::sys::stat::{fstat, mkdirat, Mode, SFlag};

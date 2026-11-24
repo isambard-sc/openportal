@@ -149,7 +149,7 @@ pub async fn run<L: Domain>(command: &str) -> Result<Job<L>, Error> {
             // time for the portal to collect the result - in reality, the
             // actual job on the system will have a much shorter lifetime,
             // e.g. 1 minute
-            let job = job.set_lifetime(chrono::Duration::minutes(5));
+            let job = job.set_lifetime(bradshaw::Duration::minutes(5));
 
             Ok(job.put(&portal).await?)
         }

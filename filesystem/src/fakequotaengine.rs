@@ -23,7 +23,7 @@
 //! ```
 
 use anyhow::Result;
-use chrono::Utc;
+use bradshaw::Utc;
 use greatwestern::grammar::{ProjectMapping, UserMapping};
 use greatwestern::storage::{Quota, QuotaLimit, StorageSize, StorageUsage, Volume};
 use serde::{Deserialize, Serialize};
@@ -149,7 +149,7 @@ impl FakeEngine {
 
     /// Run `du -sk <dir>` and return the result in bytes.
     /// Returns 0 if the directory does not exist or `du` fails.
-    async fn du_bytes(&self, dir: &str, expires: &chrono::DateTime<Utc>) -> Result<u64, Error> {
+    async fn du_bytes(&self, dir: &str, expires: &bradshaw::DateTime<Utc>) -> Result<u64, Error> {
         assert_not_expired(expires)?;
 
         let parts: Vec<&str> = self.config.du.split_whitespace().collect();
@@ -187,7 +187,7 @@ impl FakeEngine {
         &self,
         mapping: &UserMapping,
         volume_config: &UserVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<StorageUsage, Error> {
         let mut total_bytes: u64 = 0;
         for path_config in volume_config.path_configs() {
@@ -204,7 +204,7 @@ impl FakeEngine {
         &self,
         mapping: &ProjectMapping,
         volume_config: &ProjectVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<StorageUsage, Error> {
         let mut total_bytes: u64 = 0;
         for path_config in volume_config.path_configs() {
@@ -226,7 +226,7 @@ impl FakeEngine {
         volume: &Volume,
         volume_config: &UserVolumeConfig,
         limit: &QuotaLimit,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         let user = mapping.local_user().unix()?;
         tracing::info!(
@@ -256,7 +256,7 @@ impl FakeEngine {
         mapping: &UserMapping,
         volume: &Volume,
         volume_config: &UserVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         let user = mapping.local_user().unix()?;
         tracing::info!(
@@ -275,7 +275,7 @@ impl FakeEngine {
         mapping: &UserMapping,
         volume: &Volume,
         _volume_config: &UserVolumeConfig,
-        _expires: &chrono::DateTime<Utc>,
+        _expires: &bradshaw::DateTime<Utc>,
     ) -> Result<(), Error> {
         let user = mapping.local_user().unix()?;
         tracing::info!(
@@ -296,7 +296,7 @@ impl FakeEngine {
         volume: &Volume,
         volume_config: &ProjectVolumeConfig,
         limit: &QuotaLimit,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         let group = mapping.local_group();
         tracing::info!(
@@ -330,7 +330,7 @@ impl FakeEngine {
         mapping: &ProjectMapping,
         volume: &Volume,
         volume_config: &ProjectVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         let group = mapping.local_group();
         tracing::info!(
@@ -349,7 +349,7 @@ impl FakeEngine {
         mapping: &ProjectMapping,
         volume: &Volume,
         _volume_config: &ProjectVolumeConfig,
-        _expires: &chrono::DateTime<Utc>,
+        _expires: &bradshaw::DateTime<Utc>,
     ) -> Result<(), Error> {
         let group = mapping.local_group();
         tracing::info!(

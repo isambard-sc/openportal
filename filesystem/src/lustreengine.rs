@@ -4,7 +4,7 @@
 //! Concrete implementation of the Lustre quota engine.
 
 use anyhow::Result;
-use chrono::Utc;
+use bradshaw::Utc;
 use greatwestern::grammar::{ProjectMapping, UserMapping};
 use greatwestern::storage::{Quota, QuotaLimit, StorageSize, StorageUsage, Volume};
 use once_cell::sync::Lazy;
@@ -629,7 +629,7 @@ impl LockedRunner {
         &self,
         args: &[&str],
         timeout_duration: Duration,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<String, Error> {
         if is_dry_run() {
             let cmd_string = format!("{} {}", self.lfs(), args.join(" "));
@@ -677,7 +677,7 @@ impl LockedRunner {
 }
 
 /// Wait for a free slot to run `lfs`, for as long as the job has left.
-pub async fn runner(lfs: &str, expires: &chrono::DateTime<Utc>) -> Result<LockedRunner, Error> {
+pub async fn runner(lfs: &str, expires: &bradshaw::DateTime<Utc>) -> Result<LockedRunner, Error> {
     let slots = LFS_LIMITS
         .lock()
         .map_err(|_| Error::Failed("The lfs runner lock is poisoned".to_string()))?
@@ -1041,7 +1041,7 @@ async fn enqueue_walk(
 /// background), and the error if it failed.
 async fn wait_for_walk(
     mut status: tokio::sync::watch::Receiver<WalkStatus>,
-    expires: &chrono::DateTime<Utc>,
+    expires: &bradshaw::DateTime<Utc>,
 ) -> Result<bool, Error> {
     let remaining = (*expires - Utc::now())
         .to_std()
@@ -1129,7 +1129,7 @@ impl LustreEngine {
         }
 
         let expires = Utc::now()
-            + chrono::Duration::seconds(
+            + bradshaw::Duration::seconds(
                 i64::try_from(self.config.command_timeout_secs)
                     .unwrap_or(i64::MAX / 2)
                     .saturating_add(30)
@@ -1251,7 +1251,7 @@ impl LustreEngine {
         &self,
         args: &[&str],
         timeout_duration: Duration,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<String, Error> {
         if is_dry_run() {
             let cmd_string = format!("{} {}", self.config.lfs_command(), args.join(" "));
@@ -1277,7 +1277,7 @@ impl LustreEngine {
         root: &Path,
         directory: &Path,
         kind: WalkKind,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<bool, Error> {
         assert_not_expired(expires)?;
 
@@ -1319,7 +1319,7 @@ impl LustreEngine {
     async fn get_lustre_id_from_dir(
         &self,
         directory: &Path,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<Option<u64>, Error> {
         let output = self
             .run_lfs_command(
@@ -1364,7 +1364,7 @@ impl LustreEngine {
         root: &Path,
         directory: &Path,
         lustre_id: u64,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<bool, Error> {
         tracing::info!(
             "Clearing Lustre ID from directory {} (this may take a while)",
@@ -1420,7 +1420,7 @@ impl LustreEngine {
         root: &Path,
         directory: &Path,
         lustre_id: u64,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<bool, Error> {
         let current_id = self.get_lustre_id_from_dir(directory, expires).await?;
 
@@ -1497,7 +1497,7 @@ impl LustreEngine {
         &self,
         project_id: u64,
         mount_point: &str,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<(), Error> {
         tracing::info!(
             "Clearing quota limits for project ID {} on mount {}",
@@ -1534,7 +1534,7 @@ impl LustreEngine {
         limit: &QuotaLimit,
         inode_limit: u64,
         mount_point: &str,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<(), Error> {
         let block_limit = match limit {
             QuotaLimit::Unlimited => "0".to_string(), // 0 means unlimited in Lustre
@@ -1590,7 +1590,7 @@ impl LustreEngine {
         &self,
         project_id: u64,
         mount_point: &str,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         if is_dry_run() || is_lustre_id_only() {
             tracing::info!(
@@ -1623,7 +1623,7 @@ impl LustreEngine {
         &self,
         user_id: u64,
         mount_point: &str,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         if is_dry_run() || is_lustre_id_only() {
             tracing::info!(
@@ -1821,7 +1821,7 @@ impl LustreEngine {
         mapping: &UserMapping,
         volume: &Volume,
         volume_config: &UserVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<(), Error> {
         let user = mapping.local_user();
 
@@ -1863,7 +1863,7 @@ impl LustreEngine {
         volume: &Volume,
         volume_config: &UserVolumeConfig,
         limit: &QuotaLimit,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         let user = mapping.local_user();
 
@@ -1946,7 +1946,7 @@ impl LustreEngine {
         mapping: &ProjectMapping,
         volume: &Volume,
         volume_config: &ProjectVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<(), Error> {
         let project = mapping.project().project();
 
@@ -1989,7 +1989,7 @@ impl LustreEngine {
         volume: &Volume,
         volume_config: &ProjectVolumeConfig,
         limit: &QuotaLimit,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         let project = mapping.project().project();
 
@@ -2077,7 +2077,7 @@ impl LustreEngine {
         mapping: &UserMapping,
         volume: &Volume,
         volume_config: &UserVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         let quota_id = self.compute_user_quota_id(volume, mapping).await?;
 
@@ -2098,7 +2098,7 @@ impl LustreEngine {
         mapping: &ProjectMapping,
         volume: &Volume,
         volume_config: &ProjectVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         let quota_id = self.compute_project_quota_id(volume, mapping).await?;
 
@@ -2118,7 +2118,7 @@ impl LustreEngine {
         mapping: &UserMapping,
         volume: &Volume,
         volume_config: &UserVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<u64, Error> {
         let user = mapping.local_user();
 
@@ -2182,7 +2182,7 @@ impl LustreEngine {
         mapping: &UserMapping,
         volume: &Volume,
         volume_config: &UserVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<bool, Error> {
         let quota_id = self.compute_user_quota_id(volume, mapping).await?;
 
@@ -2220,7 +2220,7 @@ impl LustreEngine {
         mapping: &UserMapping,
         volume: &Volume,
         volume_config: &UserVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<bool, Error> {
         let quota_id = self.compute_user_quota_id(volume, mapping).await?;
 
@@ -2257,7 +2257,7 @@ impl LustreEngine {
         mapping: &UserMapping,
         volume: &Volume,
         volume_config: &UserVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         let user = mapping.local_user();
 
@@ -2298,7 +2298,7 @@ impl LustreEngine {
         mapping: &ProjectMapping,
         volume: &Volume,
         volume_config: &ProjectVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<u64, Error> {
         let project = mapping.project().project();
 
@@ -2362,7 +2362,7 @@ impl LustreEngine {
         mapping: &ProjectMapping,
         volume: &Volume,
         volume_config: &ProjectVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<bool, Error> {
         let quota_id = self.compute_project_quota_id(volume, mapping).await?;
 
@@ -2400,7 +2400,7 @@ impl LustreEngine {
         mapping: &ProjectMapping,
         volume: &Volume,
         volume_config: &ProjectVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<bool, Error> {
         let quota_id = self.compute_project_quota_id(volume, mapping).await?;
 
@@ -2437,7 +2437,7 @@ impl LustreEngine {
         mapping: &ProjectMapping,
         volume: &Volume,
         volume_config: &ProjectVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         // Compute the quota ID for this project on this volume
         let quota_id = self
@@ -3014,8 +3014,8 @@ mod tests {
         }
     }
 
-    fn expires_in(seconds: i64) -> chrono::DateTime<Utc> {
-        Utc::now() + chrono::Duration::seconds(seconds)
+    fn expires_in(seconds: i64) -> bradshaw::DateTime<Utc> {
+        Utc::now() + bradshaw::Duration::seconds(seconds)
     }
 
     /// The project's group is a test-only name (see `nameservice::testing`), so
@@ -3205,8 +3205,8 @@ mod tests {
                 &volume_config,
                 &limit,
                 &(Utc::now()
-                    + chrono::Duration::from_std(WALK_WAIT_MARGIN).unwrap()
-                    + chrono::Duration::seconds(1)),
+                    + bradshaw::Duration::from_std(WALK_WAIT_MARGIN).unwrap()
+                    + bradshaw::Duration::seconds(1)),
             )
             .await;
 
@@ -3467,8 +3467,8 @@ mod tests {
             &mapping,
             &none,
             &(Utc::now()
-                + chrono::Duration::from_std(WALK_WAIT_MARGIN).unwrap()
-                + chrono::Duration::seconds(1)),
+                + bradshaw::Duration::from_std(WALK_WAIT_MARGIN).unwrap()
+                + bradshaw::Duration::seconds(1)),
         )
         .await;
         assert!(matches!(result, Err(Error::NotReady(_))), "{:?}", result);

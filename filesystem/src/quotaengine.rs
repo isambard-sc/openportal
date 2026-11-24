@@ -8,7 +8,7 @@
 //! implements the `QuotaEngine` trait to provide backend-specific quota management.
 
 use anyhow::Result;
-use chrono::Utc;
+use bradshaw::Utc;
 use greatwestern::grammar::{ProjectMapping, UserMapping};
 use greatwestern::storage::{Quota, QuotaLimit, Volume};
 use serde::{Deserialize, Serialize};
@@ -67,7 +67,7 @@ impl QuotaEngineConfig {
         volume: &Volume,
         volume_config: &UserVolumeConfig,
         limit: &QuotaLimit,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         match self {
             QuotaEngineConfig::Lustre(config) => {
@@ -100,7 +100,7 @@ impl QuotaEngineConfig {
         volume: &Volume,
         volume_config: &ProjectVolumeConfig,
         limit: &QuotaLimit,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         match self {
             QuotaEngineConfig::Lustre(config) => {
@@ -132,7 +132,7 @@ impl QuotaEngineConfig {
         mapping: &UserMapping,
         volume: &Volume,
         volume_config: &UserVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         match self {
             QuotaEngineConfig::Lustre(config) => {
@@ -164,7 +164,7 @@ impl QuotaEngineConfig {
         mapping: &ProjectMapping,
         volume: &Volume,
         volume_config: &ProjectVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         match self {
             QuotaEngineConfig::Lustre(config) => {
@@ -198,7 +198,7 @@ impl QuotaEngineConfig {
         mapping: &UserMapping,
         volume: &Volume,
         volume_config: &UserVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<bool, Error> {
         match self {
             QuotaEngineConfig::Lustre(config) => {
@@ -220,7 +220,7 @@ impl QuotaEngineConfig {
         mapping: &ProjectMapping,
         volume: &Volume,
         volume_config: &ProjectVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<bool, Error> {
         match self {
             QuotaEngineConfig::Lustre(config) => {
@@ -243,7 +243,7 @@ impl QuotaEngineConfig {
         mapping: &UserMapping,
         volume: &Volume,
         volume_config: &UserVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<bool, Error> {
         match self {
             QuotaEngineConfig::Lustre(config) => {
@@ -265,7 +265,7 @@ impl QuotaEngineConfig {
         mapping: &ProjectMapping,
         volume: &Volume,
         volume_config: &ProjectVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<bool, Error> {
         match self {
             QuotaEngineConfig::Lustre(config) => {
@@ -289,7 +289,7 @@ impl QuotaEngineConfig {
         mapping: &UserMapping,
         volume: &Volume,
         volume_config: &UserVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         match self {
             QuotaEngineConfig::Lustre(config) => {
@@ -313,7 +313,7 @@ impl QuotaEngineConfig {
         mapping: &ProjectMapping,
         volume: &Volume,
         volume_config: &ProjectVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         match self {
             QuotaEngineConfig::Lustre(config) => {
@@ -337,7 +337,7 @@ impl QuotaEngineConfig {
         mapping: &UserMapping,
         volume: &Volume,
         volume_config: &UserVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<(), Error> {
         match self {
             QuotaEngineConfig::Lustre(config) => {
@@ -369,7 +369,7 @@ impl QuotaEngineConfig {
         mapping: &ProjectMapping,
         volume: &Volume,
         volume_config: &ProjectVolumeConfig,
-        expires: &chrono::DateTime<Utc>,
+        expires: &bradshaw::DateTime<Utc>,
     ) -> Result<(), Error> {
         match self {
             QuotaEngineConfig::Lustre(config) => {

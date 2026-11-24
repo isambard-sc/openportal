@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::Context;
-use chrono::{DateTime, Utc};
+use bradshaw::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use ts_rs::TS;
@@ -308,9 +308,9 @@ impl ProjectStorageReport {
             } else {
                 result.push(ProjectStorageReport {
                     project: self.project.clone(),
-                    generated_at: chrono::NaiveDateTime::new(
+                    generated_at: bradshaw::NaiveDateTime::new(
                         date.to_chrono(),
-                        chrono::NaiveTime::MIN,
+                        bradshaw::NaiveTime::MIN,
                     )
                     .and_utc(),
                     project_quotas: HashMap::new(),

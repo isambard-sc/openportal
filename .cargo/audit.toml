@@ -4,8 +4,9 @@
 # Configuration for `cargo audit` (run by `make audit` and by CI).
 #
 # Every entry in `ignore` below is a **temporary** suppression with a written
-# justification, not a permanent exception. All eight arrive through a single
-# dependency path and are cleared by one upgrade:
+# justification, not a permanent exception. Eight arrive through a single
+# dependency path and are cleared by one upgrade (the ninth, `chrono`, arrives
+# through `pyo3-stub-gen` too, and is explained at its entry):
 #
 #     openportal (python/) -> pyo3 0.27
 #                          -> pyo3-stub-gen 0.22 -> rustpython-parser 0.4 -> unic-* 0.9
@@ -25,31 +26,38 @@
 ignore = [
     # ---------------------------------------------------------------------------
     # pyo3 0.27.2 - two genuine vulnerabilities, neither reachable from this
-    # workspace. Audited 2026-08-04; see the analysis below each entry.
+    # workspace. Audited 2026-08-04, and again 2026-11-23 when `bradshaw` began
+    # to use pyo3; see the analysis below each entry.
     # ---------------------------------------------------------------------------
 
     # Out-of-bounds read in `nth` / `nth_back` for `PyList` and `PyTuple` iterators.
     #
-    # Not reachable. Only three crates in the tree depend on pyo3 - `openportal`
-    # (python/), `pyo3-stub-gen` and `numpy` - and none reaches the vulnerable code:
+    # Not reachable. Only four crates in the tree depend on pyo3 - `openportal`
+    # (python/), `bradshaw` (its optional `pyo3` feature), `pyo3-stub-gen` and
+    # `numpy` - and none reaches the vulnerable code:
     #
     #   * `openportal` never iterates a `PyList` or `PyTuple`. Its entire use of those
     #     types is `PyList::empty` (11 sites), `list.append` (11) and `list.into_any`
     #     (11) - it only ever *builds* lists. `PyTuple` is not used at all.
+    #   * `bradshaw` only builds `datetime.date` / `datetime.datetime` objects and
+    #     reads their attributes; it has no `PyList`, `PyTuple`, `nth`, `nth_back`,
+    #     `skip` or `step_by` (`bradshaw/src/python.rs`).
     #   * The indirect route matters too, because `Iterator::skip` and `step_by` call
     #     `nth` internally: there is no `skip`, `step_by`, `nth` or `nth_back` anywhere
     #     in `python/src/`.
     #   * `pyo3-stub-gen` has two `.nth()` calls, both on `str::Chars` rather than a
     #     pyo3 iterator (`generate/qualifier.rs:191`, `docgen/util.rs:37`).
     #   * `numpy` and `pyo3-stub-gen-derive` have none. The derive macro also emits no
-    #     code touching `PyList`/`PyTuple`, which matters because its output compiles
-    #     into the shipped `cdylib`.
+    #     code touching `PyList`/`PyTuple`. (Since 2026-11-23 the stub generator is
+    #     only built with `--features generate-stubs`, so its output no longer
+    #     reaches the shipped `cdylib` at all.)
     "RUSTSEC-2026-0176",
 
     # Missing `Sync` bound on `PyCFunction::new_closure` closures.
     #
     # Not reachable. `PyCFunction` and `new_closure` appear nowhere in
-    # `python/src/`, `pyo3-stub-gen`, `pyo3-stub-gen-derive` or `numpy`.
+    # `python/src/`, `bradshaw/src/`, `pyo3-stub-gen`, `pyo3-stub-gen-derive` or
+    # `numpy`.
     "RUSTSEC-2026-0177",
 
     # ---------------------------------------------------------------------------
@@ -59,7 +67,8 @@ ignore = [
     # All six arrive via `pyo3-stub-gen` -> `rustpython-parser`, and none is a
     # transitive dependency of any *agent*: they exist only on the Python-bindings
     # path, whose purpose is generating `.pyi` type stubs. Nothing in `op-portal`,
-    # `op-bridge` or any other agent links them.
+    # `op-bridge` or any other agent links them, and since 2026-11-23 nor does the
+    # Python extension module - they are built only with `--features generate-stubs`.
     #
     # These are cleared by the same `pyo3-stub-gen` upgrade, which is expected to
     # drop `rustpython-parser` entirely.
@@ -70,4 +79,21 @@ ignore = [
     "RUSTSEC-2025-0090", # unic-emoji-char
     "RUSTSEC-2025-0098", # unic-ucd-version
     "RUSTSEC-2025-0100", # unic-ucd-ident
+
+    # ---------------------------------------------------------------------------
+    # chrono - unmaintained, not vulnerable. Added 2026-11-23.
+    #
+    # The advisory is informational: it claims no defect and lists no patched
+    # version. OpenPortal no longer uses chrono - its dates and times are the
+    # `bradshaw` crate, on the standard library alone - so no agent links it,
+    # and nor does the Python extension module.
+    #
+    # It is still in the lockfile only because `pyo3-stub-gen` (all releases to
+    # 0.23.3) depends on it unconditionally, and that is only built when the
+    # `.pyi` stubs are generated (`--features generate-stubs`). Remove this
+    # entry when `pyo3-stub-gen` makes chrono optional, as it already has
+    # `jiff`, or when OpenPortal stops generating stubs with it - and at once if
+    # a vulnerability is ever reported against chrono.
+    # ---------------------------------------------------------------------------
+    "RUSTSEC-2026-0543", # chrono
 ]

@@ -237,7 +237,7 @@ struct Collected {
 /// reservation.
 ///
 async fn collect(options: &Options, nodes: &SlurmNodes) -> Result<Collected> {
-    let now = chrono::Utc::now();
+    let now = bradshaw::Utc::now();
     let mut collected = Collected {
         name_in_slurm: options.reservation.clone(),
         ..Default::default()
@@ -1010,7 +1010,7 @@ mod tests {
     const DAY_TWO: i64 = 1772409600;
 
     fn day(timestamp: i64) -> Date {
-        let Some(at) = chrono::DateTime::from_timestamp(timestamp, 0) else {
+        let Some(at) = bradshaw::DateTime::from_timestamp(timestamp, 0) else {
             unreachable!("the fixture's timestamps are representable");
         };
 

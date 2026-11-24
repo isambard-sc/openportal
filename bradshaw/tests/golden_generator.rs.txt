@@ -1,0 +1,120 @@
+// Generates golden vectors from chrono 0.4.45 for the bradshaw crate's tests.
+use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, TimeDelta, Timelike, Utc};
+use std::fmt::Write;
+
+const PATTERNS: &[&str] = &[
+    "%H:%M:%S UTC", "%Y-%m", "%Y-%m-%d %H", "%Y-%m-%d %H:%M UTC", "%Y-%m-%d %H:%M:%S UTC",
+    "%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%a, %d %b %Y %H:%M:%S GMT",
+];
+
+#[derive(serde::Serialize)]
+struct Secs { #[serde(with = "chrono::serde::ts_seconds")] t: DateTime<Utc> }
+
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self) -> u64 { self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); self.0 >> 11 }
+    fn range(&mut self, lo: i64, hi: i64) -> i64 { lo + (self.next() % ((hi - lo) as u64)) as i64 }
+}
+
+fn main() {
+    let mut out = String::new();
+    let mut rng = Rng(20261123);
+
+    // ---- timestamps: secs nanos -> everything about the DateTime<Utc>
+    let mut stamps: Vec<(i64, u32)> = vec![
+        (0, 0), (-1, 0), (-1, 999_999_999), (1, 1), (86399, 0), (86400, 0),
+        (951782400, 0), (951868799, 500_000_000), // 2000-02-29
+        (4107542400, 0), // 2100-02-28
+        (1_700_000_000, 123_000_000), (1_700_000_000, 123_456_000), (1_700_000_000, 123_456_789),
+        (1_700_000_000, 100), (1_700_000_000, 1_000), (1_700_000_000, 10_000_000),
+        (-2_208_988_800, 0), // 1900-01-01
+        (253_402_300_799, 999_999_999), // 9999-12-31T23:59:59.999999999
+        (-62_135_596_800, 0), // 0001-01-01
+    ];
+    for _ in 0..400 {
+        let secs = rng.range(-5_000_000_000, 8_000_000_000);
+        let nanos = match rng.next() % 5 { 0 => 0, 1 => (rng.next() % 1000) as u32 * 1_000_000, 2 => (rng.next() % 1_000_000) as u32 * 1000, 3 => (rng.next() % 1_000_000_000) as u32, _ => 0 };
+        stamps.push((secs, nanos));
+    }
+    for (secs, nanos) in stamps {
+        let t = DateTime::<Utc>::from_timestamp(secs, nanos).unwrap();
+        let mut fields = vec![
+            format!("{} {}", secs, nanos),
+            serde_json::to_string(&t).unwrap(),
+            t.to_string(),
+            format!("{:?}", t),
+            t.to_rfc3339(),
+            serde_json::to_string(&Secs { t }).unwrap(),
+            format!("{} {} {} {} {} {} {} {}", t.year(), t.month(), t.day(), t.hour(), t.minute(), t.second(), t.weekday(), t.timestamp_millis()),
+            t.date_naive().to_string(),
+            format!("{:?}", t.naive_utc()),
+            t.naive_utc().to_string(),
+            serde_json::to_string(&t.naive_utc()).unwrap(),
+        ];
+        for p in PATTERNS { fields.push(t.format(p).to_string()); }
+        writeln!(out, "T\t{}", fields.join("\t")).unwrap();
+    }
+
+    // ---- dates: days since 1970-01-01
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+    let mut days: Vec<i64> = vec![0, -1, 1, 10957, 11016, 11017, 47540, -25567, -719162, 2932896];
+    for _ in 0..300 { days.push(rng.range(-800_000, 3_000_000)); }
+    for d in days {
+        let date = epoch + TimeDelta::days(d);
+        let fields = vec![
+            d.to_string(),
+            date.to_string(),
+            format!("{:?}", date),
+            serde_json::to_string(&date).unwrap(),
+            format!("{} {} {} {} {} {}", date.year(), date.month(), date.day(), date.weekday(), date.ordinal(), date.weekday().num_days_from_monday()),
+            date.succ_opt().map(|d| d.to_string()).unwrap_or("NONE".into()),
+            date.pred_opt().map(|d| d.to_string()).unwrap_or("NONE".into()),
+            date.format("%Y-%m").to_string(),
+            date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp().to_string(),
+        ];
+        writeln!(out, "D\t{}", fields.join("\t")).unwrap();
+    }
+
+    // ---- durations: secs nanos (as TimeDelta)
+    let mut deltas: Vec<(i64, i64)> = vec![(0,0),(1,0),(-1,0),(3600,0),(86400,0),(0,1),(0,-1),(1,500_000_000),(-1,-500_000_000),(90061,0),(-90061,0),(0,1_000)];
+    for _ in 0..100 { deltas.push((rng.range(-10_000_000_000, 10_000_000_000), 0)); deltas.push((rng.range(-100_000, 100_000), rng.range(-999_999_999, 999_999_999))); }
+    for (s, n) in deltas {
+        let d = TimeDelta::seconds(s) + TimeDelta::nanoseconds(n);
+        writeln!(out, "U\t{} {}\t{}\t{} {} {} {} {}\t{}", s, n, d, d.num_days(), d.num_hours(), d.num_minutes(), d.num_seconds(), d.num_milliseconds(),
+            d.to_std().map(|x| format!("{} {}", x.as_secs(), x.subsec_nanos())).unwrap_or("ERR".into())).unwrap();
+    }
+
+    // ---- parsing: RFC 3339 via serde (DateTime<Utc>), and RFC 2822
+    for s in [
+        "2026-11-23T10:00:00Z", "2026-11-23T10:00:00.5Z", "2026-11-23T10:00:00.123456789Z", "2026-11-23T10:00:00+01:00",
+        "2026-11-23T10:00:00-05:30", "2026-11-23t10:00:00z", "2026-11-23 10:00:00Z", "2026-02-29T00:00:00Z",
+        "2024-02-29T23:59:59.999Z", "1969-12-31T23:59:59Z", "2026-11-23T10:00:00", "2026-11-23", "2026-13-01T00:00:00Z",
+        "2026-11-23T24:00:00Z", "2026-11-23T10:00:60Z", "2026-11-23T10:00:00.Z", "2026-11-23T10:00:00.1234567891Z",
+        "not a date", "", "2026-11-23T10:00:00+0100", "+12026-11-23T10:00:00Z",
+    ] {
+        let parsed = serde_json::from_str::<DateTime<Utc>>(&format!("\"{}\"", s)).map(|t| format!("{} {}", t.timestamp(), t.timestamp_subsec_nanos())).unwrap_or("ERR".into());
+        writeln!(out, "P3339\t{}\t{}", s, parsed).unwrap();
+    }
+    for s in [
+        "Mon, 03 Aug 2026 12:00:00 GMT", "Mon, 3 Aug 2026 12:00:00 GMT", "03 Aug 2026 12:00:00 GMT", "Mon, 03 Aug 2026 12:00:00 +0100",
+        "Mon, 03 Aug 2026 12:00:00 -0000", "Mon, 03 Aug 2026 12:00:00 UT", "Mon, 03 Aug 2026 12:00:00 EST", "Mon, 03 Aug 2026 12:00 GMT",
+        "Tue, 03 Aug 2026 12:00:00 GMT", "Mon, 03 Foo 2026 12:00:00 GMT", "Mon, 32 Aug 2026 12:00:00 GMT", "Mon, 03 Aug 2026 25:00:00 GMT",
+        "Mon, 03 Aug 2026 12:00:00", "", "garbage", "Mon,03 Aug 2026 12:00:00 GMT", "mon, 03 aug 2026 12:00:00 gmt",
+        "Mon, 03 Aug 2026 12:00:00 Z", "Mon, 03 Aug 2026 12:00:00 PDT", "Sun, 29 Feb 2032 00:00:00 GMT",
+    ] {
+        let parsed = DateTime::parse_from_rfc2822(s).map(|t| t.with_timezone(&Utc).timestamp().to_string()).unwrap_or("ERR".into());
+        writeln!(out, "P2822\t{}\t{}", s, parsed).unwrap();
+    }
+
+    // ---- parse_from_str for the two patterns we use
+    for s in ["2026-11-23", "2026-1-3", "2026-02-30", "+2026-11-23", "-0001-01-01", "12026-11-23", "2026-11-23 ", " 2026-11-23", "2026/11/23", "abc"] {
+        let parsed = NaiveDate::parse_from_str(s, "%Y-%m-%d").map(|d| d.to_string()).unwrap_or("ERR".into());
+        writeln!(out, "PD\t{}\t{}", s, parsed).unwrap();
+    }
+    for s in ["2026-11-23 10", "2026-11-23 7", "2026-11-23 24", "2026-11-23", "2026-11-23 10:00", "2026-11-23 10 ", "2026-11-23  10"] {
+        let parsed = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H").map(|d| d.to_string()).unwrap_or("ERR".into());
+        writeln!(out, "PH\t{}\t{}", s, parsed).unwrap();
+    }
+    let _ = Timelike::hour(&Utc::now());
+    print!("{}", out);
+}

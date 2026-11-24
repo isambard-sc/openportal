@@ -120,7 +120,7 @@ enum ConnectionStatus {
 #[derive(Debug, Clone)]
 struct ConnectionState {
     status: ConnectionStatus,
-    last_activity: chrono::DateTime<chrono::Utc>,
+    last_activity: bradshaw::DateTime<bradshaw::Utc>,
     /// Nonce to assign to the *next* ongoing message this side sends -
     /// see `docs/plans/replay-protection-design.md`. Reset for free every
     /// time a fresh `ConnectionState` is created (i.e. every new physical
@@ -136,7 +136,7 @@ impl Default for ConnectionState {
     fn default() -> Self {
         ConnectionState {
             status: ConnectionStatus::None,
-            last_activity: chrono::Utc::now(),
+            last_activity: bradshaw::Utc::now(),
             next_nonce: 0,
             replay_window: ReplayWindow::new(),
         }
@@ -165,18 +165,18 @@ impl ConnectionState {
 
     fn set_error(&mut self) {
         self.status = ConnectionStatus::Error;
-        self.last_activity = chrono::Utc::now();
+        self.last_activity = bradshaw::Utc::now();
     }
 
     fn set_disconnected(&mut self) {
         self.status = ConnectionStatus::Disconnected;
-        self.last_activity = chrono::Utc::now();
+        self.last_activity = bradshaw::Utc::now();
     }
 
     fn set_connecting(&mut self) -> Result<(), Error> {
         if self.status == ConnectionStatus::None {
             self.status = ConnectionStatus::Connecting;
-            self.last_activity = chrono::Utc::now();
+            self.last_activity = bradshaw::Utc::now();
             Ok(())
         } else {
             Err(Error::BusyLine(format!(
@@ -189,7 +189,7 @@ impl ConnectionState {
     fn set_connected(&mut self) -> Result<(), Error> {
         if self.status == ConnectionStatus::Connecting {
             self.status = ConnectionStatus::Connected;
-            self.last_activity = chrono::Utc::now();
+            self.last_activity = bradshaw::Utc::now();
             Ok(())
         } else {
             Err(Error::BusyLine(format!(
@@ -200,7 +200,7 @@ impl ConnectionState {
     }
 
     fn register_activity(&mut self) {
-        self.last_activity = chrono::Utc::now();
+        self.last_activity = bradshaw::Utc::now();
     }
 }
 
@@ -535,7 +535,7 @@ impl Connection {
             }
         };
 
-        if last_activity < chrono::Utc::now() - chrono::Duration::seconds(300) {
+        if last_activity < bradshaw::Utc::now() - bradshaw::Duration::seconds(300) {
             tracing::warn!(
                 "*WATCHDOG* Connection to peer: {}@{} has not been active for over 300 seconds - disconnecting",
                 self.name(),

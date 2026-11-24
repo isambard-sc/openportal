@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.95.0] - 2026-11-24
+
 ### Added
 
 - **How OpenPortal works** ([docs/architecture/](docs/architecture/README.md)):
@@ -128,7 +130,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
     stubs are generated (`--features generate-stubs`, as CI and `stub_gen`
     already do); neither the agents nor the Python extension module link it.
     The generated stubs are unchanged.
-
 - **Breaking, for code built on the Rust crate, the Python module or the Java
   client** (the wire format is unchanged):
   - **A report needs a unit before it holds figures.**
@@ -144,7 +145,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
     figures that really are time.
   - **Scaling a `Usage` rounds to the nearest count** (ties to even) rather than
     truncating, which always rounded down.
-
 - **Breaking, for sites using Lustre default quotas: `unassigned_project_ids`
   no longer has a default.** It was `[0, 1]`, which assumed every site tags
   its roots with project ID `1`. It must now be set, and the agent refuses to
@@ -173,7 +173,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - **An `Hour` can be read back.** An `Hour` was serialised as `"2026-11-23 10"`,
   but its parser used chrono's `"%Y-%m-%d %H"`, which chrono cannot parse
   without the minutes, so deserialising an `Hour` always failed.
-
 - **`Uuid.from_string` raises `ValueError` for an invalid UUID** in the Python
   module. It unwrapped the parse, and release builds abort on a panic, so a
   malformed string ended the whole Python process.
@@ -183,7 +182,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `isambard-sc/openportal`, without a redundant `homepage`; and the Python
   bindings now inherit the workspace lints like every other crate, which
   removed four unused dependencies.
-
 - **The filesystem agent's log no longer contradicts itself about an existing
   directory.** When a directory it was asked to create was already there with
   a different owner, group or mode, it logged an error for each difference and
@@ -192,7 +190,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   logs one warning saying so and listing how it differs, or that it matches.
   With `exec-prefix` set the same check is made through the prefix; before, it
   was not made at all.
-
 - **Each Lustre quota engine runs its own `lfs` command.** The pool of `lfs`
   runners was global and held the command, and each engine replaced it when
   it was set up. With two Lustre engines configured with different
@@ -200,7 +197,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   the wrong filesystem. Each `lfs_command` now has its own pool, sized by its
   engine's `max_runners`. Waiting for a free runner now waits until the job
   expires, without polling.
-
 - **A Lustre quota is no longer reported as set while its directories are
   still being walked, and a walk that is interrupted is finished.** Giving an
   existing directory tree its quota ID (`lfs project -srp`) can take hours.
@@ -236,7 +232,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   - **A project directory still being walked does not hold up a new member's
     own directories,** which are created regardless; the job reports "not
     ready" until both are done.
-
 - **The site portal API says what happens to a `get_award` reply.** A new §4.1.3
   shows what the reference awarding portal, `waldur-mastermind`, does with
   each field, so a site developer can tell which fields are worth filling in:
@@ -2963,6 +2958,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.95.0]: https://github.com/isambard-sc/openportal/releases/tag/0.95.0
 [0.94.2]: https://github.com/isambard-sc/openportal/releases/tag/0.94.2
 [0.94.1]: https://github.com/isambard-sc/openportal/releases/tag/0.94.1
 [0.94.0]: https://github.com/isambard-sc/openportal/releases/tag/0.94.0
